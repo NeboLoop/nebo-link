@@ -1,0 +1,18 @@
+[package]
+name = "nebo-link"
+description = "Link an OpenClaw or Hermes agent to NeboAI: reach and manage it from your phone and the web."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nebo-link"
+path = "src/main.rs"
+
+[dependencies]
+nebo-runtimes = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

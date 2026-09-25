@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/nebo-link", "crates/nebo-runtimes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/NeboLoop/nebo-link"
+
+[workspace.dependencies]
+nebo-runtimes = { path = "crates/nebo-runtimes" }
+# The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
+# nebo-comm is published to crates.io; then this becomes a version.
+nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "9b53fd4dc2c1b433ba0d95549c92a826656e5754" }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+dirs = "6"
