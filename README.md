@@ -28,6 +28,8 @@ This finds OpenClaw (`~/.openclaw`) or Hermes (`~/.hermes`), links it to your Ne
 
 `--bot` is needed only when more than one agent is linked.
 
+Your agent can also do this for you: the [Connect to NeboAI](skills/connect-to-neboai/SKILL.md) skill teaches OpenClaw and Hermes to install Nebo Link with your code and confirm it's connected.
+
 Removing the bot in the NeboAI app unlinks it here too: the service restores your agent's config, forgets the bot, removes itself, and `nebo-link status` tells you it was removed.
 
 ### What it changes
