@@ -11,7 +11,7 @@ use nebo_link::credentials::Credentials;
 use nebo_link::error::{Error, Result};
 use nebo_link::install::{runtime_key, runtime_name};
 use nebo_link::state::{Root, STATUS_EVERY};
-use nebo_link::{link, run, service};
+use nebo_link::{link, run, service, update};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -67,6 +67,8 @@ enum Command {
         #[arg(long)]
         bot: Option<String>,
     },
+    /// Update nebo-link to the latest release and restart the linked bots.
+    Update,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -132,6 +134,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             run::run(&root, &bot).await
         }
         Command::Status => status(&root),
+        Command::Update => {
+            let _log = init_logging(None);
+            self_update(&root).await
+        }
         Command::Unlink { bot } => {
             let _log = init_logging(None);
             let link = root.select(bot.as_deref())?;
@@ -196,6 +202,31 @@ async fn pair(root: &Root, code: &str, runtime: Option<Runtime>, name: Option<St
             "Restart {} to finish: {problem}\nIf you started it yourself in a terminal, stop it and start it again.",
             runtime_name(link.runtime)
         );
+    }
+    Ok(())
+}
+
+/// `nebo-link update`: replace the binary with the latest verified release,
+/// then restart every bot's service so each runs it.
+async fn self_update(root: &Root) -> Result<()> {
+    let feed = update::official().ok_or_else(|| Error::Message(update::NO_KEY.into()))?;
+    if let Some(why) = update::not_self_updating() {
+        return Err(Error::Message(why.into()));
+    }
+    let _lock = update::lock(root).await?;
+    let Some(downloaded) = update::fetch(&feed, update::VERSION).await? else {
+        println!("nebo-link is up to date ({}).", update::VERSION);
+        return Ok(());
+    };
+    update::replace(&downloaded, root)?;
+    println!("Updated nebo-link {} → {}.", update::VERSION, downloaded.version());
+    for link in root.links()? {
+        if !service::installed(&link.bot_id) {
+            continue;
+        }
+        if let Err(e) = service::restart(&link.bot_id) {
+            println!("{} is still running the old version: {e}", link.name);
+        }
     }
     Ok(())
 }
@@ -343,6 +374,8 @@ mod tests {
             Some(Command::Models { state: Toggle::Off, bot: None })
         ));
         assert!(parse(&["models", "maybe"]).is_err());
+        assert!(matches!(parse(&["update"]).unwrap().command, Some(Command::Update)));
+        assert!(parse(&["update", "--bot", "b1"]).is_err(), "update is for the binary, not a bot");
     }
 
     #[test]

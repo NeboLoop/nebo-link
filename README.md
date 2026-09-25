@@ -24,6 +24,7 @@ This finds OpenClaw (`~/.openclaw`) or Hermes (`~/.hermes`), links it to your Ne
 | `nebo-link models on\|off [--bot <id>]` | Points your agent's models at NeboAI (no API keys to paste), or restores the provider it had. |
 | `nebo-link logs [--bot <id>] [--lines N]` | Prints the service's recent log. |
 | `nebo-link unlink [--bot <id>]` | Restores your agent's config exactly as it was, removes the service and forgets the bot. |
+| `nebo-link update` | Updates nebo-link to the latest signed release and restarts your linked bots. The service also updates itself daily. |
 | `nebo-link run --bot <id>` | Runs one bot's connection in the foreground; this is what the service runs. |
 
 `--bot` is needed only when more than one agent is linked.
