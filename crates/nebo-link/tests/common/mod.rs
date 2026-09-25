@@ -87,10 +87,14 @@ async fn accept_all(path: &str) -> (String, mpsc::UnboundedReceiver<Ws>) {
     (url, rx)
 }
 
-/// Answers CONNECT: AUTH_OK, or AUTH_FAIL with `reason`.
+/// The token the fake hub rotates to on every AUTH_OK, as the real hub does.
+pub const ROTATED_TOKEN: &str = "rotated-bot-token";
+
+/// Answers CONNECT: AUTH_OK carrying a rotated token, or AUTH_FAIL with
+/// `reason`.
 pub async fn answer(ws: &mut Ws, refused: Option<&str>) {
     let (frame_type, payload) = match refused {
-        None => (frame::TYPE_AUTH_OK, serde_json::json!({ "ok": true })),
+        None => (frame::TYPE_AUTH_OK, serde_json::json!({ "ok": true, "token": ROTATED_TOKEN })),
         Some(reason) => (frame::TYPE_AUTH_FAIL, serde_json::json!({ "ok": false, "reason": reason })),
     };
     let data = frame::encode(
