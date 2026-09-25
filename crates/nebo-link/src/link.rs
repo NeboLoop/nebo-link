@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::install::{self, runtime_key, runtime_name};
 use crate::janus::{self, Janus};
 use crate::service;
-use crate::state::{BotDir, Link, ModelsEndpoint, Root};
+use crate::state::{BotDir, Link, ModelsEndpoint, Removed, Root, write_json};
 
 /// The bot's purpose as the hub records it.
 const PURPOSE: &str = "linked";
@@ -70,6 +70,10 @@ pub async fn pair(
         },
     };
     dir.save(&link)?;
+    // Linked again: what `status` said about its removal no longer applies.
+    for removed in root.removed()?.into_iter().filter(|r| r.home == link.home) {
+        root.bot(&removed.bot_id).remove()?;
+    }
 
     let finish = async {
         let token_in = Credentials::open(&dir, &bot_id).save(&resp.connection_token)?;
@@ -160,24 +164,44 @@ pub async fn set_models(dir: &BotDir, link: &mut Link, janus: &Janus, enabled: b
     })
 }
 
+/// Who unlinks a bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum By {
+    /// The owner, with `nebo-link unlink`.
+    Owner,
+    /// The bot's own service, because NeboAI removed the bot.
+    Revocation,
+}
+
 /// What unlinking did.
 pub struct Unlinked {
     /// Settings the owner changed since the link set them, left as they are.
     pub conflicts: Vec<String>,
     /// Why the runtime's config could not be restored, when it could not.
     pub not_restored: Option<String>,
+    /// Why the runtime could not be restarted onto its restored config, when
+    /// it could not.
+    pub not_restarted: Option<String>,
     /// Why the token could not be removed from the keychain, when it could not.
     pub token_kept: Option<String>,
 }
 
 /// Stops and removes the bot's service, restores the runtime's config,
 /// and forgets the bot's credentials and state.
-pub async fn unlink(root: &Root, link: &Link) -> Result<Unlinked> {
+///
+/// The owner's unlink stops the service first, so it can't dial NeboAI (and
+/// rotate the token) while the config is restored. On revocation this
+/// process is the service: removing the service can end it, so that goes
+/// last, after the record `nebo-link status` reports the removal from.
+pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
     let dir = root.bot(&link.bot_id);
-    service::uninstall(&link.bot_id)?;
+    if by == By::Owner {
+        service::uninstall(&link.bot_id, false)?;
+    }
     let mut unlinked = Unlinked {
         conflicts: Vec::new(),
         not_restored: None,
+        not_restarted: None,
         token_kept: None,
     };
     match install::find(link) {
@@ -189,8 +213,10 @@ pub async fn unlink(root: &Root, link: &Link) -> Result<Unlinked> {
                 unlinked.conflicts.extend(outcome.conflicts);
                 restart = restart.or(outcome.restart);
             }
-            if let Some(command) = restart {
-                install::restart(&command).await?;
+            if let Some(command) = restart
+                && let Err(e) = install::restart(&command).await
+            {
+                unlinked.not_restarted = Some(e.to_string());
             }
         }
         Err(e) => unlinked.not_restored = Some(e.to_string()),
@@ -199,6 +225,19 @@ pub async fn unlink(root: &Root, link: &Link) -> Result<Unlinked> {
         unlinked.token_kept = Some(e.to_string());
     }
     dir.remove()?;
+    if by == By::Revocation {
+        dir.create()?;
+        write_json(
+            &dir.removed_file(),
+            &Removed {
+                bot_id: link.bot_id.clone(),
+                name: link.name.clone(),
+                runtime: link.runtime,
+                home: link.home.clone(),
+            },
+        )?;
+        service::uninstall(&link.bot_id, true)?;
+    }
     Ok(unlinked)
 }
 

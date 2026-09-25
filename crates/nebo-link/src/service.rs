@@ -53,9 +53,14 @@ pub fn install(spec: &Spec) -> Result<()> {
     platform::install(spec)
 }
 
-/// Stops and removes the service. Removing one that isn't installed is fine.
-pub fn uninstall(bot_id: &str) -> Result<()> {
-    platform::uninstall(bot_id)
+/// Removes and stops the service. Removing one that isn't installed is fine.
+///
+/// `itself`: this process is the service, removing itself because NeboAI
+/// removed its bot. Stopping the service may end this process, so its
+/// definition is removed before it is stopped, and on Windows it is not
+/// stopped at all: this process exits on its own once the task is deleted.
+pub fn uninstall(bot_id: &str, itself: bool) -> Result<()> {
+    platform::uninstall(bot_id, itself)
 }
 
 /// Whether the service is installed.
@@ -214,12 +219,12 @@ mod platform {
         run("launchctl", &["bootstrap", &domain(), &plist.display().to_string()])
     }
 
-    pub fn uninstall(bot_id: &str) -> Result<()> {
-        let _ = run("launchctl", &["bootout", &format!("{}/{}", domain(), name(bot_id))]);
-        match definition(bot_id) {
-            Some(plist) => remove(&plist),
-            None => Ok(()),
+    pub fn uninstall(bot_id: &str, _itself: bool) -> Result<()> {
+        if let Some(plist) = definition(bot_id) {
+            remove(&plist)?;
         }
+        let _ = run("launchctl", &["bootout", &format!("{}/{}", domain(), name(bot_id))]);
+        Ok(())
     }
 }
 
@@ -268,18 +273,21 @@ mod platform {
         Ok(())
     }
 
-    pub fn uninstall(bot_id: &str) -> Result<()> {
+    pub fn uninstall(bot_id: &str, _itself: bool) -> Result<()> {
         let unit = name(bot_id);
         if is_root() {
-            let _ = run("systemctl", &["disable", "--now", &unit]);
+            let _ = run("systemctl", &["disable", &unit]);
             remove(&system_unit(bot_id))?;
-            return run("systemctl", &["daemon-reload"]);
+            run("systemctl", &["daemon-reload"])?;
+            let _ = run("systemctl", &["stop", &unit]);
+            return Ok(());
         }
-        let _ = run("systemctl", &["--user", "disable", "--now", &unit]);
+        let _ = run("systemctl", &["--user", "disable", &unit]);
         if let Some(path) = user_unit(bot_id) {
             remove(&path)?;
         }
         let _ = run("systemctl", &["--user", "daemon-reload"]);
+        let _ = run("systemctl", &["--user", "stop", &unit]);
         Ok(())
     }
 }
@@ -312,9 +320,11 @@ mod platform {
         run("schtasks", &["/Run", "/TN", &task])
     }
 
-    pub fn uninstall(bot_id: &str) -> Result<()> {
+    pub fn uninstall(bot_id: &str, itself: bool) -> Result<()> {
         let task = name(bot_id);
-        let _ = run("schtasks", &["/End", "/TN", &task]);
+        if !itself {
+            let _ = run("schtasks", &["/End", "/TN", &task]);
+        }
         let _ = run("schtasks", &["/Delete", "/TN", &task, "/F"]);
         match definition(bot_id) {
             Some(path) => remove(&path),

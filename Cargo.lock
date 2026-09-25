@@ -1297,7 +1297,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nebo-comm"
 version = "0.15.0"
-source = "git+https://github.com/NeboLoop/nebo?rev=41809a51d3ca15bfcdad51c7c49a8f7822d55a31#41809a51d3ca15bfcdad51c7c49a8f7822d55a31"
+source = "git+https://github.com/NeboLoop/nebo?rev=ed5b62757dd715d9226668b9ac0857ebe511dab9#ed5b62757dd715d9226668b9ac0857ebe511dab9"
 dependencies = [
  "async-trait",
  "futures",

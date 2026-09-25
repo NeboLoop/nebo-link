@@ -6,6 +6,8 @@
 //!   journal.json   every config change made to the runtime, with prior values
 //!   offsets.json   acked hub stream offsets
 //!   status.json    the running service's connection state
+//!   removed.json   only this, once NeboAI removed the bot and the service
+//!                  unlinked it (what `nebo-link status` reports)
 //!   token          the bot token, only where no OS keychain is available (0600)
 //!   logs/          rotating service logs
 //! ```
@@ -67,6 +69,24 @@ impl Root {
         Ok(links)
     }
 
+    /// The bots NeboAI removed and their services unlinked, ordered by name.
+    pub fn removed(&self) -> Result<Vec<Removed>> {
+        let entries = match std::fs::read_dir(&self.0) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::io(&self.0, e)),
+        };
+        let mut removed = Vec::new();
+        for entry in entries.flatten() {
+            let file = BotDir(entry.path()).removed_file();
+            if file.is_file() {
+                removed.push(read_json::<Removed>(&file)?);
+            }
+        }
+        removed.sort_by(|a, b| a.name.cmp(&b.name).then(a.bot_id.cmp(&b.bot_id)));
+        Ok(removed)
+    }
+
     /// The link `bot` names, or the only one when `bot` is `None`.
     pub fn select(&self, bot: Option<&str>) -> Result<Link> {
         let links = self.links()?;
@@ -112,6 +132,9 @@ impl BotDir {
     }
     pub fn status_file(&self) -> PathBuf {
         self.0.join("status.json")
+    }
+    pub fn removed_file(&self) -> PathBuf {
+        self.0.join("removed.json")
     }
     pub fn token_file(&self) -> PathBuf {
         self.0.join("token")
@@ -185,6 +208,18 @@ impl Link {
     pub fn base_path(&self) -> String {
         format!("/t/{}", self.bot_id)
     }
+}
+
+/// A bot NeboAI removed, kept after its service unlinked it so
+/// `nebo-link status` can say what happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Removed {
+    pub bot_id: String,
+    pub name: String,
+    pub runtime: Runtime,
+    /// The installation it linked; linking it again clears this record.
+    pub home: PathBuf,
 }
 
 /// The local NeboAI models endpoint the runtime is pointed at when models
