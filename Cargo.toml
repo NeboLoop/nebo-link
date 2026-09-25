@@ -12,7 +12,7 @@ repository = "https://github.com/NeboLoop/nebo-link"
 nebo-runtimes = { path = "crates/nebo-runtimes" }
 # The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
 # nebo-comm is published to crates.io; then this becomes a version.
-nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "9b53fd4dc2c1b433ba0d95549c92a826656e5754" }
+nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "41809a51d3ca15bfcdad51c7c49a8f7822d55a31" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -27,3 +27,15 @@ dirs = "6"
 json5 = "1"
 yaml_serde = "0.10"
 tempfile = "3"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+libc = "0.2"
+getrandom = "0.2"
+uuid = { version = "1", features = ["v4"] }
+tracing-appender = "0.2"
+tokio-tungstenite = "0.26"
+yamux = "0.13"
+tokio-util = { version = "0.7", features = ["compat"] }
