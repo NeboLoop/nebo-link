@@ -37,7 +37,12 @@ libc = "0.2"
 getrandom = "0.2"
 uuid = { version = "1", features = ["v4"] }
 tracing-appender = "0.2"
-tokio-tungstenite = "0.26"
+# nebo-comm dials the hub with tokio-tungstenite using the OS trust store.
+# A background service can't always read it (a macOS launchd agent got "no
+# native root CA certificates found"; minimal Linux images have none), so
+# the bundled Mozilla roots back it up. The OS store is still used when it
+# can be read.
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 yamux = "0.13"
 tokio-util = { version = "0.7", features = ["compat"] }
 base64 = "0.22"

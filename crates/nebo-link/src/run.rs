@@ -201,7 +201,11 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
     tokio::pin!(shutdown);
     let mut backoff = FIRST_BACKOFF;
     loop {
-        let delay = match plugin.connect(connect_config(&link, &token_rx.borrow())).await {
+        // Built before the match: a `borrow()` in the scrutinee would hold the
+        // token's read lock through the arms, and `send_replace` below would
+        // wait on it forever (the hub rotates the token on every connect).
+        let config = connect_config(&link, &token_rx.borrow());
+        let delay = match plugin.connect(config).await {
             Ok(()) => {
                 // The hub rotated the token and the old one is dead: save the
                 // new one before anything else can dial with it.

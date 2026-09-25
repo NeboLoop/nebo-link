@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{FakeHub, Linked, PATIENCE, answer};
+use common::{FakeHub, Linked, PATIENCE, ROTATED_TOKEN, answer};
 use futures::SinkExt;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
@@ -22,8 +22,11 @@ fn a_tunnel_closed_as_revoked_unlinks() {
         let hub_side = async {
             let mut comms = hub.next_connect().await;
             answer(&mut comms, None).await;
+            // The tunnel only dials once the rotated token is saved.
             let mut tunnel = hub.next_tunnel().await;
             linked.assert_linked();
+            let saved = std::fs::read_to_string(linked.root.bot(&linked.bot_id).token_file()).unwrap();
+            assert_eq!(saved.trim(), ROTATED_TOKEN);
 
             tunnel
                 .send(Message::Close(Some(CloseFrame {
