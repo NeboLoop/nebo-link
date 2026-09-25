@@ -63,6 +63,11 @@ pub fn uninstall(bot_id: &str, itself: bool) -> Result<()> {
     platform::uninstall(bot_id, itself)
 }
 
+/// Restarts the service, so it runs the binary now on disk.
+pub fn restart(bot_id: &str) -> Result<()> {
+    platform::restart(bot_id)
+}
+
 /// Whether the service is installed.
 pub fn installed(bot_id: &str) -> bool {
     platform::definition(bot_id).is_some_and(|path| path.exists())
@@ -219,6 +224,10 @@ mod platform {
         run("launchctl", &["bootstrap", &domain(), &plist.display().to_string()])
     }
 
+    pub fn restart(bot_id: &str) -> Result<()> {
+        run("launchctl", &["kickstart", "-k", &format!("{}/{}", domain(), name(bot_id))])
+    }
+
     pub fn uninstall(bot_id: &str, _itself: bool) -> Result<()> {
         if let Some(plist) = definition(bot_id) {
             remove(&plist)?;
@@ -273,6 +282,14 @@ mod platform {
         Ok(())
     }
 
+    pub fn restart(bot_id: &str) -> Result<()> {
+        let unit = name(bot_id);
+        if is_root() {
+            return run("systemctl", &["restart", &unit]);
+        }
+        run("systemctl", &["--user", "restart", &unit])
+    }
+
     pub fn uninstall(bot_id: &str, _itself: bool) -> Result<()> {
         let unit = name(bot_id);
         if is_root() {
@@ -317,6 +334,14 @@ mod platform {
         }
         std::fs::write(&path, bytes).map_err(|e| Error::io(&path, e))?;
         run("schtasks", &["/Create", "/TN", &task, "/XML", &path.display().to_string(), "/F"])?;
+        run("schtasks", &["/Run", "/TN", &task])
+    }
+
+    pub fn restart(bot_id: &str) -> Result<()> {
+        let task = name(bot_id);
+        // /Run is ignored while the task runs (MultipleInstancesPolicy
+        // IgnoreNew), so end it first.
+        let _ = run("schtasks", &["/End", "/TN", &task]);
         run("schtasks", &["/Run", "/TN", &task])
     }
 

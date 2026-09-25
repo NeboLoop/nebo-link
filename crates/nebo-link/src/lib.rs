@@ -13,3 +13,4 @@ pub mod proxy;
 pub mod run;
 pub mod service;
 pub mod state;
+pub mod update;

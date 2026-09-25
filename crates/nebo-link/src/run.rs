@@ -11,6 +11,10 @@
 //! A bot NeboAI removed is refused for good: CONNECT answers that it was
 //! revoked, or the hub closes its tunnel with 1008 "revoked". The service
 //! then stops retrying and unlinks it the way `nebo-link unlink` does.
+//!
+//! Once a day the service checks for a newer nebo-link; when one is out it
+//! hands back the bot's lease, disconnects and becomes the new release in
+//! place (see `update`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +32,7 @@ use crate::link::{self, By, ModelsChange};
 use crate::offsets::FileOffsets;
 use crate::proxy::{self, Control, Target};
 use crate::state::{BotDir, Link, Root, STATUS_EVERY, Status};
+use crate::update::{self, Staged};
 
 /// Longest wait between failed connection attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
@@ -106,6 +111,11 @@ impl Control for Service {
 }
 
 pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
+    // The binary this service was started as, read before anything can
+    // replace it: an update restarts into what is at this path.
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| Error::Message(format!("could not locate the nebo-link binary: {e}")))?;
     let dir = root.bot(bot_id);
     let link = dir.load()?;
     let credentials = Credentials::open(&dir);
@@ -172,7 +182,19 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
             tokio::time::sleep(STATUS_EVERY).await;
         }
     });
-    tracing::info!(bot = %link.bot_id, runtime = runtime_key(link.runtime), "nebo-link started");
+    tracing::info!(
+        bot = %link.bot_id,
+        runtime = runtime_key(link.runtime),
+        version = update::VERSION,
+        "nebo-link started"
+    );
+    let (staged_tx, mut staged) = tokio::sync::mpsc::channel(1);
+    match update::official() {
+        Some(feed) => {
+            tokio::spawn(update::watch(root.clone(), exe.clone(), feed, staged_tx));
+        }
+        None => tracing::info!("this build can't update itself (no release key)"),
+    }
 
     let plugin = NeboAIPlugin::new(Arc::new(FileOffsets::open(dir.offsets_file())));
     let shutdown = shutdown_signal();
@@ -194,7 +216,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
                 service.write_status();
                 tracing::info!("connected to NeboAI");
                 backoff = FIRST_BACKOFF;
-                let ended = connected(&plugin, &mut shutdown, &revoked).await;
+                let ended = connected(&plugin, &mut shutdown, &revoked, &mut staged).await;
                 online_tx.send_replace(false);
                 service.write_status();
                 match ended {
@@ -205,6 +227,13 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
                         return stopped(&dir);
                     }
                     Ended::Revoked => break,
+                    Ended::Update(next) => {
+                        lease::process().release();
+                        let _ = plugin.disconnect().await;
+                        let e = update::restart(next, root, &exe);
+                        tracing::error!(error = %e, "could not restart as the new version");
+                        Duration::ZERO
+                    }
                 }
             }
             Err(CommError::Revoked) => break,
@@ -222,6 +251,10 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = &mut shutdown => return stopped(&dir),
+            Some(next) = staged.recv() => {
+                let e = update::restart(next, root, &exe);
+                tracing::error!(error = %e, "could not restart as the new version");
+            }
         }
     }
 
@@ -250,6 +283,8 @@ enum Ended {
     Shutdown,
     /// NeboAI removed the bot.
     Revoked,
+    /// A newer nebo-link is ready to run.
+    Update(Staged),
 }
 
 /// Waits while connected.
@@ -257,6 +292,7 @@ async fn connected(
     plugin: &NeboAIPlugin,
     shutdown: &mut std::pin::Pin<&mut impl Future<Output = ()>>,
     revoked: &tokio::sync::Notify,
+    staged: &mut tokio::sync::mpsc::Receiver<Staged>,
 ) -> Ended {
     let tick = STATUS_EVERY;
     loop {
@@ -283,6 +319,7 @@ async fn connected(
             }
             _ = shutdown.as_mut() => return Ended::Shutdown,
             _ = revoked.notified() => return Ended::Revoked,
+            Some(next) = staged.recv() => return Ended::Update(next),
         }
     }
 }
