@@ -176,7 +176,7 @@ impl Linked {
         let dir = root.bot(&bot_id);
         dir.create().unwrap();
         dir.save(&link).unwrap();
-        Credentials::with_keychain(&dir, None).save("bot-token").unwrap();
+        Credentials::open(&dir).save("bot-token").unwrap();
         let install = nebo_link::install::find(&link).unwrap();
         Journal::open(dir.journal_file())
             .unwrap()

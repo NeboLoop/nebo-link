@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use nebo_runtimes::Runtime;
 use tokio::sync::watch;
 
-use nebo_link::credentials::{Credentials, Stored};
+use nebo_link::credentials::Credentials;
 use nebo_link::error::{Error, Result};
 use nebo_link::install::{runtime_key, runtime_name};
 use nebo_link::state::{Root, STATUS_EVERY};
@@ -146,12 +146,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
             if !unlinked.conflicts.is_empty() {
                 println!("Left as you changed them: {}", unlinked.conflicts.join(", "));
             }
-            if let Some(reason) = unlinked.token_kept {
-                println!(
-                    "The bot token may still be in the system keychain ({reason}). Remove the \"nebo-link\" item for {} there.",
-                    link.bot_id
-                );
-            }
             println!("To remove the bot from your account too, remove it in the NeboAI app.");
             Ok(())
         }
@@ -164,7 +158,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let _log = init_logging(None);
             let mut link = root.select(bot.as_deref())?;
             let dir = root.bot(&link.bot_id);
-            let token = Credentials::open(&dir, &link.bot_id).load()?;
+            let token = Credentials::open(&dir).load()?;
             let (_token_tx, token_rx) = watch::channel(token);
             let janus = link::janus(&link, token_rx);
             let change = link::set_models(&dir, &mut link, &janus, state == Toggle::On).await?;
@@ -195,15 +189,14 @@ async fn pair(root: &Root, code: &str, runtime: Option<Runtime>, name: Option<St
         link.name
     );
     println!("Bot id: {}", link.bot_id);
-    println!(
-        "The bot token is stored {}.",
-        match paired.token_in {
-            Stored::Keychain => "in the system keychain".to_string(),
-            Stored::File => format!("in {}", root.bot(&link.bot_id).token_file().display()),
-        }
-    );
     println!("nebo-link now runs in the background and starts with this computer.");
     println!("Open the NeboAI app to reach it. Check it any time with `nebo-link status`.");
+    if let Some(problem) = &paired.restart_failed {
+        println!(
+            "Restart {} to finish: {problem}\nIf you started it yourself in a terminal, stop it and start it again.",
+            runtime_name(link.runtime)
+        );
+    }
     Ok(())
 }
 

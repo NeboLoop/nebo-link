@@ -8,7 +8,7 @@
 //!   status.json    the running service's connection state
 //!   removed.json   only this, once NeboAI removed the bot and the service
 //!                  unlinked it (what `nebo-link status` reports)
-//!   token          the bot token, only where no OS keychain is available (0600)
+//!   token          the bot token (0600)
 //!   logs/          rotating service logs
 //! ```
 //!
