@@ -203,6 +203,10 @@ pub(crate) fn proxy_access(config: &Value, access: &ProxyAccess) -> Vec<Edit> {
                 &[access.origin.as_str()],
             ),
         ),
+        // Trusted-proxy and a shared token are mutually exclusive: the gateway
+        // refuses to start with both ("remove gateway.auth.token"). The token
+        // is journaled like every other edit, so a revert puts it back.
+        Edit::remove(&["gateway", "auth", "token"]),
         Edit::set(&["gateway", "auth", "mode"], json!("trusted-proxy")),
         Edit::set(&["gateway", "auth", "password"], json!(access.password)),
         // Admin through a session-only identity grant, never through

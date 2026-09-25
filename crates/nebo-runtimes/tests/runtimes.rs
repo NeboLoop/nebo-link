@@ -342,9 +342,9 @@ fn openclaw_proxy_access_round_trip() {
     assert_eq!(gateway["controlUi"]["enabled"], true);
     assert_eq!(gateway["auth"]["mode"], "trusted-proxy");
     assert_eq!(gateway["auth"]["password"], "local-secret");
-    assert_eq!(
-        gateway["auth"]["token"], "your-token",
-        "the owner's token stays"
+    assert!(
+        gateway["auth"].get("token").is_none(),
+        "the gateway refuses to start with trusted-proxy and a token; the revert restores it"
     );
     assert_eq!(
         gateway["auth"]["identityScopes"]["owner-1"],
