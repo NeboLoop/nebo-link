@@ -108,7 +108,7 @@ impl Control for Service {
 pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
     let dir = root.bot(bot_id);
     let link = dir.load()?;
-    let credentials = Credentials::open(&dir, bot_id);
+    let credentials = Credentials::open(&dir);
     let (token_tx, token_rx) = watch::channel(credentials.load()?);
     let (online_tx, online_rx) = watch::channel(false);
     let tunnel = Arc::new(AtomicBool::new(false));
@@ -237,9 +237,6 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
     }
     if !unlinked.conflicts.is_empty() {
         tracing::info!(settings = ?unlinked.conflicts, "left as the owner changed them");
-    }
-    if let Some(reason) = unlinked.token_kept {
-        tracing::warn!(reason, "the bot token may still be in the system keychain");
     }
     tracing::info!("unlinked");
     Ok(())

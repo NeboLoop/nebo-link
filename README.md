@@ -36,7 +36,7 @@ Every change to your agent's config is recorded with the value it replaced, so t
 
 ### Where things are
 
-Each linked bot has a directory in your data directory (`~/Library/Application Support/nebo-link/<bot id>` on macOS, `~/.local/share/nebo-link/<bot id>` on Linux, `%APPDATA%\nebo-link\<bot id>` on Windows; `--home` or `NEBO_LINK_HOME` moves it). The bot token is kept in the system keychain; where there is none, it's in an owner-only `token` file in that directory. Logs rotate daily in `logs/` and never contain tokens, headers or message content.
+Each linked bot has a directory in your data directory (`~/Library/Application Support/nebo-link/<bot id>` on macOS, `~/.local/share/nebo-link/<bot id>` on Linux, `%APPDATA%\nebo-link\<bot id>` on Windows; `--home` or `NEBO_LINK_HOME` moves it). The bot token is kept in an owner-only `token` file in that directory. Logs rotate daily in `logs/` and never contain tokens, headers or message content.
 
 The service is a launchd agent on macOS, a systemd user unit on Linux (a system unit when run as root), and a logon task on Windows.
 

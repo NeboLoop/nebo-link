@@ -6,7 +6,7 @@
 //!   session); as root, a system unit.
 //! - Windows: a scheduled task that starts at logon as the owner and restarts
 //!   on failure. It runs as the owner, like the launchd agent and the
-//!   systemd user unit, so it sees the owner's runtimes, keychain and files.
+//!   systemd user unit, so it sees the owner's runtimes and files.
 
 use std::path::{Path, PathBuf};
 

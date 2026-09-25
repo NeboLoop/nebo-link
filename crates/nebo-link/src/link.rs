@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use nebo_runtimes::{Change, ChangeKind, Environment, Journal, NeboaiModels, ProxyAccess, Runtime, detect};
 use tokio::sync::watch;
 
-use crate::credentials::{Credentials, Stored};
+use crate::credentials::Credentials;
 use crate::endpoints::{Endpoints, WEB_ORIGIN};
 use crate::error::{Error, Result};
 use crate::install::{self, runtime_key, runtime_name};
@@ -23,7 +23,10 @@ const USER_HEADER: &str = "x-nebo-user";
 /// What pairing did.
 pub struct Paired {
     pub link: Link,
-    pub token_in: Stored,
+    /// Set when the agent could not be restarted to pick up its new settings
+    /// (for one, a gateway started by hand in a terminal): the owner restarts
+    /// it; everything else is in place.
+    pub restart_failed: Option<String>,
 }
 
 /// Pairs the local runtime with the owner's NeboAI account using `code`,
@@ -76,22 +79,25 @@ pub async fn pair(
     }
 
     let finish = async {
-        let token_in = Credentials::open(&dir, &bot_id).save(&resp.connection_token)?;
+        Credentials::open(&dir).save(&resp.connection_token)?;
         let mut journal = Journal::open(dir.journal_file())?;
         let outcome = journal.apply(&install, None, &Change::ProxyAccess(proxy_access(&link)))?;
-        if let Some(command) = outcome.restart {
-            install::restart(&command).await?;
-        }
         service::install(&service::Spec {
             bot_id: bot_id.clone(),
             exe,
             home: root_override(root),
             path: std::env::var("PATH").ok(),
         })?;
-        Ok::<_, Error>(token_in)
+        // Last, and not fatal: the link is running and connects as soon as
+        // the agent comes back with its new settings.
+        let restart_failed = match outcome.restart {
+            Some(command) => install::restart(&command).await.err().map(|e| e.to_string()),
+            None => None,
+        };
+        Ok::<_, Error>(restart_failed)
     };
     match finish.await {
-        Ok(token_in) => Ok(Paired { link, token_in }),
+        Ok(restart_failed) => Ok(Paired { link, restart_failed }),
         Err(e) => Err(Error::Message(format!(
             "{e}\nThe bot is paired but not running. Fix the problem above and run `nebo-link run --bot {bot_id}`, or undo it with `nebo-link unlink --bot {bot_id}`."
         ))),
@@ -182,8 +188,6 @@ pub struct Unlinked {
     /// Why the runtime could not be restarted onto its restored config, when
     /// it could not.
     pub not_restarted: Option<String>,
-    /// Why the token could not be removed from the keychain, when it could not.
-    pub token_kept: Option<String>,
 }
 
 /// Stops and removes the bot's service, restores the runtime's config,
@@ -202,7 +206,6 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
         conflicts: Vec::new(),
         not_restored: None,
         not_restarted: None,
-        token_kept: None,
     };
     match install::find(link) {
         Ok(install) => {
@@ -221,9 +224,7 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
         }
         Err(e) => unlinked.not_restored = Some(e.to_string()),
     }
-    if let Err(e) = Credentials::open(&dir, &link.bot_id).forget() {
-        unlinked.token_kept = Some(e.to_string());
-    }
+    Credentials::open(&dir).forget()?;
     dir.remove()?;
     if by == By::Revocation {
         dir.create()?;
