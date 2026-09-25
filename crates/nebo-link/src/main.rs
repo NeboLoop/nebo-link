@@ -135,10 +135,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Unlink { bot } => {
             let _log = init_logging(None);
             let link = root.select(bot.as_deref())?;
-            let unlinked = link::unlink(&root, &link).await?;
+            let unlinked = link::unlink(&root, &link, link::By::Owner).await?;
             println!("Unlinked {} ({}).", link.name, link.bot_id);
             if let Some(reason) = unlinked.not_restored {
                 println!("Its config was not restored: {reason}");
+            }
+            if let Some(reason) = unlinked.not_restarted {
+                println!("Its config was restored, but restarting it failed: {reason}");
             }
             if !unlinked.conflicts.is_empty() {
                 println!("Left as you changed them: {}", unlinked.conflicts.join(", "));
@@ -206,9 +209,14 @@ async fn pair(root: &Root, code: &str, runtime: Option<Runtime>, name: Option<St
 
 fn status(root: &Root) -> Result<()> {
     let links = root.links()?;
-    if links.is_empty() {
+    let removed = root.removed()?;
+    if links.is_empty() && removed.is_empty() {
         println!("Nothing is linked. Run `nebo-link <code>` with a code from the NeboAI app.");
         return Ok(());
+    }
+    for bot in removed {
+        println!("{}", bot.name);
+        println!("  Removed from NeboAI. Run nebo-link <code> to link again.");
     }
     for link in links {
         let dir = root.bot(&link.bot_id);

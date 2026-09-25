@@ -28,6 +28,8 @@ This finds OpenClaw (`~/.openclaw`) or Hermes (`~/.hermes`), links it to your Ne
 
 `--bot` is needed only when more than one agent is linked.
 
+Removing the bot in the NeboAI app unlinks it here too: the service restores your agent's config, forgets the bot, removes itself, and `nebo-link status` tells you it was removed.
+
 ### What it changes
 
 Every change to your agent's config is recorded with the value it replaced, so turning models off and `unlink` put it back exactly. For OpenClaw, linking sets the Control UI's base path and trusted-proxy sign-in for requests that come through NeboAI, and sets a local password (`gateway.auth.password`) so your own `openclaw` commands keep working. Hermes needs no config change. Where a change needs a restart, the link runs the agent's own restart command.

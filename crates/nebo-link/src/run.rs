@@ -7,6 +7,10 @@
 //! once, repeated failures back off from 30 s to 10 min, a refused lease is
 //! asked for again at the renewal cadence, and a wake from sleep forces a
 //! fresh connection.
+//!
+//! A bot NeboAI removed is refused for good: CONNECT answers that it was
+//! revoked, or the hub closes its tunnel with 1008 "revoked". The service
+//! then stops retrying and unlinks it the way `nebo-link unlink` does.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +24,7 @@ use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 use crate::install::{self, runtime_key, runtime_name};
 use crate::janus::Janus;
-use crate::link::{self, ModelsChange};
+use crate::link::{self, By, ModelsChange};
 use crate::offsets::FileOffsets;
 use crate::proxy::{self, Control, Target};
 use crate::state::{BotDir, Link, Root, STATUS_EVERY, Status};
@@ -152,15 +156,17 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         service.clone(),
     ));
     tokio::spawn(crate::janus::serve(models_listener, service.janus.clone()));
+    let revoked = Arc::new(tokio::sync::Notify::new());
     tokio::spawn(tunnel_watcher(
         link.endpoints.tunnel.clone(),
         proxy_addr.to_string(),
         token_rx.clone(),
         online_rx,
         tunnel,
+        revoked.clone(),
     ));
     let status_writer = service.clone();
-    tokio::spawn(async move {
+    let status_writer = tokio::spawn(async move {
         loop {
             status_writer.write_status();
             tokio::time::sleep(STATUS_EVERY).await;
@@ -188,16 +194,20 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
                 service.write_status();
                 tracing::info!("connected to NeboAI");
                 backoff = FIRST_BACKOFF;
-                let closing = connected(&plugin, &mut shutdown).await;
+                let ended = connected(&plugin, &mut shutdown, &revoked).await;
                 online_tx.send_replace(false);
                 service.write_status();
-                if closing {
-                    lease::process().release();
-                    let _ = plugin.disconnect().await;
-                    return stopped(&dir);
+                match ended {
+                    Ended::Dropped => Duration::ZERO,
+                    Ended::Shutdown => {
+                        lease::process().release();
+                        let _ = plugin.disconnect().await;
+                        return stopped(&dir);
+                    }
+                    Ended::Revoked => break,
                 }
-                Duration::ZERO
             }
+            Err(CommError::Revoked) => break,
             Err(CommError::LeaseHeld) => {
                 record_error(&service, "another nebo-link process is running this bot");
                 lease::RENEW_EVERY
@@ -214,18 +224,50 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
             _ = &mut shutdown => return stopped(&dir),
         }
     }
+
+    tracing::warn!("NeboAI removed this bot; unlinking it");
+    status_writer.abort();
+    let _ = plugin.disconnect().await;
+    let unlinked = link::unlink(root, &link, By::Revocation).await?;
+    if let Some(reason) = unlinked.not_restored {
+        tracing::warn!(reason, "the agent's config was not restored");
+    }
+    if let Some(reason) = unlinked.not_restarted {
+        tracing::warn!(reason, "the agent was not restarted onto its restored config");
+    }
+    if !unlinked.conflicts.is_empty() {
+        tracing::info!(settings = ?unlinked.conflicts, "left as the owner changed them");
+    }
+    if let Some(reason) = unlinked.token_kept {
+        tracing::warn!(reason, "the bot token may still be in the system keychain");
+    }
+    tracing::info!("unlinked");
+    Ok(())
 }
 
-/// Waits while connected. Returns `true` when the service is shutting
-/// down, `false` when the connection dropped or the machine woke from sleep.
-async fn connected(plugin: &NeboAIPlugin, shutdown: &mut std::pin::Pin<&mut impl Future<Output = ()>>) -> bool {
+/// Why the service stopped waiting on a connection.
+enum Ended {
+    /// The connection dropped or the machine woke from sleep: reconnect.
+    Dropped,
+    /// The service is shutting down.
+    Shutdown,
+    /// NeboAI removed the bot.
+    Revoked,
+}
+
+/// Waits while connected.
+async fn connected(
+    plugin: &NeboAIPlugin,
+    shutdown: &mut std::pin::Pin<&mut impl Future<Output = ()>>,
+    revoked: &tokio::sync::Notify,
+) -> Ended {
     let tick = STATUS_EVERY;
     loop {
         let before = SystemTime::now();
         tokio::select! {
             _ = plugin.wait_disconnect() => {
                 tracing::info!("disconnected from NeboAI; reconnecting");
-                return false;
+                return Ended::Dropped;
             }
             _ = tokio::time::sleep(tick) => {
                 let slept = SystemTime::now()
@@ -236,26 +278,29 @@ async fn connected(plugin: &NeboAIPlugin, shutdown: &mut std::pin::Pin<&mut impl
                 if slept {
                     tracing::info!("woke from sleep; reconnecting");
                     let _ = plugin.disconnect().await;
-                    return false;
+                    return Ended::Dropped;
                 }
                 if !plugin.is_connected() {
-                    return false;
+                    return Ended::Dropped;
                 }
             }
-            _ = shutdown.as_mut() => return true,
+            _ = shutdown.as_mut() => return Ended::Shutdown,
+            _ = revoked.notified() => return Ended::Revoked,
         }
     }
 }
 
 /// Keeps the tunnel up while the comms connection is. Only the process
 /// holding the bot's lease may hold its tunnel, and the token is read after
-/// the connection that rotated it has saved it.
+/// the connection that rotated it has saved it. Ends, notifying `revoked`,
+/// when the hub says the bot was removed.
 async fn tunnel_watcher(
     hub_url: String,
     local_addr: String,
     token: watch::Receiver<String>,
     mut online: watch::Receiver<bool>,
     tunnel: Arc<AtomicBool>,
+    revoked: Arc<tokio::sync::Notify>,
 ) {
     let mut backoff = FIRST_BACKOFF;
     loop {
@@ -267,6 +312,11 @@ async fn tunnel_watcher(
         let started = Instant::now();
         match nebo_comm::tunnel::run(&hub_url, &token, &local_addr, &tunnel).await {
             Ok(()) => tracing::info!("tunnel closed by NeboAI; redialing"),
+            Err(nebo_comm::tunnel::TunnelError::Revoked) => {
+                tracing::info!("tunnel closed: NeboAI removed this bot");
+                revoked.notify_one();
+                return;
+            }
             Err(e) => tracing::info!(error = %e, "tunnel dropped"),
         }
         // A tunnel that lived a while earns a quick redial; repeated fast
