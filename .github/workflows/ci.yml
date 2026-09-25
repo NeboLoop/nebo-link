@@ -1,6 +1,7 @@
-# Test CI for pull requests and main: build, test and lint on Linux and macOS.
-# This is not the release build. Release builds will run on NeboAI's own
-# (self-hosted) runners, never on these GitHub-hosted ones.
+# Test CI for pull requests and main: build, test and lint on Linux and macOS,
+# and a compile check on Windows. This is not the release build. Release builds
+# (release.yml) run on NeboAI's own (self-hosted) runners, never on these
+# GitHub-hosted ones.
 name: CI
 
 on:
@@ -32,3 +33,21 @@ jobs:
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # nebo-link ships a Windows binary; this keeps it compiling on Windows.
+  windows:
+    name: windows-latest (cargo check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  # Guards the release workflow: its builds run on the house machines, never
+  # on GitHub-hosted runners. See scripts/check-release-runners.py.
+  release-runners:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-release-runners.py
