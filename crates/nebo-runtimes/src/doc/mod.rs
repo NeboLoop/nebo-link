@@ -58,6 +58,13 @@ impl Edit {
             value: Some(value),
         }
     }
+
+    pub fn remove(path: &[&str]) -> Self {
+        Self {
+            path: path.iter().map(|key| key.to_string()).collect(),
+            value: None,
+        }
+    }
 }
 
 /// One journaled edit: the value at `path` before and after, as text in the

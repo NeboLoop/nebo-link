@@ -173,6 +173,16 @@ fn insert(text: &str, parent: &Object, key: &str, value: &Value) -> String {
 
 fn remove(text: &str, parent: &Object, index: usize) -> String {
     let member = &parent.members[index];
+    // A member on a line of its own goes with its whole line, so comments on
+    // the neighbouring lines stay put. JSON5 allows the trailing comma this
+    // can leave on the previous member.
+    let line_start = text[..member.key_start].rfind('\n').map_or(0, |i| i + 1);
+    let end = member.comma_end.unwrap_or(member.value_end);
+    let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i + 1);
+    if text[line_start..member.key_start].trim().is_empty() && text[end..line_end].trim().is_empty()
+    {
+        return replace(text, line_start..line_end, "");
+    }
     let range = match (
         index.checked_sub(1).map(|i| &parent.members[i]),
         member.comma_end,
