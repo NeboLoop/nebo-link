@@ -1,0 +1,43 @@
+// Derived from OpenClaw's documented examples:
+// docs/gateway/config-gateway.md and docs/gateway/config-agents/models.md.
+{
+  meta: { lastTouchedVersion: "2026.9.6" },
+  gateway: {
+    mode: "local", // local | remote
+    port: 18789,
+    bind: "loopback",
+    auth: {
+      mode: "token", // none | token | password | trusted-proxy
+      token: "your-token",
+      // password: "your-password", // or OPENCLAW_GATEWAY_PASSWORD
+      allowTailscale: true,
+      rateLimit: {
+        maxAttempts: 10,
+        windowMs: 60000,
+        lockoutMs: 300000,
+        exemptLoopback: true,
+      },
+    },
+    tailscale: {
+      mode: "off", // off | serve | funnel
+    },
+    controlUi: {
+      enabled: true,
+      // allowedOrigins: ["https://control.example.com"], // optional override of publicOrigin
+    },
+  },
+  agents: {
+    defaults: {
+      models: {
+        "anthropic/claude-opus-4-6": { alias: "opus" },
+        "minimax/MiniMax-M2.7": { alias: "minimax" },
+      },
+      model: {
+        primary: "anthropic/claude-opus-4-6",
+        fallbacks: ["minimax/MiniMax-M2.7"],
+      },
+      timeoutSeconds: 600,
+      maxConcurrent: 4,
+    },
+  },
+}

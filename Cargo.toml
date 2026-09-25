@@ -24,3 +24,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 dirs = "6"
+json5 = "1"
+yaml_serde = "0.10"
+tempfile = "3"
