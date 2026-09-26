@@ -22,6 +22,7 @@ pub const EXAMPLES: &[Example] = &[
     example!("agents"),
     example!("prompt-permission"),
     example!("reconnect"),
+    example!("turn-ended-while-away"),
     example!("cancel"),
     example!("mode"),
     example!("first-answer-wins"),

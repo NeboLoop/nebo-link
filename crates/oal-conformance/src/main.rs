@@ -33,7 +33,9 @@ enum Command {
         /// The id the host gave the `oal-conformance agent` agent.
         #[arg(long)]
         agent: String,
-        /// Where pairing goes, when not `url` (a relay's /oal/pair/<code>).
+        /// The relay's pairing endpoint, `wss://<relay>/oal/pair`. The suite
+        /// appends the code's nameplate (its first four characters); the rest
+        /// of the code never goes in the URL. Without it, pairing goes to `url`.
         #[arg(long)]
         pair_url: Option<String>,
         /// An upgrade header, `Name: value` (a relay's Authorization). Repeatable.

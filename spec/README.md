@@ -12,7 +12,7 @@ Canonical home: **https://openagent.link**. Reference implementation: Nebo Link 
 |---|---|
 | [`oal-0.1.md`](oal-0.1.md) | The specification, version 0.1 (draft). |
 | [`schemas/`](schemas/) | JSON Schemas for every message OAL adds (`https://openagent.link/schemas/0.1/…`). ACP types are referenced from ACP's own schema, not copied. |
-| [`examples/`](examples/) | Annotated transcripts: pairing, listing agents, a prompt with a permission request, reconnecting mid-turn, cancelling, changing mode, two clients answering one request, and a version mismatch. The conformance suite runs them. |
+| [`examples/`](examples/) | Annotated transcripts: pairing, listing agents, a prompt with a permission request, reconnecting mid-turn, a turn that ends while the client is away, cancelling, changing mode, two clients answering one request, and a version mismatch. The conformance suite runs them. |
 | [`rfcs/`](rfcs/) | Proposals for changes. Start from [`0000-template.md`](rfcs/0000-template.md). |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How the protocol changes, versioning, and the deprecation window. |
 | [`LICENSE`](LICENSE) | CC-BY-4.0. |
@@ -33,7 +33,9 @@ cargo build --release -p oal-conformance
 # Test a host. Add the suite's scripted agent to the host as an ACP agent
 # (it runs `oal-conformance agent`), get a pairing code from the host, then:
 oal-conformance host wss://<relay>/oal/hosts/<host id> --code ABCD-1234 --agent <agent id> \
-    [--pair-url wss://<relay>/oal/pair/ABCD-1234] [--header "Authorization: Bearer …"]
+    [--pair-url wss://<relay>/oal/pair] [--header "Authorization: Bearer …"]
+# With --pair-url the suite pairs at <pair-url>/<nameplate>: only the code's
+# first four characters go in the URL, never the rest.
 
 # Test a client. This serves a fake host with one fake agent; point the client
 # at it, pair with the code, and watch for spec violations in the output.

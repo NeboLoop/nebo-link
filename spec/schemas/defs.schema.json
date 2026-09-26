@@ -189,7 +189,7 @@
         },
         "folder": {
           "type": "string",
-          "description": "Absolute path of the folder its sessions work in, on the host."
+          "description": "Absolute path of the folder its sessions work in, on the host. Absent for agents without one; for those the client sends cwd \"/\" and the host ignores it."
         },
         "online": {
           "type": "boolean"

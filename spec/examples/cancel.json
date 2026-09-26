@@ -14,6 +14,6 @@
     {"note": "The agent says it is working.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "{{session}}", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Working on it."}}}}}},
     {"note": "ACP session/cancel, a notification, unchanged.", "send": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "{{session}}"}}}},
     {"note": "The prompt ends with ACP's cancelled stop reason, not an error.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}}}},
-    {"note": "Everyone attached sees the turn end.", "expect": {"jsonrpc": "2.0", "method": "host/turn", "params": {"agent": "{{agent}}", "sessionId": "{{session}}", "turnId": "{{turn}}", "state": "ended", "stopReason": "cancelled"}}}
+    {"note": "Everyone attached sees the turn end, after the prompt's answer.", "expect": {"jsonrpc": "2.0", "method": "host/turn", "params": {"agent": "{{agent}}", "sessionId": "{{session}}", "turnId": "{{turn}}", "state": "ended", "stopReason": "cancelled"}}, "ordered": true}
   ]
 }

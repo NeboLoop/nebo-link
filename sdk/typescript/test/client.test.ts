@@ -97,6 +97,20 @@ describe('pairing and the host layer', () => {
     expect(devices).toEqual([expect.objectContaining({ name: 'Test laptop', current: true })]);
   });
 
+  it('pairs through a relay by the nameplate alone', async () => {
+    const other = await fakeHost('AAAA-BBBB');
+    try {
+      // The fake host plays the relay's /oal/pair/<nameplate> and refuses a
+      // pairing URL that carries more of the code than the nameplate.
+      const relay = other.url.replace(/\/oal$/, '');
+      const paired = await pair({ relay, code: 'aaaa-bbbb', deviceName: 'Relay laptop' });
+      expect(paired.host.id).toBe('h-fake');
+      expect(other.violations).toEqual([]);
+    } finally {
+      other.stop();
+    }
+  });
+
   it('refuses a wrong code in plain words', async () => {
     const other = await fakeHost('AAAA-BBBB');
     try {

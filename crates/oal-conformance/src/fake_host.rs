@@ -80,12 +80,16 @@ pub async fn serve(addr: SocketAddr, config: Config) -> std::io::Result<SocketAd
             let _ = agent_events.send(Event::Agent(msg));
         }
     });
+    let upgrade = Upgrade {
+        nameplate: crate::nameplate(&config.code),
+        log: config.log,
+    };
     tokio::spawn(Host::new(config, to_agent).run(rx));
     tokio::spawn(async move {
         let mut next = 0;
         while let Ok((stream, _)) = listener.accept().await {
             next += 1;
-            tokio::spawn(connection(next, stream, events.clone()));
+            tokio::spawn(connection(next, stream, upgrade.clone(), events.clone()));
         }
     });
     Ok(local)
@@ -103,12 +107,17 @@ enum Out {
     Close(u16, String),
 }
 
-async fn connection(id: u64, stream: tokio::net::TcpStream, events: mpsc::UnboundedSender<Event>) {
+async fn connection(
+    id: u64,
+    stream: tokio::net::TcpStream,
+    upgrade: Upgrade,
+    events: mpsc::UnboundedSender<Event>,
+) {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_FRAME))
         .max_frame_size(Some(MAX_FRAME));
     let Ok(ws) =
-        tokio_tungstenite::accept_hdr_async_with_config(stream, Subprotocol, Some(config)).await
+        tokio_tungstenite::accept_hdr_async_with_config(stream, upgrade, Some(config)).await
     else {
         return;
     };
@@ -139,11 +148,40 @@ async fn connection(id: u64, stream: tokio::net::TcpStream, events: mpsc::Unboun
     let _ = events.send(Event::Closed(id));
 }
 
-/// Selects the `oal` subprotocol when the client offers it (section 4.1).
-struct Subprotocol;
+/// The WebSocket upgrade. It selects the `oal` subprotocol when the client
+/// offers it (spec 4.1). The fake host takes any path, and also plays the
+/// relay's pairing endpoint: `/oal/pair/<nameplate>` must carry the code's
+/// nameplate and nothing more (spec 4.4, 6.2).
+#[derive(Clone)]
+struct Upgrade {
+    nameplate: String,
+    log: bool,
+}
 
-impl Callback for Subprotocol {
+impl Callback for Upgrade {
     fn on_request(self, req: &Request, mut resp: Response) -> Result<Response, ErrorResponse> {
+        if let Some(given) = req.uri().path().strip_prefix("/oal/pair/") {
+            let given = crate::normalize_code(given);
+            if given.len() > 4 {
+                if self.log {
+                    eprintln!(
+                        "pairing: SPEC VIOLATION: the pairing URL carries more than the nameplate; the rest of the code must never reach the relay"
+                    );
+                }
+                return Err(refusal(
+                    400,
+                    "bad_nameplate",
+                    "A pairing URL carries only the code's first four characters.",
+                ));
+            }
+            if given != self.nameplate {
+                return Err(refusal(
+                    404,
+                    "unknown_nameplate",
+                    "That code didn't work. Get a new one on the computer.",
+                ));
+            }
+        }
         let offered = req
             .headers()
             .get("sec-websocket-protocol")
@@ -155,6 +193,18 @@ impl Callback for Subprotocol {
         }
         Ok(resp)
     }
+}
+
+/// A refused upgrade, as a relay answers it (spec 4.4).
+fn refusal(status: u16, code: &str, message: &str) -> ErrorResponse {
+    let mut resp = ErrorResponse::new(Some(
+        json!({ "code": code, "message": message }).to_string(),
+    ));
+    *resp.status_mut() =
+        tokio_tungstenite::tungstenite::http::StatusCode::from_u16(status).expect("status");
+    resp.headers_mut()
+        .insert("content-type", "application/json".parse().expect("header"));
+    resp
 }
 
 fn close(code: u16, reason: &str) -> Message {
@@ -197,6 +247,8 @@ struct Session {
     record: Vec<Value>,
     modes: Value,
     turn: Option<Turn>,
+    /// The `host/turn` `ended` notice of the last turn, re-sent on attach.
+    last_ended: Option<Value>,
     /// A connection whose `session/load` was forwarded to the agent.
     loading: Option<u64>,
 }
@@ -583,14 +635,9 @@ impl Host {
             self.reply(conn, None, id, Err(e));
             return self.close(conn, 4002, "No common protocol version.");
         }
-        let normal = |c: &str| {
-            c.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect::<String>()
-                .to_ascii_uppercase()
-        };
-        let given = normal(params["code"].as_str().unwrap_or(""));
-        if self.code_used || !equal(given.as_bytes(), normal(&self.config.code).as_bytes()) {
+        let given = crate::normalize_code(params["code"].as_str().unwrap_or(""));
+        let code = crate::normalize_code(&self.config.code);
+        if self.code_used || !equal(given.as_bytes(), code.as_bytes()) {
             let message = "That code didn't work. Get a new one on the computer.".to_owned();
             self.reply(conn, None, id, Err((code::PAIRING_REFUSED, message)));
             return self.close(conn, 4001, "Pairing refused.");
@@ -675,21 +722,19 @@ impl Host {
             index,
             json!({ "outcome": "selected", "optionId": option }),
             by,
-            None,
         );
         Ok(json!({}))
     }
 
-    /// Answers the agent, withdraws the request from every other connection
-    /// and tells everyone (section 10).
-    fn resolve(&mut self, index: usize, outcome: Value, by: Value, answered_on: Option<u64>) {
+    /// Answers the agent, withdraws the request from every connection that
+    /// holds a copy, the one whose answer won included, and tells everyone
+    /// (section 10).
+    fn resolve(&mut self, index: usize, outcome: Value, by: Value) {
         let pending = self.pending.remove(index);
         self.resolved.insert(pending.id.clone());
         let _ = self.to_agent.send(json!({ "jsonrpc": "2.0", "id": pending.agent_request, "result": { "outcome": outcome } }));
         for (conn, request) in &pending.open_on {
-            if Some(*conn) != answered_on {
-                self.acp_notify(*conn, "$/cancel_request", json!({ "requestId": request }));
-            }
+            self.acp_notify(*conn, "$/cancel_request", json!({ "requestId": request }));
         }
         self.notify_all("host/pending_update", json!({ "change": "resolved", "request": pending.describe(), "outcome": outcome, "answeredBy": by }));
     }
@@ -836,8 +881,8 @@ impl Host {
     }
 
     /// `session/load` or `session/resume` of a session open in the agent
-    /// (section 8): the record, the running turn, the answer, then the
-    /// pending permission requests.
+    /// (section 8): the record, the most recent `host/turn` (running, or the
+    /// last one ended), the answer, then the pending permission requests.
     fn attach(&mut self, conn: u64, id: &Value, sid: &str, replay: bool) {
         let session = self.sessions.get_mut(sid).expect("session");
         session.attached.insert(conn);
@@ -853,6 +898,8 @@ impl Host {
         let session = &self.sessions[sid];
         if let Some(turn) = &session.turn {
             self.notify(conn, "host/turn", self.turn_notice(sid, turn, "running"));
+        } else if let Some(ended) = &session.last_ended {
+            self.notify(conn, "host/turn", ended.clone());
         }
         self.reply(conn, Some(AGENT), id, Ok(json!({ "modes": session.modes })));
         for index in 0..self.pending.len() {
@@ -877,7 +924,7 @@ impl Host {
             outcome => outcome,
         };
         let by = self.device_ref(conn);
-        self.resolve(index, outcome, by, Some(conn));
+        self.resolve(index, outcome, by);
     }
 
     fn cancel(&mut self, conn: u64, sid: String) {
@@ -893,8 +940,7 @@ impl Host {
         );
         while let Some(index) = self.pending.iter().position(|p| p.session == sid) {
             let by = self.device_ref(conn);
-            // The canceller answers its own copies `cancelled`, as ACP says.
-            self.resolve(index, json!({ "outcome": "cancelled" }), by, Some(conn));
+            self.resolve(index, json!({ "outcome": "cancelled" }), by);
         }
     }
 
@@ -982,6 +1028,8 @@ impl Host {
         let result = &msg["result"];
         let ok = msg.get("error").is_none();
         let sid = session.unwrap_or_else(|| result["sessionId"].as_str().unwrap_or("").to_owned());
+        // `host/turn` `ended` goes out after the prompt's answer (section 9).
+        let mut ended = None;
         match method.as_str() {
             "session/new" if ok => {
                 let session = Session {
@@ -989,7 +1037,7 @@ impl Host {
                     modes: result["modes"].clone(),
                     ..Session::default()
                 };
-                self.sessions.insert(sid, session);
+                self.sessions.insert(sid.clone(), session);
             }
             "session/load" | "session/resume" => match self.sessions.get_mut(&sid) {
                 Some(s) if ok => {
@@ -1003,7 +1051,7 @@ impl Host {
                         modes: result["modes"].clone(),
                         ..Session::default()
                     };
-                    self.sessions.insert(sid, session);
+                    self.sessions.insert(sid.clone(), session);
                 }
                 _ => {
                     self.sessions.remove(&sid);
@@ -1020,9 +1068,7 @@ impl Host {
                     } else {
                         notice["error"] = msg["error"].clone();
                     }
-                    for c in self.sessions[&sid].attached.clone() {
-                        self.notify(c, "host/turn", notice.clone());
-                    }
+                    ended = Some(notice);
                 }
             }
             "session/set_mode" if ok => {
@@ -1044,6 +1090,12 @@ impl Host {
         let mut answer = msg.clone();
         answer["id"] = id;
         self.send(conn, json!({ "agent": AGENT, "acp": answer }));
+        if let (Some(notice), Some(session)) = (ended, self.sessions.get_mut(&sid)) {
+            session.last_ended = Some(notice.clone());
+            for c in session.attached.clone() {
+                self.notify(c, "host/turn", notice.clone());
+            }
+        }
     }
 }
 

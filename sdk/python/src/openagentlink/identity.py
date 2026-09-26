@@ -9,7 +9,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
@@ -78,9 +77,17 @@ class Identity:
 
 
 def relay_url(relay: str, path: str) -> str:
-    """A relay path (``/oal/hosts/<id>``, ``/oal/pair/<code>``) on ``relay``."""
+    """A relay path (``/oal/hosts/<id>``, ``/oal/pair/<nameplate>``) on ``relay``."""
     base = relay if re.match(r"^wss?://", relay) else f"wss://{relay}"
     return base.rstrip("/") + path
+
+
+def nameplate(code: str) -> str:
+    """The code's nameplate (spec 4.4, 6.2): its first four characters, read as
+    Crockford base32. A relay routes a pairing by the nameplate alone; the rest
+    of the code never goes to it."""
+    normal = re.sub(r"[^0-9A-Z]", "", code.upper())
+    return normal.replace("I", "1").replace("L", "1").replace("O", "0")[:4]
 
 
 def check_endpoint(relay: str | None, url: str | None) -> None:
@@ -100,7 +107,7 @@ async def pair(
 ) -> Identity:
     """Pairs with a host through ``relay`` or at ``url`` and returns this device's identity for it."""
     check_endpoint(relay, url)
-    target = relay_url(relay, "/oal/pair/" + quote(re.sub(r"[\s-]", "", code).upper())) if relay else url
+    target = relay_url(relay, "/oal/pair/" + nameplate(code)) if relay else url
     assert target is not None
     public_key, private_key = _generate_key_pair()
     socket = await dialer(target, ["oal"])

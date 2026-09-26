@@ -30,10 +30,19 @@ export type PairOptions = Endpoint & {
 
 export const DEFAULT_CLIENT: ClientInfo = { name: '@openagentlink/client', version: '0.1.0' };
 
-/** A relay path (`/oal/hosts/<id>`, `/oal/pair/<code>`) on `relay`. */
+/** A relay path (`/oal/hosts/<id>`, `/oal/pair/<nameplate>`) on `relay`. */
 export function relayUrl(relay: string, path: string): string {
   const base = /^wss?:\/\//.test(relay) ? relay : `wss://${relay}`;
   return base.replace(/\/+$/, '') + path;
+}
+
+/**
+ * The code's nameplate (spec 4.4, 6.2): its first four characters, read as
+ * Crockford base32. A relay routes a pairing by the nameplate alone; the rest
+ * of the code never goes to it.
+ */
+export function nameplate(code: string): string {
+  return code.toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/[IL]/g, '1').replace(/O/g, '0').slice(0, 4);
 }
 
 export function checkEndpoint(options: { relay?: string; url?: string }): void {
@@ -44,7 +53,7 @@ export function checkEndpoint(options: { relay?: string; url?: string }): void {
 export async function pair(options: PairOptions): Promise<Identity> {
   checkEndpoint(options);
   const { code, deviceName, client = DEFAULT_CLIENT, secure = plaintext, dialer = webSocketDialer } = options;
-  const url = options.relay ? relayUrl(options.relay, `/oal/pair/${encodeURIComponent(code.replace(/[\s-]/g, '').toUpperCase())}`) : options.url!;
+  const url = options.relay ? relayUrl(options.relay, `/oal/pair/${nameplate(code)}`) : options.url!;
   const keys = await generateKeyPair();
   const socket = await dialer(url, ['oal']);
   const channel = await secure.open(socket, { protocol: PROTOCOL, client, code, device: keys });

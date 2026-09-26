@@ -18,6 +18,26 @@ pub mod transcript;
 /// The OAL version this suite tests.
 pub const PROTOCOL: &str = "0.1";
 
+/// A pairing code as a host compares it (spec 6.1): letters and digits
+/// only, upper case, `I` and `L` read as `1`, `O` as `0`.
+pub fn normalize_code(code: &str) -> String {
+    code.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| match c.to_ascii_uppercase() {
+            'I' | 'L' => '1',
+            'O' => '0',
+            c => c,
+        })
+        .collect()
+}
+
+/// The code's nameplate: its first four characters, the only part a relay
+/// sees (spec 4.4, 6.2). A pairing through a relay goes to
+/// `<relay>/oal/pair/<nameplate>`.
+pub fn nameplate(code: &str) -> String {
+    normalize_code(code).chars().take(4).collect()
+}
+
 /// Now, as RFC 3339 in UTC to the second.
 pub fn now() -> String {
     let secs = std::time::SystemTime::now()
@@ -44,6 +64,13 @@ pub fn now() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codes_read_as_crockford_base32() {
+        assert_eq!(super::normalize_code("k7qm-3xrd"), "K7QM3XRD");
+        assert_eq!(super::normalize_code("IL0O 1"), "11001");
+        assert_eq!(super::nameplate("K7QM-3XRD"), "K7QM");
+    }
+
     #[test]
     fn now_is_rfc3339() {
         let now = super::now();
