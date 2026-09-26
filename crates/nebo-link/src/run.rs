@@ -1,7 +1,8 @@
 //! `nebo-link run --bot <id>`: the service. One process is one bot (the hub's
 //! bot lease is per process). It keeps the comms connection (presence) and
-//! the tunnel up, serves the local proxy the tunnel delivers to, and serves
-//! the NeboAI models endpoint.
+//! the tunnel up, serves the local proxy the tunnel delivers to (with the
+//! chat contract beside it when the runtime has one), and serves the NeboAI
+//! models endpoint.
 //!
 //! Reconnects follow Nebo's watchers: a connection that drops is redialed at
 //! once, repeated failures back off from 30 s to 10 min, a refused lease is
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 use nebo_comm::{CommError, CommPlugin, NeboAIPlugin, lease};
 use tokio::sync::watch;
 
+use crate::contract::Contract;
 use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 use crate::install::{self, runtime_key, runtime_name};
@@ -50,18 +52,36 @@ struct Service {
     online: watch::Receiver<bool>,
     tunnel: Arc<AtomicBool>,
     error: Mutex<Option<String>>,
+    contract: Option<Arc<Contract>>,
+    /// Why the chat contract is not announced, when it is not.
+    chat_error: Mutex<Option<String>>,
 }
 
 impl Service {
     fn status(&self) -> Status {
         let online = *self.online.borrow();
+        let chat_error = self.chat_error.lock().expect("chat lock").clone();
         Status {
             pid: std::process::id(),
             updated: unix_now(),
             online,
             tunnel: self.tunnel.load(Ordering::Relaxed),
             error: if online { None } else { self.error.lock().expect("error lock").clone() },
+            chat: chat_error.is_none(),
+            chat_error,
         }
+    }
+
+    /// Whether the chat contract can be announced now: the runtime's API
+    /// answers the link with everything the contract needs.
+    async fn chat_ready(&self) -> bool {
+        let result = match &self.contract {
+            Some(contract) => contract.ready().await,
+            None => Err(self.chat_error.lock().expect("chat lock").clone().unwrap_or_default()),
+        };
+        let ready = result.is_ok();
+        *self.chat_error.lock().expect("chat lock") = result.err();
+        ready
     }
 
     fn write_status(&self) {
@@ -88,6 +108,7 @@ impl Control for Service {
             "online": status.online,
             "tunnel": status.tunnel,
             "models": { "enabled": link.models.enabled },
+            "chat": { "enabled": status.chat, "error": status.chat_error },
         })
     }
 
@@ -117,7 +138,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         .and_then(|p| p.canonicalize())
         .map_err(|e| Error::Message(format!("could not locate the nebo-link binary: {e}")))?;
     let dir = root.bot(bot_id);
-    let link = dir.load()?;
+    let mut link = dir.load()?;
     let credentials = Credentials::open(&dir);
     let (token_tx, token_rx) = watch::channel(credentials.load()?);
     let (online_tx, online_rx) = watch::channel(false);
@@ -150,6 +171,13 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
             ))
         })?;
 
+    let (contract, chat_error) = match link::chat(&dir, &mut link, &install, token_rx.clone()).await {
+        Ok(contract) => (Some(contract), None),
+        Err(why) => {
+            tracing::info!(why, "the chat contract is not served for this link");
+            (None, Some(why))
+        }
+    };
     let service = Arc::new(Service {
         dir: dir.clone(),
         janus: link::janus(&link, token_rx.clone()),
@@ -157,6 +185,8 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         online: online_rx.clone(),
         tunnel: tunnel.clone(),
         error: Mutex::new(None),
+        contract: contract.clone(),
+        chat_error: Mutex::new(chat_error),
     });
 
     tokio::spawn(proxy::serve(
@@ -164,6 +194,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         target,
         nebo_comm::tunnel::tunnel_auth_secret().to_string(),
         service.clone(),
+        contract,
     ));
     tokio::spawn(crate::janus::serve(models_listener, service.janus.clone()));
     let revoked = Arc::new(tokio::sync::Notify::new());
@@ -201,10 +232,13 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
     tokio::pin!(shutdown);
     let mut backoff = FIRST_BACKOFF;
     loop {
+        // Probed before every connect, so a runtime that came up (or went
+        // away) since the last one is announced as it is now.
+        let chat = service.chat_ready().await;
         // Built before the match: a `borrow()` in the scrutinee would hold the
         // token's read lock through the arms, and `send_replace` below would
         // wait on it forever (the hub rotates the token on every connect).
-        let config = connect_config(&link, &token_rx.borrow());
+        let config = connect_config(&link, &token_rx.borrow(), chat);
         let delay = match plugin.connect(config).await {
             Ok(()) => {
                 // The hub rotated the token and the old one is dead: save the
@@ -371,8 +405,10 @@ async fn tunnel_watcher(
     }
 }
 
-fn connect_config(link: &Link, token: &str) -> HashMap<String, String> {
-    HashMap::from([
+/// `chat` announces the chat contract; a link that can't serve it says
+/// nothing, and the phone keeps the runtime's own UI.
+fn connect_config(link: &Link, token: &str, chat: bool) -> HashMap<String, String> {
+    let mut config = HashMap::from([
         ("gateway".to_string(), link.endpoints.comms.clone()),
         ("api_server".to_string(), link.endpoints.api.clone()),
         ("bot_id".to_string(), link.bot_id.clone()),
@@ -380,7 +416,11 @@ fn connect_config(link: &Link, token: &str) -> HashMap<String, String> {
         ("platform".to_string(), std::env::consts::OS.to_string()),
         ("hostname".to_string(), link::host_label()),
         ("runtime".to_string(), runtime_key(link.runtime).to_string()),
-    ])
+    ]);
+    if chat {
+        config.insert("chat".to_string(), "true".to_string());
+    }
+    config
 }
 
 fn stopped(dir: &BotDir) -> Result<()> {
@@ -446,12 +486,15 @@ mod tests {
                 key: "k".into(),
                 enabled: false,
             },
+            api_server_key: String::new(),
         };
-        let config = connect_config(&link, "jwt");
+        let config = connect_config(&link, "jwt", false);
         assert_eq!(config["runtime"], "hermes");
         assert_eq!(config["bot_id"], "b1");
         assert_eq!(config["token"], "jwt");
         assert_eq!(config["gateway"], link.endpoints.comms);
         assert!(!config.contains_key("data_dir"), "the token is never cached outside the credential store");
+        assert!(!config.contains_key("chat"), "a link without the contract announces nothing");
+        assert_eq!(connect_config(&link, "jwt", true)["chat"], "true");
     }
 }

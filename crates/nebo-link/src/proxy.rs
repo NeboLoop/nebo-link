@@ -5,7 +5,9 @@
 //! - refuses anything without that stamp, so only hub-authenticated requests
 //!   reach the runtime (a local program can reach the proxy's port, never
 //!   the stamp);
-//! - serves the link's own endpoints under `/_link/`;
+//! - serves the link's own endpoints under `/_link/`, and the chat contract
+//!   ([`crate::contract`]) on `/health`, `/api/v1/*` and `/ws` when the
+//!   runtime has a backend for it;
 //! - forwards everything else to the runtime's UI with the path and headers
 //!   the runtime expects ([`nebo_runtimes::ProxyRoute`]), streaming bodies
 //!   unbuffered;
@@ -33,6 +35,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
+use crate::contract::{self, Contract};
 use crate::endpoints::WEB_ORIGIN;
 use crate::rewrite::{Coding, Direction, RewrittenBody, Rewriter};
 
@@ -103,8 +106,15 @@ pub async fn bind_loopback(addr: SocketAddr) -> std::io::Result<TcpListener> {
 }
 
 /// Serves the proxy on `listener` until the task is dropped. `secret` is the
-/// tunnel's stamp (`nebo_comm::tunnel::tunnel_auth_secret()`).
-pub async fn serve<C: Control>(listener: TcpListener, target: Target, secret: String, control: Arc<C>) {
+/// tunnel's stamp (`nebo_comm::tunnel::tunnel_auth_secret()`); `contract`
+/// is the chat contract for the runtime, when it has one.
+pub async fn serve<C: Control>(
+    listener: TcpListener,
+    target: Target,
+    secret: String,
+    control: Arc<C>,
+    contract: Option<Arc<Contract>>,
+) {
     let rewriter = Arc::new(rewriter(&target));
     let target = Arc::new(target);
     let secret: Arc<str> = secret.into();
@@ -114,10 +124,11 @@ pub async fn serve<C: Control>(listener: TcpListener, target: Target, secret: St
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
         };
-        let (target, rewriter, secret, control) = (target.clone(), rewriter.clone(), secret.clone(), control.clone());
+        let (target, rewriter, secret, control, contract) =
+            (target.clone(), rewriter.clone(), secret.clone(), control.clone(), contract.clone());
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
-                handle(req, target.clone(), rewriter.clone(), secret.clone(), control.clone())
+                handle(req, target.clone(), rewriter.clone(), secret.clone(), control.clone(), contract.clone())
             });
             let _ = hyper::server::conn::http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
@@ -138,6 +149,7 @@ async fn handle<C: Control>(
     rewriter: Arc<Rewriter>,
     secret: Arc<str>,
     control: Arc<C>,
+    contract: Option<Arc<Contract>>,
 ) -> Result<Response<Body>, Infallible> {
     let stamped = req
         .headers()
@@ -149,6 +161,11 @@ async fn handle<C: Control>(
     let path = req.uri().path();
     if path == "/_link" || path.starts_with("/_link/") {
         return Ok(link_endpoint(req, control.as_ref()).await);
+    }
+    if let Some(contract) = &contract
+        && contract::routes(path)
+    {
+        return Ok(contract.handle(req).await);
     }
     Ok(forward(req, &target, rewriter).await)
 }

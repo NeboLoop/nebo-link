@@ -201,6 +201,11 @@ pub struct Link {
     /// tools keep working beside the proxy (OpenClaw `gateway.auth.password`).
     pub local_password: String,
     pub models: ModelsEndpoint,
+    /// The key the link wrote into the runtime's API server for its chat
+    /// contract ([`nebo_runtimes::ApiServer`]); empty on a link made before
+    /// the contract existed, and filled in by its service at the next start.
+    #[serde(default)]
+    pub api_server_key: String,
 }
 
 impl Link {
@@ -253,6 +258,12 @@ pub struct Status {
     pub tunnel: bool,
     /// The last connection failure, while not connected.
     pub error: Option<String>,
+    /// The chat contract is announced: the runtime's API answers the link.
+    #[serde(default)]
+    pub chat: bool,
+    /// Why the chat contract is not announced, when it is not.
+    #[serde(default)]
+    pub chat_error: Option<String>,
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -319,6 +330,7 @@ mod tests {
                 key: "k".into(),
                 enabled: false,
             },
+            api_server_key: String::new(),
         }
     }
 

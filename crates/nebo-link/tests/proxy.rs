@@ -217,7 +217,7 @@ async fn start_proxy(target: Target, secret: &str) -> (SocketAddr, Arc<FakeContr
     let listener = proxy::bind_loopback("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let control = Arc::new(FakeControl::default());
-    tokio::spawn(proxy::serve(listener, target, secret.into(), control.clone()));
+    tokio::spawn(proxy::serve(listener, target, secret.into(), control.clone(), None));
     (addr, control)
 }
 

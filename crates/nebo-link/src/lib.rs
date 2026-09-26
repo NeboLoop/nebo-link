@@ -2,6 +2,7 @@
 //! is `nebo-link`; this library is its implementation, split out so the
 //! integration tests can drive the proxy directly.
 
+pub mod contract;
 pub mod credentials;
 pub mod endpoints;
 pub mod error;

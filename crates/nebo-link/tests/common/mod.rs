@@ -176,6 +176,7 @@ impl Linked {
                 key: "k".into(),
                 enabled: false,
             },
+            api_server_key: String::new(),
         };
         let dir = root.bot(&bot_id);
         dir.create().unwrap();

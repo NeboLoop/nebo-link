@@ -1,11 +1,17 @@
-//! The link's operations on a bot: pairing, NeboAI models on and off, and
-//! unlinking. Each is one function the CLI and the running service share.
+//! The link's operations on a bot: pairing, NeboAI models on and off, the
+//! chat contract, and unlinking. Each is one function the CLI and the
+//! running service share.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use nebo_runtimes::{Change, ChangeKind, Environment, Journal, NeboaiModels, ProxyAccess, Runtime, detect};
+use nebo_runtimes::{
+    ApiServer, Change, ChangeKind, Environment, Installation, Journal, NeboaiModels, ProxyAccess, Runtime,
+    RuntimeCommand, Service, detect,
+};
 use tokio::sync::watch;
 
+use crate::contract::{self, Contract, Inbox};
 use crate::credentials::Credentials;
 use crate::endpoints::{Endpoints, WEB_ORIGIN};
 use crate::error::{Error, Result};
@@ -71,6 +77,7 @@ pub async fn pair(
             key: secret(),
             enabled: false,
         },
+        api_server_key: secret(),
     };
     dir.save(&link)?;
     // Linked again: what `status` said about its removal no longer applies.
@@ -82,6 +89,7 @@ pub async fn pair(
         Credentials::open(&dir).save(&resp.connection_token)?;
         let mut journal = Journal::open(dir.journal_file())?;
         let outcome = journal.apply(&install, None, &Change::ProxyAccess(proxy_access(&link)))?;
+        let restart = apply_api_server(&mut journal, &install, &link)?.or(outcome.restart);
         service::install(&service::Spec {
             bot_id: bot_id.clone(),
             exe,
@@ -90,7 +98,7 @@ pub async fn pair(
         })?;
         // Last, and not fatal: the link is running and connects as soon as
         // the agent comes back with its new settings.
-        let restart_failed = match outcome.restart {
+        let restart_failed = match restart {
             Some(command) => install::restart(&command).await.err().map(|e| e.to_string()),
             None => None,
         };
@@ -113,6 +121,76 @@ pub fn proxy_access(link: &Link) -> ProxyAccess {
         identity: link.owner_id.clone(),
         password: link.local_password.clone(),
     }
+}
+
+/// Turns on the runtime's API server for the chat contract, for the default
+/// profile and every named one (each needs its own key under Hermes'
+/// multiplexing). Returns the restart the runtime needs to read it, if any.
+pub fn apply_api_server(journal: &mut Journal, install: &Installation, link: &Link) -> Result<Option<RuntimeCommand>> {
+    let change = Change::ApiServer(ApiServer {
+        key: link.api_server_key.clone(),
+    });
+    let mut restart = journal.apply(install, None, &change)?.restart;
+    for profile in &install.profiles {
+        restart = restart.or(journal.apply(install, Some(&profile.name), &change)?.restart);
+    }
+    Ok(restart)
+}
+
+/// The chat contract for `link`: the runtime's API server turned on with
+/// the link's key (journaled, restarted when that changed) and a backend
+/// on it. `Err` says why the contract can't be served for this install, for
+/// `nebo-link status`; nothing is then announced.
+pub async fn chat(
+    dir: &BotDir,
+    link: &mut Link,
+    install: &Installation,
+    token: watch::Receiver<String>,
+) -> std::result::Result<Arc<Contract>, String> {
+    match link.runtime {
+        Runtime::Hermes => {}
+        Runtime::Openclaw => return Err("chat with OpenClaw is not supported yet".to_owned()),
+    }
+    if link.api_server_key.is_empty() {
+        link.api_server_key = secret();
+        dir.save(link).map_err(|e| e.to_string())?;
+    }
+    let mut journal = Journal::open(dir.journal_file()).map_err(|e| e.to_string())?;
+    let restart = apply_api_server(&mut journal, install, link)
+        .map_err(|e| format!("could not turn on the {} API server: {e}", runtime_name(link.runtime)))?;
+    if let Some(command) = restart
+        && let Err(e) = install::restart(&command).await
+    {
+        tracing::info!(error = %e, "the runtime was not restarted onto its API server key");
+    }
+    // Detected again: the API server's endpoint appears once its key is in
+    // place, unless the config keeps it off.
+    let install = install::find(link).map_err(|e| e.to_string())?;
+    let default = install
+        .endpoints
+        .iter()
+        .find(|e| {
+            e.service
+                == Service::HermesApiServer {
+                    profile: "default".to_owned(),
+                }
+        })
+        .ok_or_else(|| {
+            format!(
+                "the Hermes API server is turned off in {} (platforms.api_server.enabled)",
+                install.config_path.display()
+            )
+        })?;
+    let profiles = install.profiles.iter().map(|p| p.name.clone()).collect();
+    let backend = contract::hermes::Hermes::new(&format!("http://{}", default.addr), &link.api_server_key, profiles);
+    let inbox = Inbox::new(&link.endpoints.api, &link.bot_id, token);
+    Ok(Contract::new(
+        runtime_key(link.runtime),
+        runtime_name(link.runtime),
+        &link.bot_id,
+        Arc::new(backend),
+        Some(inbox),
+    ))
 }
 
 /// The models endpoint as seen from `link` with `token`.
@@ -211,8 +289,13 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
         Ok(install) => {
             let mut journal = Journal::open(dir.journal_file())?;
             let mut restart = None;
-            for kind in [ChangeKind::NeboaiModels, ChangeKind::ProxyAccess] {
+            for kind in [ChangeKind::NeboaiModels, ChangeKind::ProxyAccess, ChangeKind::ApiServer] {
                 let outcome = journal.revert(&install, None, kind)?;
+                unlinked.conflicts.extend(outcome.conflicts);
+                restart = restart.or(outcome.restart);
+            }
+            for profile in &install.profiles {
+                let outcome = journal.revert(&install, Some(&profile.name), ChangeKind::ApiServer)?;
                 unlinked.conflicts.extend(outcome.conflicts);
                 restart = restart.or(outcome.restart);
             }
@@ -323,6 +406,7 @@ mod tests {
                 key: "k".into(),
                 enabled: false,
             },
+            api_server_key: String::new(),
         };
         let access = proxy_access(&link);
         assert_eq!(access.base_path, "/t/b1");

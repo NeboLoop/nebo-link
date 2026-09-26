@@ -146,6 +146,24 @@ impl Client {
         self.json(Method::GET, "/v1/capabilities", None::<&()>).await
     }
 
+    /// `GET /health` (`api_server.py` `_handle_health`): liveness and the
+    /// server's version (`_hermes_version`, the package version on v0.19.0
+    /// and the install stamp's base version since).
+    pub async fn health(&self) -> Result<Health, Error> {
+        self.json(Method::GET, "/health", None::<&()>).await
+    }
+
+    /// `GET /api/sessions/{id}` (`api_server.py` `_handle_get_session`).
+    pub async fn session(&self, session_id: &str) -> Result<Session, Error> {
+        #[derive(Deserialize)]
+        struct Wrapped {
+            session: Session,
+        }
+        let path = format!("/api/sessions/{}", encode(session_id));
+        let wrapped: Wrapped = self.json(Method::GET, &path, None::<&()>).await?;
+        Ok(wrapped.session)
+    }
+
     /// `GET /api/sessions` (`api_server.py` `_handle_list_sessions`), most
     /// recently active first.
     pub async fn sessions(&self, query: &SessionQuery) -> Result<SessionPage, Error> {
@@ -454,6 +472,18 @@ fn encode(text: &str) -> String {
 }
 
 // -- Capabilities -----------------------------------------------------------
+
+/// `GET /health` (`api_server.py` `_handle_health`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Health {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub platform: String,
+    /// `0.19.0`, `0.21.5`, or `dev` when the server can't tell.
+    #[serde(default)]
+    pub version: String,
+}
 
 /// `GET /v1/capabilities` (`api_server.py` `_handle_capabilities`,
 /// `:2494-2532`).
@@ -860,6 +890,22 @@ impl Choice {
             Choice::Session => "session",
             Choice::Always => "always",
             Choice::Deny => "deny",
+        }
+    }
+}
+
+impl std::str::FromStr for Choice {
+    type Err = ();
+
+    /// The wire words only; the server's `approve`/`allow` aliases are its
+    /// own business.
+    fn from_str(text: &str) -> Result<Self, ()> {
+        match text {
+            "once" => Ok(Choice::Once),
+            "session" => Ok(Choice::Session),
+            "always" => Ok(Choice::Always),
+            "deny" => Ok(Choice::Deny),
+            _ => Err(()),
         }
     }
 }

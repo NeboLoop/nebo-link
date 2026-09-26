@@ -261,6 +261,14 @@ fn status(root: &Root) -> Result<()> {
         println!("  bot:     {}", link.bot_id);
         println!("  agent:   {} ({}) at {}", runtime_name(link.runtime), runtime_key(link.runtime), link.home.display());
         println!("  status:  {state}");
+        if let Some(s) = &running {
+            let chat = match (&s.chat, &s.chat_error) {
+                (true, _) => "on".to_string(),
+                (false, Some(why)) => format!("off: {why}"),
+                (false, None) => "off".to_string(),
+            };
+            println!("  chat:    {chat}");
+        }
         println!("  models:  {}", if link.models.enabled { "NeboAI" } else { "the agent's own" });
         println!("  state:   {}", dir.path().display());
     }
