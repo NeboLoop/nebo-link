@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use nebo_runtimes::{
-    Change, ChangeKind, Environment, Error, Installation, Journal, Model, NeboaiModels, PathMode,
+    ApiServer, Change, ChangeKind, Environment, Error, Installation, Journal, Model, NeboaiModels, PathMode,
     ProxyAccess, Runtime, Service, detect,
 };
 use serde_json::Value;
@@ -745,5 +745,164 @@ fn bad_targets_and_parameters_are_errors() {
             .revert(&install, None, ChangeKind::NeboaiModels)
             .unwrap()
             .changed
+    );
+}
+
+#[test]
+fn hermes_api_server_key_per_profile_round_trip() {
+    let home = hermes_home();
+    let install = home.install(Runtime::Hermes);
+    let mut journal = home.journal();
+    let default_env = home.path(".hermes/.env");
+    let writer_env = home.path(".hermes/profiles/writer/.env");
+    let original = fs::read_to_string(&default_env).unwrap();
+    let change = Change::ApiServer(ApiServer {
+        key: "fedcba9876543210fedcba98".into(),
+    });
+
+    // The default profile already has a key: the one line is replaced, the
+    // comment above it stays, and the gateway must restart to read it.
+    let outcome = journal.apply(&install, None, &change).unwrap();
+    assert!(outcome.changed);
+    assert_eq!(outcome.restart.as_ref(), Some(&install.restart));
+    assert_eq!(
+        fs::read_to_string(&default_env).unwrap(),
+        "# keys\nAPI_SERVER_KEY=fedcba9876543210fedcba98\n"
+    );
+    assert!(!journal.apply(&install, None, &change).unwrap().changed);
+
+    // A profile without a `.env` gets one, owner-only, and the API server
+    // is then detected for it at `/p/writer`.
+    assert!(!writer_env.exists());
+    let outcome = journal.apply(&install, Some("writer"), &change).unwrap();
+    assert!(outcome.changed);
+    assert_eq!(
+        fs::read_to_string(&writer_env).unwrap(),
+        "API_SERVER_KEY=fedcba9876543210fedcba98\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&writer_env).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let detected = home.install(Runtime::Hermes);
+    let writer = detected
+        .endpoints
+        .iter()
+        .find(|e| {
+            e.service
+                == Service::HermesApiServer {
+                    profile: "writer".into(),
+                }
+        })
+        .expect("writer's API server");
+    assert_eq!(writer.base_path, "/p/writer");
+    assert_eq!(writer.addr, addr("127.0.0.1:8650"));
+    assert_eq!(journal.applied().len(), 2);
+    assert_eq!(journal.applied()[1].config_path, writer_env);
+
+    // Reverts restore the file exactly, or remove the one the link created.
+    journal
+        .revert(&install, Some("writer"), ChangeKind::ApiServer)
+        .unwrap();
+    assert!(!writer_env.exists());
+    let outcome = journal
+        .revert(&install, None, ChangeKind::ApiServer)
+        .unwrap();
+    assert!(outcome.changed);
+    assert_eq!(outcome.restart.as_ref(), Some(&install.restart));
+    assert_eq!(fs::read_to_string(&default_env).unwrap(), original);
+    assert!(journal.applied().is_empty());
+}
+
+#[test]
+fn hermes_api_server_key_revert_keeps_the_owners_later_edits() {
+    let home = hermes_home();
+    let install = home.install(Runtime::Hermes);
+    let mut journal = home.journal();
+    let env = home.path(".hermes/.env");
+    journal
+        .apply(
+            &install,
+            None,
+            &Change::ApiServer(ApiServer {
+                key: "fedcba9876543210fedcba98".into(),
+            }),
+        )
+        .unwrap();
+    // The owner adds a variable afterwards.
+    let mut text = fs::read_to_string(&env).unwrap();
+    text.push_str("OPENAI_API_KEY=sk-live\n");
+    fs::write(&env, &text).unwrap();
+    let outcome = journal
+        .revert(&install, None, ChangeKind::ApiServer)
+        .unwrap();
+    assert!(outcome.conflicts.is_empty());
+    // A semantic revert restores the value, not the owner's quoting.
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        "# keys\nAPI_SERVER_KEY=0123456789abcdef0123\nOPENAI_API_KEY=sk-live\n"
+    );
+
+    // The owner changed the key itself: it is left alone and reported.
+    journal
+        .apply(
+            &install,
+            None,
+            &Change::ApiServer(ApiServer {
+                key: "fedcba9876543210fedcba98".into(),
+            }),
+        )
+        .unwrap();
+    fs::write(&env, "# keys\nAPI_SERVER_KEY=owners-own-key-0000\n").unwrap();
+    let outcome = journal
+        .revert(&install, None, ChangeKind::ApiServer)
+        .unwrap();
+    assert_eq!(outcome.conflicts, vec!["API_SERVER_KEY".to_owned()]);
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        "# keys\nAPI_SERVER_KEY=owners-own-key-0000\n"
+    );
+}
+
+#[test]
+fn api_server_keys_are_checked_and_openclaw_needs_none() {
+    let home = hermes_home();
+    let install = home.install(Runtime::Hermes);
+    let mut journal = home.journal();
+    for key in ["short", "xxxx-xxxx-xxxx-xxxx-xx", "has space in it 0123", "quote\"0123456789abcdef"] {
+        assert!(
+            matches!(
+                journal.apply(
+                    &install,
+                    None,
+                    &Change::ApiServer(ApiServer { key: key.into() })
+                ),
+                Err(Error::InvalidChange(_))
+            ),
+            "{key}"
+        );
+    }
+
+    let home = Home::new();
+    home.write(".openclaw/openclaw.json", OPENCLAW_FIXTURE);
+    let install = home.install(Runtime::Openclaw);
+    let outcome = home
+        .journal()
+        .apply(
+            &install,
+            None,
+            &Change::ApiServer(ApiServer {
+                key: "fedcba9876543210fedcba98".into(),
+            }),
+        )
+        .unwrap();
+    assert!(!outcome.changed);
+    assert_eq!(
+        fs::read_to_string(home.path(".openclaw/openclaw.json")).unwrap(),
+        OPENCLAW_FIXTURE
     );
 }

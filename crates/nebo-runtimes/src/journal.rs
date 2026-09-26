@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::doc::dotenv::Dotenv;
 use crate::doc::json5::Json5;
 use crate::doc::yaml::Yaml;
 use crate::doc::{self, Edit, Format, Record};
@@ -110,9 +111,12 @@ impl Journal {
         change: &Change,
     ) -> Result<Outcome, Error> {
         change.validate()?;
-        match install.runtime {
-            Runtime::Openclaw => self.apply_in::<Json5>(install, profile, change),
-            Runtime::Hermes => self.apply_in::<Yaml>(install, profile, change),
+        match (install.runtime, change.kind()) {
+            (Runtime::Openclaw, _) => self.apply_in::<Json5>(install, profile, change),
+            (Runtime::Hermes, ChangeKind::ApiServer) => {
+                self.apply_in::<Dotenv>(install, profile, change)
+            }
+            (Runtime::Hermes, _) => self.apply_in::<Yaml>(install, profile, change),
         }
     }
 
@@ -124,9 +128,12 @@ impl Journal {
         profile: Option<&str>,
         kind: ChangeKind,
     ) -> Result<Outcome, Error> {
-        match install.runtime {
-            Runtime::Openclaw => self.revert_in::<Json5>(install, profile, kind),
-            Runtime::Hermes => self.revert_in::<Yaml>(install, profile, kind),
+        match (install.runtime, kind) {
+            (Runtime::Openclaw, _) => self.revert_in::<Json5>(install, profile, kind),
+            (Runtime::Hermes, ChangeKind::ApiServer) => {
+                self.revert_in::<Dotenv>(install, profile, kind)
+            }
+            (Runtime::Hermes, _) => self.revert_in::<Yaml>(install, profile, kind),
         }
     }
 
@@ -136,7 +143,7 @@ impl Journal {
         profile: Option<&str>,
         change: &Change,
     ) -> Result<Outcome, Error> {
-        let file = config_file(install, profile)?;
+        let file = config_file(install, profile, change.kind())?;
         let current = read_optional(&file)?;
         let text = current.clone().unwrap_or_else(|| F::EMPTY.to_owned());
         let edits = edits_for(install.runtime, &file, &text, change)?;
@@ -192,7 +199,7 @@ impl Journal {
         profile: Option<&str>,
         kind: ChangeKind,
     ) -> Result<Outcome, Error> {
-        let file = config_file(install, profile)?;
+        let file = config_file(install, profile, kind)?;
         let Some(index) = self.position(&file, kind) else {
             return Ok(unchanged());
         };
@@ -264,10 +271,16 @@ fn parse_error(path: &Path, message: String) -> Error {
     }
 }
 
-fn config_file(install: &Installation, profile: Option<&str>) -> Result<PathBuf, Error> {
-    match install.runtime {
-        Runtime::Openclaw => openclaw::config_file(install, profile),
-        Runtime::Hermes => hermes::config_file(install, profile),
+/// The file a change of `kind` is written to.
+fn config_file(
+    install: &Installation,
+    profile: Option<&str>,
+    kind: ChangeKind,
+) -> Result<PathBuf, Error> {
+    match (install.runtime, kind) {
+        (Runtime::Openclaw, _) => openclaw::config_file(install, profile),
+        (Runtime::Hermes, ChangeKind::ApiServer) => hermes::env_file(install, profile),
+        (Runtime::Hermes, _) => hermes::config_file(install, profile),
     }
 }
 
@@ -283,6 +296,7 @@ fn edits_for(
             let edits = match change {
                 Change::ProxyAccess(access) => openclaw::proxy_access(&config, access),
                 Change::NeboaiModels(models) => openclaw::neboai_models(&config, models),
+                Change::ApiServer(_) => Vec::new(),
             };
             openclaw::check_includes(&config, &edits, file)?;
             Ok(edits)
@@ -290,6 +304,7 @@ fn edits_for(
         Runtime::Hermes => Ok(match change {
             Change::ProxyAccess(_) => Vec::new(),
             Change::NeboaiModels(models) => hermes::neboai_models(models),
+            Change::ApiServer(api) => hermes::api_server_key(api),
         }),
     }
 }
@@ -298,7 +313,7 @@ fn edits_for(
 /// `after`. OpenClaw reloads live except for the cases in
 /// [`openclaw::needs_restart`]. Hermes reads its model per new session, so
 /// the gateway is restarted to move running sessions onto (or off) the
-/// endpoint.
+/// endpoint; it reads `.env` at start, so the API server key needs one too.
 fn restart_for(
     install: &Installation,
     kind: ChangeKind,
@@ -310,7 +325,7 @@ fn restart_for(
             (Ok(before), Ok(after)) => openclaw::needs_restart(&before, &after),
             _ => true,
         },
-        Runtime::Hermes => kind == ChangeKind::NeboaiModels,
+        Runtime::Hermes => matches!(kind, ChangeKind::NeboaiModels | ChangeKind::ApiServer),
     };
     needed.then(|| install.restart.clone())
 }
