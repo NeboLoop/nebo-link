@@ -95,6 +95,7 @@ fn linked_hermes(hub: &FakeHub, api_port: u16, dashboard_port: u16) -> (tempfile
                 services: vec![],
             }),
         }],
+        oal: Default::default(),
     })
     .unwrap();
     Credentials::open(&dir).save("bot-token").unwrap();
@@ -161,7 +162,7 @@ async fn chat_is_announced_when_the_gateway_comes_up() {
     let mut hub = FakeHub::start().await;
     let api_port = free_port();
     let (tmp, root, bot_id) = linked_hermes(&hub, api_port, free_port());
-    let service = tokio::spawn(async move { nebo_link::run::run(&root, &bot_id).await });
+    let service = tokio::spawn(async move { nebo_link::run::run(&root, &bot_id, Default::default()).await });
 
     // Nothing answers on the gateway's port: CONNECT announces no chat.
     let (mut ws, payload) = hub.next_connect().await;

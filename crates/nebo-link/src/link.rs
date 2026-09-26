@@ -95,6 +95,7 @@ pub struct Paired {
 /// The agent is found (and a coding agent started once) before the code is
 /// spent, so an agent that can't run is refused while the code is good.
 pub async fn pair(root: &Root, code: &str, wanted: Wanted, name: Option<String>, exe: PathBuf) -> Result<Paired> {
+    crate::oal::refuse_if_an_app_hosts(root.path())?;
     if let Some(linked) = root.links()?.first() {
         return Err(Error::Message(format!(
             "This computer is already linked as \"{}\". Add an agent to it with `nebo-link add`.",
@@ -128,6 +129,7 @@ pub async fn pair(root: &Root, code: &str, wanted: Wanted, name: Option<String>,
         owner_id: resp.id.clone(),
         endpoints,
         agents: Vec::new(),
+        oal: Default::default(),
     };
     dir.save(&link)?;
     // Linked again: what `status` said about a removal no longer applies.
@@ -879,6 +881,7 @@ mod tests {
                 runtime: Runtime::Openclaw,
                 via: Via::Install(settings.clone()),
             }],
+            oal: Default::default(),
         };
         let access = proxy_access(&link, &settings);
         assert_eq!(access.base_path, "/t/b1");

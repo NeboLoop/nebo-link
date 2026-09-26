@@ -68,6 +68,7 @@ async fn hermes_gateway_and_dashboard_are_started_and_stopped() {
                 services: vec![],
             }),
         }],
+        oal: Default::default(),
     })
     .unwrap();
     let dir = bot.agent(PRIMARY);

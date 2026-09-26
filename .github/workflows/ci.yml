@@ -52,11 +52,15 @@ jobs:
     env:
       OAL_CONFORMANCE: ${{ github.workspace }}/target/debug/oal-conformance
       OAL_RELAY: ${{ github.workspace }}/target/debug/oal-relay
+      # oal-secure's host peer: the SDKs' end-to-end encryption against the
+      # Rust implementation.
+      OAL_PEER: ${{ github.workspace }}/target/debug/examples/peer
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p oal-conformance -p oal-relay --locked
+      - run: cargo build -p oal-secure --example peer --locked
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: sdk/typescript/package.json
@@ -79,6 +83,33 @@ jobs:
           uv sync --locked
           uv run mypy
           uv run pytest -W error
+
+  # The proof that nebo-link is an Open Agent Link host: a real nebo-link with
+  # the conformance suite's scripted agent, end-to-end encrypted, through a
+  # local oal-relay and on the LAN: every conformance example, and the SDKs'
+  # live tests (pair, prompt, permission, reconnect). See scripts/oal-proof.sh.
+  oal-proof:
+    name: OAL proof (nebo-link, relay, LAN, SDKs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p nebo-link -p oal-relay -p oal-conformance --locked
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk/typescript/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: sdk/typescript
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+        working-directory: sdk/python
+      - run: scripts/oal-proof.sh target/debug
 
   # Guards the release workflow: its builds run on the house machines, never
   # on GitHub-hosted runners. See scripts/check-release-runners.py.

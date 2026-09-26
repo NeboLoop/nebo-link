@@ -46,7 +46,7 @@ use crate::install::{self, runtime_key, runtime_name};
 use crate::link::{self, By, ModelsChange};
 use crate::offsets::FileOffsets;
 use crate::proxy::{self, Control, Target};
-use crate::state::{BotDir, Hosted, Link, Root, STATUS_EVERY, Status};
+use crate::state::{BotDir, Hosted, Link, Oal, Root, STATUS_EVERY, Status};
 use crate::supervise::Supervisor;
 use crate::update::{self, Staged};
 
@@ -79,9 +79,19 @@ struct Service {
     /// What the current connection's CONNECT said about `chat`.
     announced: AtomicBool,
     supervisors: Vec<Arc<Supervisor>>,
+    /// The bot's Open Agent Link host, when it could start.
+    oal: Option<crate::oal::Service>,
 }
 
 impl Service {
+    /// Closes every Open Agent Link connection with 1001: clients reconnect
+    /// once the service is back.
+    fn close_oal(&self) {
+        if let Some(oal) = &self.oal {
+            oal.host.shutdown();
+        }
+    }
+
     fn status(&self) -> Status {
         let online = *self.online.borrow();
         let chat_error = self.chat_error.lock().expect("chat lock").clone();
@@ -94,6 +104,7 @@ impl Service {
             chat: chat_error.is_none(),
             chat_error,
             processes: self.supervisors.iter().flat_map(|s| s.status()).collect(),
+            oal: self.oal.as_ref().map(crate::oal::Service::status).unwrap_or_default(),
         }
     }
 
@@ -183,7 +194,9 @@ impl Control for Service {
     }
 }
 
-pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
+/// Runs the bot's service. `oal` overrides the link's Open Agent Link
+/// settings where it sets them (the command line's `--relay`, `--lan`).
+pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     // The binary this service was started as, read before anything can
     // replace it: an update restarts into what is at this path.
     let exe = std::env::current_exe()
@@ -263,6 +276,17 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
     }
 
     let (contract, host) = link::chat(&dir, &link, &installs, token_rx.clone()).await;
+    let settings = Oal {
+        relay: oal.relay.or(link.oal.relay.clone()),
+        lan: oal.lan.or(link.oal.lan.clone()),
+    };
+    let oal = match crate::oal::start(&dir, &link, host.clone(), settings).await {
+        Ok(oal) => Some(oal),
+        Err(e) => {
+            tracing::error!(error = %e, "open agent link could not start; NeboAI still reaches the agents");
+            None
+        }
+    };
     let supervisors: Vec<Arc<Supervisor>> = installs
         .iter()
         .filter_map(|(id, install)| {
@@ -286,6 +310,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         chat_error: Mutex::new(None),
         announced: AtomicBool::new(false),
         supervisors: supervisors.clone(),
+        oal,
     });
 
     tokio::spawn(proxy::serve(
@@ -413,6 +438,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
                     Ended::Shutdown => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
+                        service.close_oal();
                         return stopped(&dir);
                     }
                     Ended::Revoked => break,
@@ -439,7 +465,10 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         };
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = &mut shutdown => return stopped(&dir),
+            _ = &mut shutdown => {
+                service.close_oal();
+                return stopped(&dir);
+            }
             Some(next) = staged.recv() => {
                 let e = update::restart(next, root, &exe);
                 tracing::error!(error = %e, "could not restart as the new version");
@@ -651,6 +680,7 @@ mod tests {
                     workdir: "/w".into(),
                 }),
             }],
+            oal: Default::default(),
         };
         let config = connect_config(&link, "jwt", false);
         assert_eq!(config["runtime"], "codex");

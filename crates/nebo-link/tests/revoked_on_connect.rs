@@ -16,7 +16,7 @@ fn a_dropped_connection_is_redialed_and_a_revoked_connect_unlinks() {
     let linked = Linked::new(&hub.comms, &hub.tunnel);
 
     runtime.block_on(async {
-        let service = tokio::time::timeout(PATIENCE, nebo_link::run::run(&linked.root, &linked.bot_id));
+        let service = tokio::time::timeout(PATIENCE, nebo_link::run::run(&linked.root, &linked.bot_id, Default::default()));
         let hub_side = async {
             let (mut ws, _) = hub.next_connect().await;
             answer(&mut ws, None).await;

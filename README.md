@@ -81,6 +81,17 @@ The service is a launchd agent on macOS, a systemd user unit on Linux (a system 
 
 Nebo Link is the reference implementation of [Open Agent Link](https://openagent.link) (OAL), an open protocol for reaching agents on any computer: ACP, made reachable, plus a thin host layer. The specification, JSON Schemas, examples and RFC process are in [`spec/`](spec/); the conformance suite is [`crates/oal-conformance`](crates/oal-conformance); the self-hostable relay is [`crates/oal-relay`](crates/oal-relay). Client SDKs for driving linked agents from your own apps: [TypeScript](sdk/typescript) (`@openagentlink/client`) and [Python](sdk/python) (`openagentlink`).
 
+The service serves every agent it hosts over OAL too ([`crates/oal-host`](crates/oal-host)), beside NeboAI. Every connection is end-to-end encrypted: a device pairs once with a code, and the relay in between forwards what it can't read.
+
+```sh
+nebo-link relay https://relay.example.com   # reach the agents through your own oal-relay
+nebo-link lan on                            # or directly on this network (wss://<computer>:8481/oal)
+nebo-link pair                              # show a one-time code; enter it in the app
+nebo-link unpair "Alma's phone"             # a device you no longer use
+```
+
+`nebo-link status` shows the relay, LAN direct's certificate fingerprint and the paired devices. `scripts/oal-proof.sh` runs the conformance suite and the SDKs' live tests against a real nebo-link, through a local relay and on the LAN.
+
 ## License
 
 Apache-2.0 (see `LICENSE` and `NOTICE`). The specification in `spec/` is CC-BY-4.0. Contributions are signed off under the DCO; see `CONTRIBUTING.md`.

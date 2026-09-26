@@ -2338,6 +2338,7 @@ async fn one_bot_hosts_several_agents_and_keeps_them_apart() {
         owner_id: "owner-1".into(),
         endpoints: nebo_link::endpoints::Endpoints::from_env(),
         agents: vec![site.clone(), api.clone(), codex.clone()],
+        oal: Default::default(),
     };
     let members = link.agents.iter().filter_map(|a| nebo_link::link::acp_member(&dir, a)).collect();
     let roster = Arc::new(Roster::new(members));

@@ -14,8 +14,8 @@ use nebo_link::credentials::Credentials;
 use nebo_link::error::{Error, Result};
 use nebo_link::install::{runtime_key, runtime_name};
 use nebo_link::link::{Released, Wanted};
-use nebo_link::state::{Hosted, Root, STATUS_EVERY};
-use nebo_link::{link, run, service, update};
+use nebo_link::state::{Hosted, Oal, Root, STATUS_EVERY};
+use nebo_link::{link, oal, run, service, update};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -64,6 +64,42 @@ enum Command {
     Run {
         #[arg(long)]
         bot: String,
+        /// Serve Open Agent Link through this relay (a self-hosted
+        /// oal-relay), instead of the one `nebo-link relay` set.
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+        /// Serve Open Agent Link on the LAN at this address, instead of what
+        /// `nebo-link lan` set.
+        #[arg(long, value_name = "ADDRESS")]
+        lan: Option<String>,
+    },
+    /// Pair a device (a phone, a laptop, any Open Agent Link app) with this
+    /// computer's agents: shows a one-time code to enter in the app.
+    Pair {
+        #[arg(long)]
+        bot: Option<String>,
+    },
+    /// Unpair a device, by its name or id: it can no longer reach the agents.
+    Unpair {
+        device: String,
+        #[arg(long)]
+        bot: Option<String>,
+    },
+    /// Reach the agents through an Open Agent Link relay you run
+    /// (`oal-relay`), or `off`.
+    Relay {
+        #[arg(value_name = "URL|off")]
+        url: String,
+        #[arg(long)]
+        bot: Option<String>,
+    },
+    /// Serve Open Agent Link directly on the local network: `on`
+    /// (0.0.0.0:8481), an address and port, or `off`.
+    Lan {
+        #[arg(value_name = "on|off|ADDRESS")]
+        state: String,
+        #[arg(long)]
+        bot: Option<String>,
     },
     /// Show what is linked, the agents it hosts, and whether it is connected.
     Status,
@@ -195,9 +231,58 @@ async fn dispatch(cli: Cli) -> Result<()> {
         };
     };
     match command {
-        Command::Run { bot } => {
+        Command::Run { bot, relay, lan } => {
             let _log = init_logging(Some(root.bot(&bot).logs_dir()));
-            run::run(&root, &bot).await
+            run::run(&root, &bot, Oal { relay, lan }).await
+        }
+        Command::Pair { bot } => {
+            let _log = init_logging(None);
+            oal_pair(&root, bot.as_deref()).await
+        }
+        Command::Unpair { device, bot } => {
+            let _log = init_logging(None);
+            let link = root.select(bot.as_deref())?;
+            let request = oal::Request::Unpair { id: oal::request_id(), device };
+            let answer = oal::ask(&root.bot(&link.bot_id), request).await?;
+            match (answer.error, answer.paired) {
+                (Some(error), _) => Err(Error::Message(error)),
+                (None, name) => {
+                    println!("Unpaired {}. It can no longer reach {}'s agents.", name.unwrap_or_default(), link.name);
+                    Ok(())
+                }
+            }
+        }
+        Command::Relay { url, bot } => {
+            let _log = init_logging(None);
+            let relay = (url != "off").then_some(url);
+            if let Some(url) = &relay {
+                oal_relay::RelayClient::new(url, oal_relay::Keypair::generate()).map_err(|e| Error::Message(e.to_string()))?;
+            }
+            set_oal(&root, bot.as_deref(), |oal| oal.relay = relay.clone())?;
+            match relay {
+                Some(url) => println!("The agents are reachable through {url}. Pair a device with `nebo-link pair`."),
+                None => println!("No relay: Open Agent Link apps reach the agents only on the LAN, if it's on."),
+            }
+            Ok(())
+        }
+        Command::Lan { state, bot } => {
+            let _log = init_logging(None);
+            let lan = match state.as_str() {
+                "off" => None,
+                "on" => Some(oal::DEFAULT_LAN.to_owned()),
+                address => {
+                    address
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|_| Error::Message(format!("{address} isn't an address and port, like {}.", oal::DEFAULT_LAN)))?;
+                    Some(address.to_owned())
+                }
+            };
+            set_oal(&root, bot.as_deref(), |oal| oal.lan = lan.clone())?;
+            match lan {
+                Some(address) => println!("LAN direct is on at {address}: apps on this network reach the agents at wss://<this computer>/oal."),
+                None => println!("LAN direct is off."),
+            }
+            Ok(())
         }
         Command::Status => status(&root),
         Command::Add {
@@ -270,6 +355,43 @@ async fn dispatch(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `nebo-link pair`: a one-time code from the running service, shown until
+/// a device pairs with it or it expires.
+async fn oal_pair(root: &Root, bot: Option<&str>) -> Result<()> {
+    oal::refuse_if_an_app_hosts(root.path())?;
+    let link = root.select(bot)?;
+    let dir = root.bot(&link.bot_id);
+    let answer = oal::ask(&dir, oal::Request::Pair { id: oal::request_id() }).await?;
+    if let Some(error) = answer.error {
+        return Err(Error::Message(error));
+    }
+    let code = answer.code.clone().unwrap_or_default();
+    println!("{code}");
+    println!("Enter this code in the app to pair it with {}. It works once, for 10 minutes.", link.name);
+    match oal::paired(&dir, &answer).await {
+        Some(device) => {
+            println!("Paired {device}.");
+            Ok(())
+        }
+        None => Err(Error::Message("The code expired. Run `nebo-link pair` for a new one.".to_owned())),
+    }
+}
+
+/// Changes the bot's Open Agent Link settings and restarts its service to
+/// take them.
+fn set_oal(root: &Root, bot: Option<&str>, change: impl FnOnce(&mut Oal)) -> Result<()> {
+    let mut link = root.select(bot)?;
+    change(&mut link.oal);
+    let dir = root.bot(&link.bot_id);
+    dir.save(&link)?;
+    if service::installed(&link.bot_id)
+        && let Err(e) = service::restart(&link.bot_id)
+    {
+        println!("Restart nebo-link to take this: {e}");
+    }
+    Ok(())
 }
 
 async fn pair(root: &Root, code: &str, wanted: Wanted, name: Option<String>) -> Result<()> {
@@ -401,6 +523,15 @@ fn status(root: &Root) -> Result<()> {
             println!("  chat:    {chat}");
             for process in &s.processes {
                 println!("  {:<9}{}", format!("{}:", process.name), nebo_link::supervise::describe(process));
+            }
+            if let Some(relay) = &s.oal.relay {
+                println!("  relay:   {relay} ({})", if s.oal.relay_connected { "connected" } else { "connecting" });
+            }
+            if let (Some(lan), Some(fingerprint)) = (&s.oal.lan, &s.oal.fingerprint) {
+                println!("  lan:     wss://{lan}/oal (certificate {fingerprint})");
+            }
+            if !s.oal.devices.is_empty() {
+                println!("  devices: {}", s.oal.devices.join(", "));
             }
         }
         if link.agents.iter().any(|a| a.install().is_some()) {
@@ -545,8 +676,22 @@ mod tests {
     fn subcommands() {
         assert!(matches!(
             parse(&["run", "--bot", "b1"]).unwrap().command,
-            Some(Command::Run { bot }) if bot == "b1"
+            Some(Command::Run { bot, relay: None, lan: None }) if bot == "b1"
         ));
+        assert!(matches!(
+            parse(&["run", "--bot", "b1", "--relay", "http://127.0.0.1:8480", "--lan", "127.0.0.1:8481"]).unwrap().command,
+            Some(Command::Run { relay: Some(r), lan: Some(l), .. }) if r == "http://127.0.0.1:8480" && l == "127.0.0.1:8481"
+        ));
+        assert!(matches!(parse(&["pair"]).unwrap().command, Some(Command::Pair { bot: None })));
+        assert!(matches!(
+            parse(&["unpair", "Alma's phone"]).unwrap().command,
+            Some(Command::Unpair { device, bot: None }) if device == "Alma's phone"
+        ));
+        assert!(matches!(
+            parse(&["relay", "off", "--bot", "b1"]).unwrap().command,
+            Some(Command::Relay { url, bot: Some(_) }) if url == "off"
+        ));
+        assert!(matches!(parse(&["lan", "on"]).unwrap().command, Some(Command::Lan { state, .. }) if state == "on"));
         assert!(parse(&["run"]).is_err(), "run needs --bot");
         assert!(matches!(parse(&["status"]).unwrap().command, Some(Command::Status)));
         assert!(matches!(
