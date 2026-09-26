@@ -9,6 +9,9 @@
 //!   removed.json   only this, once NeboAI removed the bot and the service
 //!                  unlinked it (what `nebo-link status` reports)
 //!   token          the bot token (0600)
+//!   openclaw-device.json
+//!                  the keypair the link's own OpenClaw gateway socket
+//!                  proves itself with (chat contract)
 //!   logs/          rotating service logs
 //! ```
 //!
@@ -138,6 +141,9 @@ impl BotDir {
     }
     pub fn token_file(&self) -> PathBuf {
         self.0.join("token")
+    }
+    pub fn device_file(&self) -> PathBuf {
+        self.0.join("openclaw-device.json")
     }
     pub fn logs_dir(&self) -> PathBuf {
         self.0.join("logs")

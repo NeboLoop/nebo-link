@@ -35,7 +35,7 @@ Removing the bot in the NeboAI app unlinks it here too: the service restores you
 
 ## Chat from the phone
 
-A linked Hermes gets a native chat in the NeboAI app: its profiles are listed as employees, a conversation is one Hermes session, replies stream with their tool cards, and when Hermes stops to ask about a command the question reaches the phone as a card in the chat and an item in your inbox. Answer it there or in Hermes; both see the same answer. For this the link turns on Hermes' local API server with a key of its own (`API_SERVER_KEY` in the profile's `.env`, loopback only, recorded like every other change) and announces `chat` to NeboAI only while that server answers it; `nebo-link status` shows `chat: on`, or why it is off. Chat with OpenClaw is next.
+A linked agent gets a native chat in the NeboAI app: its agents (OpenClaw agents, Hermes profiles) are listed as employees, a conversation is one of the agent's own sessions, replies stream with their tool cards, and when the agent stops to ask about a command the question reaches the phone as a card in the chat and an item in your inbox. Answer it there or in the agent's own UI; both see the same answer. For Hermes the link turns on its local API server with a key of its own (`API_SERVER_KEY` in the profile's `.env`, loopback only, recorded like every other change); for OpenClaw the link opens its own operator connection to the gateway on loopback, as the trusted proxy it already is, with a device key kept in the bot's directory. `chat` is announced to NeboAI only while the agent answers the link; `nebo-link status` shows `chat: on`, or why it is off.
 
 ### What it changes
 
