@@ -1,0 +1,33 @@
+{
+  "name": "@openagentlink/client",
+  "version": "0.1.0",
+  "description": "Client SDK for Open Agent Link (OAL): drive Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Hermes and any ACP agent on another computer.",
+  "keywords": ["oal", "open-agent-link", "acp", "agent-client-protocol", "agents", "claude-code", "codex"],
+  "homepage": "https://openagent.link",
+  "repository": { "type": "git", "url": "git+https://github.com/NeboLoop/nebo-link.git", "directory": "sdk/typescript" },
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --run",
+    "example:chat": "pnpm build && node --experimental-strip-types examples/chat.ts",
+    "example:web": "vite examples/web",
+    "prepublishOnly": "pnpm run check && pnpm run build && pnpm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
