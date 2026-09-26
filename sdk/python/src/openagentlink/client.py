@@ -7,8 +7,9 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 from urllib.parse import quote
 
-from .channel import ChannelContext, Dialer, SecureChannel, plaintext, websocket_dialer
+from .channel import ChannelContext, Dialer, SecureChannel, websocket_dialer
 from .connection import Link
+from .encrypted import encrypted
 from .errors import (
     AlreadyAnswered,
     Closed,
@@ -61,7 +62,7 @@ async def connect(
     relay: str | None = None,
     url: str | None = None,
     client: ClientInfo = DEFAULT_CLIENT,
-    secure: SecureChannel = plaintext,
+    secure: SecureChannel = encrypted,
     dialer: Dialer = websocket_dialer,
 ) -> Client:
     """Connects to every host in ``credentials`` (one identity, or several with a

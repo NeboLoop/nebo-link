@@ -241,7 +241,15 @@ class Link:
             self._outbox = None
             self.online = False
             self._changed.set()
-            lost = close_error(code, self.host_name)
+            # 4001 after the handshake means a message failed authentication
+            # (spec section 17.3): the connection was interfered with, and a
+            # new one does a new handshake, which fails with 4001 if this
+            # device really isn't paired.
+            lost: OALError
+            if code == 4001:
+                lost = ConnectionLost(f"Lost the connection to {self.host_name}.")
+            else:
+                lost = close_error(code, self.host_name)
             self._reject_waiters(lost)
             self.handlers.disconnected()
             if isinstance(lost, _PERMANENT):
@@ -254,7 +262,10 @@ class Link:
             socket = await self.dialer(self.url, ["oal"])
         except HostOffline:
             raise HostOffline(f"Couldn't reach {self.host_name}.") from None
-        channel = await self.secure.open(socket, self.context)
+        try:
+            channel = await self.secure.open(socket, self.context)
+        except ChannelClosed as closed:
+            raise close_error(closed.code, self.host_name) from None
         try:
             if channel.authenticated is not None:
                 device = channel.authenticated.device

@@ -40,7 +40,8 @@ from .conftest import FakeHost, start_fake_host, start_fake_relay, stop_fake_hos
 
 @pytest.fixture
 async def identity(fake_host: FakeHost) -> Identity:
-    return await pair(url=fake_host.url, code=fake_host.code, device_name="Test laptop")
+    # The conformance suite's fake host speaks OAL 0.1 without encryption.
+    return await pair(url=fake_host.url, code=fake_host.code, device_name="Test laptop", secure=plaintext)
 
 
 @pytest.fixture
@@ -67,7 +68,7 @@ class Droppable:
 
 
 async def open_host(fake_host: FakeHost, identity: Identity, clients: list[Client], **options: Any) -> Host:
-    client = await connect(url=fake_host.url, credentials=identity, **options)
+    client = await connect(url=fake_host.url, credentials=identity, **{"secure": plaintext, **options})
     clients.append(client)
     return client.hosts()[0]
 
@@ -135,7 +136,7 @@ async def test_refuses_a_wrong_code() -> None:
     other = await start_fake_host("AAAA-BBBB")
     try:
         with pytest.raises(PairingRefused) as caught:
-            await pair(url=other.url, code="ZZZZ-ZZZZ", device_name="x")
+            await pair(url=other.url, code="ZZZZ-ZZZZ", device_name="x", secure=plaintext)
         assert caught.value.message == "That code didn't work. Get a new one on the computer."
         assert caught.value.code == "pairing_refused"
     finally:
@@ -320,11 +321,11 @@ async def test_through_a_relay_proves_its_key_on_every_connection() -> None:
         relay = await start_fake_relay(other)
         # The relay refuses a pairing URL with more than the nameplate, and
         # every request without a fresh proof of the device's key.
-        paired = await pair(relay=relay.url, code="aaaa-bbbb", device_name="Relay laptop")
+        paired = await pair(relay=relay.url, code="aaaa-bbbb", device_name="Relay laptop", secure=plaintext)
         assert paired.host.id == "h-fake"
 
         dropper = Droppable()
-        client = await connect(relay=relay.url, credentials=paired, dialer=dropper)
+        client = await connect(relay=relay.url, credentials=paired, dialer=dropper, secure=plaintext)
         host = client.hosts()[0]
         session = await fake_session(host)
 

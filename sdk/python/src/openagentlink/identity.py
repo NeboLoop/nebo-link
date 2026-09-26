@@ -12,9 +12,10 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-from .channel import ChannelContext, Dialer, SecureChannel, plaintext, websocket_dialer
-from .connection import exchange
-from .errors import InvalidParams
+from .channel import ChannelClosed, ChannelContext, Dialer, SecureChannel, websocket_dialer
+from .connection import close_error, exchange
+from .encrypted import encrypted
+from .errors import InvalidParams, PairingRefused
 from .relay import b64url, relay_dialer
 from .types import PROTOCOL, ClientInfo, VersionRange
 
@@ -102,7 +103,7 @@ async def pair(
     relay: str | None = None,
     url: str | None = None,
     client: ClientInfo = DEFAULT_CLIENT,
-    secure: SecureChannel = plaintext,
+    secure: SecureChannel = encrypted,
     dialer: Dialer = websocket_dialer,
 ) -> Identity:
     """Pairs with a host through ``relay`` or at ``url`` and returns this device's identity for it."""
@@ -117,7 +118,12 @@ async def pair(
     context = ChannelContext(
         protocol=protocol, client=client, code=code, device={"publicKey": public_key, "privateKey": private_key}
     )
-    channel = await secure.open(socket, context)
+    try:
+        channel = await secure.open(socket, context)
+    except ChannelClosed as closed:
+        # An encrypted pairing with the wrong code fails in the handshake (spec 17.5).
+        raise (_refused() if closed.code == 4001 else close_error(closed.code, "the computer")) from None
+    close_code = 1000
     try:
         result = await exchange(
             channel,
@@ -125,15 +131,23 @@ async def pair(
             {"protocol": protocol, "client": client, "code": code, "device": {"name": device_name, "publicKey": public_key}},
             "the computer",
         )
+        host, device = result["info"]["host"], result["device"]
+        if channel.host_key is not None and host["publicKey"] != channel.host_key:
+            # Not the key the handshake authenticated: keep nothing (spec 17.5).
+            close_code = 4001
+            raise _refused()
     finally:
-        await channel.close(1000, "")
-    host, device = result["info"]["host"], result["device"]
+        await channel.close(close_code, "")
     return Identity(
         host=HostIdentity(id=host["id"], name=host["name"], public_key=host["publicKey"]),
         device=DeviceIdentity(
             id=device["id"], name=device["name"], token=device["token"], public_key=public_key, private_key=private_key
         ),
     )
+
+
+def _refused() -> PairingRefused:
+    return PairingRefused("That code didn't work. Get a new one on the computer.", rpc_code=-33003)
 
 
 def _generate_key_pair() -> tuple[str, str]:
