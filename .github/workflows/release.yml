@@ -332,7 +332,14 @@ jobs:
           done
           echo "runner never came online"; exit 1
 
-  # ─── Linux builds (native on each arch; glibc floor 2.39 like Nebo) ────
+  # ─── Linux builds (native on each arch; static musl) ─────────────────
+  # Static musl, not glibc: nebo-link is installed next to OpenClaw and Hermes,
+  # which run on servers as often as desktops (Debian 12, Ubuntu 22.04, RHEL 9,
+  # Amazon Linux 2023 all ship glibc below Nebo's 2.39 floor). A static binary
+  # runs on any 64-bit Linux, and its reach never moves with the build host's
+  # OS (the arm64 VM is Ubuntu 26.04, glibc 2.43). nebo-link needs no system
+  # library: TLS is rustls with bundled roots, and its only C (ring, zstd)
+  # builds with musl-gcc.
   build-linux:
     needs: [prepare, linux-amd64-runner]
     strategy:
@@ -344,8 +351,10 @@ jobs:
           # Never a GitHub-hosted runner.
           - runner: [self-hosted, Linux, ARM64, neboloop]
             arch: arm64
+            target: aarch64-unknown-linux-musl
           - runner: [self-hosted, Linux, X64, "nebo-amd64-${{ github.run_id }}"]
             arch: amd64
+            target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     env:
       RUSTC_WRAPPER: ""
@@ -359,6 +368,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      # musl-gcc compiles the C in ring and zstd against musl's headers
+      # (Ubuntu's gcc with glibc's headers fortifies calls musl doesn't have).
+      - name: musl toolchain
+        run: |
+          command -v musl-gcc >/dev/null 2>&1 || {
+            sudo -n apt-get update
+            sudo -n apt-get install -y musl-tools
+          }
+          musl-gcc --version | head -n1
 
       - name: Build nebo-link
         env:
@@ -367,19 +387,20 @@ jobs:
           # Only set when there is a key: option_env! would read an empty
           # value as a key.
           if [ -n "$RELEASE_KEY" ]; then export NEBO_LINK_RELEASE_KEY="$RELEASE_KEY"; fi
-          cargo build --release --locked -p nebo-link --bin nebo-link
-          cp "$CARGO_TARGET_DIR/release/nebo-link" nebo-link-linux-${{ matrix.arch }}
+          cargo build --release --locked -p nebo-link --bin nebo-link --target ${{ matrix.target }}
+          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/nebo-link" nebo-link-linux-${{ matrix.arch }}
 
-      # Built on Ubuntu 24.04 (glibc 2.39), the same floor Nebo's Linux
-      # binaries have. A newer build host would silently raise it.
-      - name: Check the glibc floor
+      # Fails closed if the binary would load anything from the system: no
+      # dynamic section, no interpreter.
+      - name: Check the binary is static
         run: |
-          NEED=$(objdump -T nebo-link-linux-${{ matrix.arch }} | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -n1)
-          echo "requires glibc $NEED"
-          if [ "$(printf '%s\n2.39\n' "$NEED" | sort -V | tail -n1)" != 2.39 ]; then
-            echo "::error::nebo-link-linux-${{ matrix.arch }} needs glibc $NEED, above the 2.39 floor. Build on an Ubuntu 24.04 host."
+          BIN=nebo-link-linux-${{ matrix.arch }}
+          file "$BIN"
+          if readelf -d "$BIN" | grep -q NEEDED || readelf -l "$BIN" | grep -q INTERP; then
+            echo "::error::$BIN is dynamically linked. It must be a static musl binary."
             exit 1
           fi
+          "./$BIN" --version
 
       - uses: actions/upload-artifact@v4
         with:
@@ -490,13 +511,15 @@ jobs:
       - name: Signing configuration present
         shell: bash
         env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
-          if [ -z "$AZURE_CLIENT_ID" ] || [ -z "$ENDPOINT" ] || [ -z "$ACCOUNT" ] || [ -z "$PROFILE" ]; then
-            echo "::error::Windows signing is not configured: the AZURE_* secrets and the AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT and AZURE_SIGNING_PROFILE variables are required."
+          if [ -z "$AZURE_TENANT_ID" ] || [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ] || [ -z "$ENDPOINT" ] || [ -z "$ACCOUNT" ] || [ -z "$PROFILE" ]; then
+            echo "::error::Windows signing is not configured: the AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET secrets and the AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT and AZURE_SIGNING_PROFILE variables are required."
             exit 1
           fi
 
