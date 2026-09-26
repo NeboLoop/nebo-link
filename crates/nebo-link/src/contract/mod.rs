@@ -18,6 +18,7 @@
 
 pub mod backend;
 pub mod hermes;
+pub mod openclaw;
 mod ws;
 
 use std::collections::{HashMap, HashSet, VecDeque};

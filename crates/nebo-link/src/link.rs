@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nebo_runtimes::{
     ApiServer, Change, ChangeKind, Environment, Installation, Journal, NeboaiModels, ProxyAccess, Runtime,
-    RuntimeCommand, Service, detect,
+    RuntimeCommand, Service, detect, openclaw,
 };
 use tokio::sync::watch;
 
@@ -17,6 +17,7 @@ use crate::endpoints::{Endpoints, WEB_ORIGIN};
 use crate::error::{Error, Result};
 use crate::install::{self, runtime_key, runtime_name};
 use crate::janus::{self, Janus};
+use crate::proxy;
 use crate::service;
 use crate::state::{BotDir, Link, ModelsEndpoint, Removed, Root, write_json};
 
@@ -137,9 +138,10 @@ pub fn apply_api_server(journal: &mut Journal, install: &Installation, link: &Li
     Ok(restart)
 }
 
-/// The chat contract for `link`: the runtime's API server turned on with
-/// the link's key (journaled, restarted when that changed) and a backend
-/// on it. `Err` says why the contract can't be served for this install, for
+/// The chat contract for `link`: Hermes' API server turned on with the
+/// link's key (journaled, restarted when that changed), or OpenClaw's
+/// gateway reached as the link's own operator socket, and a backend on it.
+/// `Err` says why the contract can't be served for this install, for
 /// `nebo-link status`; nothing is then announced.
 pub async fn chat(
     dir: &BotDir,
@@ -147,10 +149,33 @@ pub async fn chat(
     install: &Installation,
     token: watch::Receiver<String>,
 ) -> std::result::Result<Arc<Contract>, String> {
-    match link.runtime {
-        Runtime::Hermes => {}
-        Runtime::Openclaw => return Err("chat with OpenClaw is not supported yet".to_owned()),
-    }
+    let backend: Arc<dyn contract::backend::Backend> = match link.runtime {
+        Runtime::Hermes => Arc::new(hermes_backend(dir, link, install).await?),
+        Runtime::Openclaw => {
+            let gateway = install::ui_addr(install)
+                .ok_or_else(|| "OpenClaw has no gateway to reach".to_owned())?;
+            Arc::new(contract::openclaw::Openclaw::new(
+                openclaw::gateway::Connect::new(format!("ws://{gateway}"), &proxy_access(link), proxy::FORWARDED_FOR),
+                openclaw::gateway::FileDeviceStore::new(dir.device_file()),
+            ))
+        }
+    };
+    let inbox = Inbox::new(&link.endpoints.api, &link.bot_id, token);
+    Ok(Contract::new(
+        runtime_key(link.runtime),
+        runtime_name(link.runtime),
+        &link.bot_id,
+        backend,
+        Some(inbox),
+    ))
+}
+
+/// Hermes' API server turned on with the link's key, and a backend on it.
+async fn hermes_backend(
+    dir: &BotDir,
+    link: &mut Link,
+    install: &Installation,
+) -> std::result::Result<contract::hermes::Hermes, String> {
     if link.api_server_key.is_empty() {
         link.api_server_key = secret();
         dir.save(link).map_err(|e| e.to_string())?;
@@ -182,15 +207,7 @@ pub async fn chat(
             )
         })?;
     let profiles = install.profiles.iter().map(|p| p.name.clone()).collect();
-    let backend = contract::hermes::Hermes::new(&format!("http://{}", default.addr), &link.api_server_key, profiles);
-    let inbox = Inbox::new(&link.endpoints.api, &link.bot_id, token);
-    Ok(Contract::new(
-        runtime_key(link.runtime),
-        runtime_name(link.runtime),
-        &link.bot_id,
-        Arc::new(backend),
-        Some(inbox),
-    ))
+    Ok(contract::hermes::Hermes::new(&format!("http://{}", default.addr), &link.api_server_key, profiles))
 }
 
 /// The models endpoint as seen from `link` with `token`.

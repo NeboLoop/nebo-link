@@ -1,12 +1,15 @@
-//! The chat contract on the link's listener, in front of a fake Hermes API
-//! server and a fake hub: the phone's whole flow (roster, chat, a streamed
-//! turn with tool events, the transcript, an approval as an ask card with
-//! its hub inbox item, cancel), and the version gate on the transcript
+//! The chat contract on the link's listener, in front of a fake runtime and
+//! a fake hub: the phone's whole flow (roster, chat, a streamed turn with
+//! tool events, the transcript, an approval as an ask card with its hub
+//! inbox item, cancel) against a fake Hermes API server and a fake OpenClaw
+//! gateway, plus the Hermes version gate on the transcript
 //! (`conversation_history` sent to 0.19.0, not to 0.21.2+).
 //!
 //! The Hermes frames are the shapes `gateway/platforms/api_server.py` wrote
 //! on the live v0.19.0 server on 2026-09-26 (no `id:` lines, no
 //! `request_id` on `approval.request`) and at hermes-agent `d0288be5b3`.
+//! The OpenClaw frames are the ones the 2026.9.6 gateway sent the
+//! 2026-09-26 spike (`nebo-runtimes/tests/fixtures/openclaw-gateway-frames.json`).
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -19,10 +22,13 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use nebo_link::contract::backend::Backend;
 use nebo_link::contract::hermes::Hermes;
+use nebo_link::contract::openclaw::Openclaw;
 use nebo_link::contract::{Contract, Inbox};
-use nebo_link::proxy::{self, Body, BoxError, Control, Target};
-use nebo_runtimes::{PathMode, ProxyRoute};
+use nebo_link::proxy::{self, Body, BoxError, Control, FORWARDED_FOR, Target};
+use nebo_runtimes::openclaw::gateway::{Connect, FileDeviceStore};
+use nebo_runtimes::{PathMode, ProxyAccess, ProxyRoute};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
@@ -403,9 +409,13 @@ impl Control for NoControl {
     }
 }
 
-/// The link's listener with the contract in front of `hermes`, the way
+/// The link's listener with the contract in front of `backend`, the way
 /// `run.rs` serves it; the runtime UI target is an unused port.
-async fn start_link(hermes: SocketAddr, hub: &str) -> SocketAddr {
+async fn serve_contract(
+    runtime: (&'static str, &'static str),
+    backend: Arc<dyn Backend>,
+    hub: &str,
+) -> SocketAddr {
     let unused = TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap()
@@ -420,15 +430,14 @@ async fn start_link(hermes: SocketAddr, hub: &str) -> SocketAddr {
             identity_header: None,
         },
         identity: "owner-1".into(),
-        runtime_name: "Hermes",
+        runtime_name: runtime.1,
     };
-    let backend = Hermes::new(&format!("http://{hermes}"), KEY, vec!["coder".into()]);
     let (_token_tx, token_rx) = watch::channel("bot-token".to_string());
     let contract = Contract::new(
-        "hermes",
-        "Hermes",
+        runtime.0,
+        runtime.1,
         BOT,
-        Arc::new(backend),
+        backend,
         Some(Inbox::new(hub, BOT, token_rx)),
     );
     let listener = proxy::bind_loopback("127.0.0.1:0".parse().unwrap())
@@ -443,6 +452,12 @@ async fn start_link(hermes: SocketAddr, hub: &str) -> SocketAddr {
         Some(contract),
     ));
     addr
+}
+
+/// The contract in front of a Hermes API server at `hermes`.
+async fn start_link(hermes: SocketAddr, hub: &str) -> SocketAddr {
+    let backend = Hermes::new(&format!("http://{hermes}"), KEY, vec!["coder".into()]);
+    serve_contract(("hermes", "Hermes"), Arc::new(backend), hub).await
 }
 
 /// One stamped request, as the tunnel delivers it.
@@ -930,41 +945,7 @@ async fn live_hermes_phone_flow() {
     };
     let (hub_url, inbox) = serve_hub().await;
     let backend = Hermes::new(&url, &key, Vec::new());
-    let (_token_tx, token_rx) = watch::channel("bot-token".to_string());
-    let contract = Contract::new(
-        "hermes",
-        "Hermes",
-        BOT,
-        Arc::new(backend),
-        Some(Inbox::new(&hub_url, BOT, token_rx)),
-    );
-    let unused = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let target = Target {
-        upstream: unused,
-        base_path: format!("/t/{BOT}"),
-        route: ProxyRoute {
-            path_mode: PathMode::StripWithForwardedPrefix,
-            origin: None,
-            identity_header: None,
-        },
-        identity: "owner-1".into(),
-        runtime_name: "Hermes",
-    };
-    let listener = proxy::bind_loopback("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let link = listener.local_addr().unwrap();
-    tokio::spawn(proxy::serve(
-        listener,
-        target,
-        STAMP.into(),
-        Arc::new(NoControl),
-        Some(contract),
-    ));
+    let link = serve_contract(("hermes", "Hermes"), Arc::new(backend), &hub_url).await;
 
     let health = get(link, "/health").await;
     eprintln!("health: {health}");
@@ -1112,4 +1093,616 @@ async fn live_hermes_phone_flow() {
         users, 3,
         "one user message per turn: nothing re-sent into the store"
     );
+}
+
+// -- A fake OpenClaw gateway --------------------------------------------------
+
+/// One method call the fake gateway saw.
+#[derive(Debug, Clone)]
+struct Called {
+    method: String,
+    params: Value,
+}
+
+struct FakeGateway {
+    url: String,
+    seen: Arc<Mutex<Vec<Called>>>,
+    runs: Arc<Mutex<u32>>,
+}
+
+impl FakeGateway {
+    fn seen(&self, method: &str) -> Vec<Called> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.method == method)
+            .cloned()
+            .collect()
+    }
+}
+
+const SESSION_KEY: &str = "agent:main:nebo-link-spike";
+
+fn oc_event(event: &str, payload: Value) -> Value {
+    json!({ "type": "event", "event": event, "payload": payload })
+}
+
+/// A `chat` event for `run` on `session`.
+fn chat_event(run: &str, session: &str, state: Value) -> Value {
+    let mut payload = json!({ "runId": run, "sessionKey": session, "agentId": "main", "seq": 1 });
+    if let (Value::Object(payload), Value::Object(state)) = (&mut payload, state) {
+        payload.extend(state);
+    }
+    oc_event("chat", payload)
+}
+
+fn agent_event(run: &str, session: &str, stream: &str, data: Value) -> Value {
+    oc_event(
+        "agent",
+        json!({ "runId": run, "sessionKey": session, "agentId": "main", "stream": stream, "data": data, "seq": 1, "ts": 1790397333173u64 }),
+    )
+}
+
+/// The gateway as the 2026.9.6 spike saw it: challenge, `hello-ok` for any
+/// `connect`, then `agents.list`, `sessions.list`, `chat.history`,
+/// `chat.send` (run 1 answers with a tool call, run 2 asks for approval,
+/// run 3 streams until aborted), `chat.abort` and `approval.resolve`.
+async fn serve_gateway() -> FakeGateway {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let seen: Arc<Mutex<Vec<Called>>> = Arc::default();
+    let runs = Arc::new(Mutex::new(0u32));
+    let (log, counter) = (seen.clone(), runs.clone());
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            tx.send(Message::text(
+                oc_event(
+                    "connect.challenge",
+                    json!({ "nonce": "n1", "ts": 1790397272202u64 }),
+                )
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let (out, mut out_rx) = mpsc::unbounded_channel::<Value>();
+            let writer = tokio::spawn(async move {
+                while let Some(frame) = out_rx.recv().await {
+                    if tx.send(Message::text(frame.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            while let Some(Ok(message)) = rx.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+                let id = frame["id"].as_str().unwrap().to_owned();
+                let method = frame["method"].as_str().unwrap().to_owned();
+                let params = frame["params"].clone();
+                log.lock().unwrap().push(Called {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let reply = |payload: Value| json!({ "type": "res", "id": id, "ok": true, "payload": payload });
+                let mut events = Vec::new();
+                let response = match method.as_str() {
+                    "connect" => reply(json!({
+                        "type": "hello-ok", "protocol": 4,
+                        "server": { "version": "2026.9.6", "connId": "c1" },
+                        "features": { "methods": ["chat.send"], "events": ["chat", "agent"] },
+                        "auth": { "method": "trusted-proxy", "role": "operator", "scopes": ["operator.admin", "operator.read", "operator.write", "operator.approvals"] },
+                        "policy": { "maxPayload": 26214400, "maxBufferedBytes": 52428800, "tickIntervalMs": 30000 },
+                    })),
+                    "agents.list" => reply(json!({
+                        "defaultId": "main", "mainKey": "main", "scope": "per-sender",
+                        "agents": [
+                            { "id": "main", "identity": { "name": "Claw" }, "model": { "primary": "neboai/nebo-1" } },
+                            { "id": "writer", "name": "Writer", "model": { "primary": "neboai/nebo-1" } }
+                        ]
+                    })),
+                    "sessions.list" => reply(json!({
+                        "sessions": [{ "key": SESSION_KEY, "kind": "direct", "derivedTitle": "Reply with exactly the word: pong", "lastMessagePreview": "pong", "agentId": "main", "updatedAt": 1790000010000.0, "model": "nebo-1" }],
+                        "hasMore": false
+                    })),
+                    "chat.history" => reply(json!({
+                        "sessionKey": params["sessionKey"], "sessionId": "s1",
+                        "messages": [
+                            { "role": "user", "content": "Use your exec tool to run `uname -a`.", "timestamp": 1790397284698.0, "__openclaw": { "id": "u1" } },
+                            { "role": "assistant", "content": [{ "type": "toolCall", "id": "call_9ec1", "name": "exec", "arguments": { "command": "uname -a" } }], "timestamp": 1790397333000.0, "__openclaw": { "id": "a1" } },
+                            { "role": "toolResult", "toolCallId": "call_9ec1", "toolName": "exec", "isError": false, "content": [{ "type": "text", "text": "Darwin" }], "timestamp": 1790397334000.0 },
+                            { "role": "assistant", "content": [{ "type": "text", "text": "The output is Darwin." }], "usage": { "input": 654, "output": 81 }, "timestamp": 1790397337078.0, "__openclaw": { "id": "a2" } }
+                        ],
+                        "deltaCursor": "c", "hasMore": false, "sessionInfo": { "hasActiveRun": false }
+                    })),
+                    "chat.send" => {
+                        let mut runs = counter.lock().unwrap();
+                        *runs += 1;
+                        let run = format!("run_{runs}");
+                        let session = params["sessionKey"].as_str().unwrap().to_owned();
+                        events.push(chat_event(
+                            &run,
+                            &session,
+                            json!({ "state": "status", "phase": "preparing_workspace" }),
+                        ));
+                        match *runs {
+                            1 => {
+                                events.push(agent_event(&run, &session, "thinking", json!({ "text": "Need the kernel.", "delta": "Need the kernel." })));
+                                events.push(agent_event(&run, &session, "tool", json!({ "phase": "start", "name": "exec", "toolCallId": "call_9ec1", "args": { "command": "uname -a" } })));
+                                events.push(agent_event(&run, &session, "tool", json!({ "phase": "result", "name": "exec", "toolCallId": "call_9ec1", "isError": false, "result": { "content": [{ "type": "text", "text": "Darwin" }], "details": { "durationMs": 1204 } } })));
+                                events.push(chat_event(
+                                    &run,
+                                    &session,
+                                    json!({ "state": "delta", "deltaText": "The output is " }),
+                                ));
+                                events.push(chat_event(
+                                    &run,
+                                    &session,
+                                    json!({ "state": "delta", "deltaText": "Darwin." }),
+                                ));
+                                events.push(oc_event("session.message", json!({ "sessionKey": session, "agentId": "main", "message": { "role": "assistant", "content": [{ "type": "text", "text": "The output is Darwin." }], "usage": { "input": 654, "output": 81, "totalTokens": 17667 }, "stopReason": "stop" } })));
+                                events.push(chat_event(
+                                    &run,
+                                    &session,
+                                    json!({ "state": "final", "stopReason": "stop" }),
+                                ));
+                            }
+                            2 => {
+                                events.push(oc_event("exec.approval.requested", json!({
+                                    "approvalKind": "exec", "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+                                    "request": { "command": "uname -a", "allowedDecisions": ["allow-once", "allow-always", "deny"], "agentId": "main", "sessionKey": session },
+                                    "createdAtMs": 1790397523868u64, "expiresAtMs": 1790397568868u64
+                                })));
+                            }
+                            _ => events.push(chat_event(
+                                &run,
+                                &session,
+                                json!({ "state": "delta", "deltaText": "1\n2\n" }),
+                            )),
+                        }
+                        reply(json!({ "runId": run, "status": "started", "messageSeq": 3 }))
+                    }
+                    "approval.resolve" => {
+                        events.push(oc_event("exec.approval.resolved", json!({ "id": params["id"], "decision": params["decision"], "resolvedBy": "Nebo Link", "request": { "command": "uname -a", "sessionKey": "agent:main:nebo-approval" } })));
+                        events.push(chat_event(
+                            "run_2",
+                            "agent:main:nebo-approval",
+                            json!({ "state": "delta", "deltaText": "Done." }),
+                        ));
+                        events.push(chat_event(
+                            "run_2",
+                            "agent:main:nebo-approval",
+                            json!({ "state": "final", "stopReason": "stop" }),
+                        ));
+                        reply(
+                            json!({ "applied": true, "approval": { "id": params["id"], "status": "allowed", "decision": params["decision"], "reason": "user" } }),
+                        )
+                    }
+                    "chat.abort" => {
+                        events.push(chat_event(
+                            "run_3",
+                            params["sessionKey"].as_str().unwrap(),
+                            json!({ "state": "aborted", "stopReason": "aborted" }),
+                        ));
+                        reply(json!({ "ok": true }))
+                    }
+                    other => {
+                        json!({ "type": "res", "id": id, "ok": false, "error": { "code": "NOT_FOUND", "message": format!("no method {other}") } })
+                    }
+                };
+                out.send(response).unwrap();
+                for event in events {
+                    out.send(event).unwrap();
+                }
+            }
+            drop(out);
+            let _ = writer.await;
+        }
+    });
+    FakeGateway { url, seen, runs }
+}
+
+async fn start_openclaw_link(
+    gateway: &FakeGateway,
+    hub: &str,
+    dir: &std::path::Path,
+) -> SocketAddr {
+    let access = ProxyAccess {
+        base_path: format!("/t/{BOT}"),
+        origin: "https://neboai.com".into(),
+        user_header: "x-nebo-user".into(),
+        identity: "owner-1".into(),
+        password: "pw".into(),
+    };
+    let backend = Openclaw::new(
+        Connect::new(&gateway.url, &access, FORWARDED_FOR),
+        FileDeviceStore::new(dir.join("openclaw-device.json")),
+    );
+    serve_contract(("openclaw", "OpenClaw"), Arc::new(backend), hub).await
+}
+
+#[tokio::test]
+async fn the_phone_flow_against_an_openclaw_gateway() {
+    let gateway = serve_gateway().await;
+    let (hub_url, inbox) = serve_hub().await;
+    let dir = tempfile::tempdir().unwrap();
+    let link = start_openclaw_link(&gateway, &hub_url, dir.path()).await;
+
+    let health = get(link, "/health").await;
+    assert_eq!(health["runtime"], "openclaw");
+    assert_eq!(health["chat"], true);
+    assert!(
+        dir.path().join("openclaw-device.json").exists(),
+        "the device key is kept"
+    );
+    assert_eq!(
+        gateway.seen("connect").len(),
+        1,
+        "one socket serves everything"
+    );
+
+    let roster = get(link, "/api/v1/agents").await;
+    let agents = roster["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0]["id"], "assistant");
+    assert_eq!(agents[0]["name"], "Claw");
+    assert_eq!(agents[0]["description"], "OpenClaw agent on neboai/nebo-1");
+    assert_eq!(agents[1]["id"], "writer");
+    assert_eq!(agents[1]["name"], "Writer");
+
+    let chats = get(link, "/api/v1/agents/assistant/chats").await;
+    assert_eq!(chats["chats"][0]["id"], SESSION_KEY);
+    assert_eq!(
+        chats["chats"][0]["title"],
+        "Reply with exactly the word: pong"
+    );
+    assert_eq!(chats["chats"][0]["preview"], "pong");
+    assert_eq!(gateway.seen("sessions.list")[0].params["agentId"], "main");
+    let (_, created) = call(link, "POST", "/api/v1/agents/assistant/chats", "{}").await;
+    let new_key = created["chat"]["id"].as_str().unwrap().to_owned();
+    assert!(new_key.starts_with("agent:main:nebo-"), "{new_key}");
+    assert_eq!(get(link, "/api/v1/chats/x").await["model"], "neboai/nebo-1");
+
+    // A turn on the spike's session: tool events, deltas, usage from the
+    // assistant row, completion.
+    let mut phone = Phone::connect(link).await;
+    let session_id = format!("agent:assistant:thread:{SESSION_KEY}");
+    phone
+        .send("chat", json!({ "prompt": "Use your exec tool to run `uname -a`.", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    let events = phone.until("chat_complete").await;
+    assert_eq!(
+        kinds(&events),
+        [
+            "thinking",
+            "tool_start",
+            "tool_result",
+            "chat_stream",
+            "chat_stream",
+            "usage",
+            "chat_complete"
+        ]
+    );
+    for event in &events {
+        assert_eq!(event["data"]["session_id"], session_id, "{event}");
+    }
+    assert_eq!(events[0]["data"]["text"], "Need the kernel.");
+    assert_eq!(events[1]["data"]["tool_id"], "call_9ec1");
+    assert_eq!(events[1]["data"]["input"]["command"], "uname -a");
+    assert_eq!(events[2]["data"]["result"], "Darwin");
+    assert_eq!(events[2]["data"]["duration_ms"], 1204);
+    assert_eq!(events[5]["data"]["input_tokens"], 654);
+    assert_eq!(events[5]["data"]["output_tokens"], 81);
+    let send = &gateway.seen("chat.send")[0].params;
+    assert_eq!(send["sessionKey"], SESSION_KEY);
+    assert_eq!(send["agentId"], "main");
+    assert_eq!(send["message"], "Use your exec tool to run `uname -a`.");
+    assert!(send["idempotencyKey"].as_str().unwrap().len() >= 16);
+    assert!(send.get("queueMode").is_none());
+
+    // The transcript from `chat.history`, in the phone's row shape.
+    let page = get(
+        link,
+        &format!("/api/v1/chats/{}/messages", SESSION_KEY.replace(':', "%3A")),
+    )
+    .await;
+    let rows = page["messages"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0]["role"], "user");
+    assert_eq!(rows[0]["createdAt"], 1790397284);
+    let calls: Value = serde_json::from_str(rows[1]["toolCalls"].as_str().unwrap()).unwrap();
+    assert_eq!(calls[0]["id"], "call_9ec1");
+    let results: Value = serde_json::from_str(rows[2]["toolResults"].as_str().unwrap()).unwrap();
+    assert_eq!(results[0]["tool_call_id"], "call_9ec1");
+    assert_eq!(results[0]["content"], "Darwin");
+    assert_eq!(rows[3]["content"], "The output is Darwin.");
+    assert_eq!(gateway.seen("chat.history")[0].params["agentId"], "main");
+
+    // An approval on a fresh chat: the gateway's decisions on the card, the
+    // answer as `approval.resolve`, resolved everywhere.
+    let approval_session = "agent:assistant:thread:agent:main:nebo-approval";
+    phone
+        .send("chat", json!({ "prompt": "run uname", "agent_id": "assistant", "session_id": approval_session }))
+        .await;
+    let ask = phone.until("ask_request").await.pop().unwrap();
+    assert_eq!(
+        ask["data"]["request_id"],
+        "1759b5f3-9141-4537-8c78-9afc7fa627c2"
+    );
+    assert_eq!(
+        ask["data"]["widgets"][0]["options"],
+        json!(["Allow once", "Always allow", "Deny"])
+    );
+    assert!(ask["data"]["prompt"].as_str().unwrap().contains("uname -a"));
+    let items = eventually(&inbox, 1).await;
+    assert_eq!(
+        items[0]["id"],
+        "approval:1759b5f3-9141-4537-8c78-9afc7fa627c2"
+    );
+    assert_eq!(items[0]["title"], "Claw asks to run uname -a");
+    assert_eq!(items[0]["chatId"], "agent:main:nebo-approval");
+    phone
+        .send(
+            "ask_response",
+            json!({ "request_id": "1759b5f3-9141-4537-8c78-9afc7fa627c2", "value": "Allow once" }),
+        )
+        .await;
+    let events = phone.until("chat_complete").await;
+    assert_eq!(kinds(&events), ["chat_stream", "chat_complete"]);
+    let resolve = &gateway.seen("approval.resolve")[0].params;
+    assert_eq!(
+        resolve,
+        &json!({ "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2", "kind": "exec", "decision": "allow-once" })
+    );
+    assert!(
+        get(link, "/api/v1/notifications").await["notifications"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(eventually(&inbox, 2).await[1]["resolved"], true);
+
+    // Cancel: `chat.abort` names the session, agent and run.
+    phone
+        .send(
+            "chat",
+            json!({ "prompt": "Count to 500.", "agent_id": "assistant", "session_id": session_id }),
+        )
+        .await;
+    phone.until("chat_stream").await;
+    phone
+        .send("cancel", json!({ "session_id": session_id }))
+        .await;
+    phone.until("chat_cancelled").await;
+    assert_eq!(
+        gateway.seen("chat.abort")[0].params,
+        json!({ "sessionKey": SESSION_KEY, "agentId": "main", "runId": "run_3" })
+    );
+    assert!(
+        get(
+            link,
+            &format!("/api/v1/chats/{}/messages", SESSION_KEY.replace(':', "%3A"))
+        )
+        .await["activeRun"]
+            .is_null()
+    );
+    assert_eq!(*gateway.runs.lock().unwrap(), 3);
+}
+
+/// Against a live OpenClaw gateway (`NEBO_LINK_LIVE_OPENCLAW_URL`, e.g.
+/// `ws://127.0.0.1:28790`, and `NEBO_LINK_LIVE_OPENCLAW_IDENTITY`, the
+/// trusted-proxy identity `ProxyAccess` granted admin), with the fake hub
+/// catching the inbox items: three short turns on one new chat. Costs real
+/// model calls. The evidence for PRD §9.2 and §9.3 on OpenClaw.
+#[tokio::test]
+#[ignore = "needs NEBO_LINK_LIVE_OPENCLAW_URL and NEBO_LINK_LIVE_OPENCLAW_IDENTITY"]
+async fn live_openclaw_phone_flow() {
+    let (Ok(url), Ok(identity)) = (
+        std::env::var("NEBO_LINK_LIVE_OPENCLAW_URL"),
+        std::env::var("NEBO_LINK_LIVE_OPENCLAW_IDENTITY"),
+    ) else {
+        eprintln!(
+            "NEBO_LINK_LIVE_OPENCLAW_URL / NEBO_LINK_LIVE_OPENCLAW_IDENTITY not set; nothing to do"
+        );
+        return;
+    };
+    let (hub_url, inbox) = serve_hub().await;
+    let dir = tempfile::tempdir().unwrap();
+    let access = ProxyAccess {
+        base_path: format!("/t/{identity}"),
+        origin: "https://neboai.com".into(),
+        user_header: "x-nebo-user".into(),
+        identity,
+        password: String::new(),
+    };
+    let backend = Openclaw::new(
+        Connect::new(&url, &access, FORWARDED_FOR),
+        FileDeviceStore::new(dir.path().join("openclaw-device.json")),
+    );
+    let link = serve_contract(("openclaw", "OpenClaw"), Arc::new(backend), &hub_url).await;
+
+    let health = get(link, "/health").await;
+    eprintln!("health: {health}");
+    assert_eq!(health["chat"], true);
+    let roster = get(link, "/api/v1/agents").await;
+    eprintln!("agents: {roster}");
+    assert_eq!(roster["agents"][0]["id"], "assistant");
+
+    // 1. A turn on a chat the link creates.
+    let mut phone = Phone::connect(link).await;
+    phone
+        .send(
+            "chat",
+            json!({ "prompt": "Reply with exactly the word: pong", "agent_id": "assistant" }),
+        )
+        .await;
+    let created = phone.next().await;
+    eprintln!("turn 1: {created}");
+    assert_eq!(created["type"], "chat_created");
+    let session_id = created["data"]["session_id"].as_str().unwrap().to_owned();
+    let chat_id = session_id
+        .strip_prefix("agent:assistant:thread:")
+        .unwrap()
+        .to_owned();
+    let events = phone.until("chat_complete").await;
+    let mut text = String::new();
+    for event in &events {
+        eprintln!("turn 1: {event}");
+        if event["type"] == "chat_stream" {
+            text.push_str(event["data"]["content"].as_str().unwrap());
+        }
+    }
+    assert!(text.to_lowercase().contains("pong"), "streamed {text:?}");
+    let encoded = chat_id.replace(':', "%3A");
+    let page = get(link, &format!("/api/v1/chats/{encoded}/messages")).await;
+    eprintln!("transcript after turn 1: {}", page["messages"]);
+    let rows = page["messages"].as_array().unwrap();
+    assert_eq!(rows[0]["role"], "user");
+    assert!(rows.iter().any(|r| {
+        r["role"] == "assistant"
+            && r["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("pong")
+    }));
+    let chats = get(link, "/api/v1/agents/assistant/chats").await;
+    assert!(
+        chats["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == chat_id),
+        "{chats}"
+    );
+
+    // 2. A tool turn: the exec runs (this gateway has no exec-approval
+    // policy, so the agent's own exec never asks) and its events stream.
+    phone
+        .send("chat", json!({ "prompt": "Use your exec tool to run the shell command `uname -a` and tell me the output in one line.", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    let events = phone.until("chat_complete").await;
+    for event in &events {
+        eprintln!("turn 2: {event}");
+    }
+    let kinds = kinds(&events);
+    assert!(
+        kinds.contains(&"tool_start") && kinds.contains(&"tool_result"),
+        "{kinds:?}"
+    );
+    let start = events.iter().find(|e| e["type"] == "tool_start").unwrap();
+    let result = events.iter().find(|e| e["type"] == "tool_result").unwrap();
+    assert_eq!(start["data"]["tool"], "exec");
+    assert_eq!(result["data"]["tool_id"], start["data"]["tool_id"]);
+    assert!(
+        result["data"]["result"]
+            .as_str()
+            .unwrap()
+            .contains("Darwin")
+    );
+
+    // 3. An approval on the running turn, raised the way the spike did
+    // (`exec.approval.request` from another operator socket, which the
+    // gateway broadcasts as `exec.approval.requested` for the session):
+    // the card, the notification, the inbox item, the answer, then cancel.
+    phone
+        .send("chat", json!({ "prompt": "Count from 1 to 500, one number per line, no other text.", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    loop {
+        let event = phone.next().await;
+        eprintln!("turn 3: {event}");
+        if event["type"] == "chat_stream" || event["type"] == "tool_start" {
+            break;
+        }
+        assert_ne!(event["type"], "chat_complete", "nothing arrived to ask on");
+    }
+    let (requester, _events) = nebo_runtimes::openclaw::gateway::Gateway::connect(
+        &Connect::new(&url, &access, FORWARDED_FOR),
+        &FileDeviceStore::new(dir.path().join("requester-device.json")),
+    )
+    .await
+    .expect("a second operator socket");
+    let raised = {
+        let chat_id = chat_id.clone();
+        tokio::spawn(async move {
+            requester
+                .request(
+                    "exec.approval.request",
+                    json!({ "command": "uname -a", "agentId": "main", "sessionKey": chat_id, "timeoutMs": 45000 }),
+                )
+                .await
+        })
+    };
+    let mut ask = None;
+    while ask.is_none() {
+        let event = phone.next().await;
+        eprintln!(
+            "turn 3: {}",
+            event.to_string().chars().take(300).collect::<String>()
+        );
+        assert_ne!(
+            event["type"], "chat_complete",
+            "the turn ended before the ask"
+        );
+        if event["type"] == "ask_request" {
+            ask = Some(event);
+        }
+    }
+    let ask = ask.unwrap();
+    let request_id = ask["data"]["request_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        ask["data"]["widgets"][0]["options"],
+        json!(["Allow once", "Always allow", "Deny"])
+    );
+    let notices = get(link, "/api/v1/notifications").await;
+    eprintln!("notifications: {notices}");
+    assert_eq!(
+        notices["notifications"][0]["id"],
+        format!("approval:{request_id}")
+    );
+    let items = eventually(&inbox, 1).await;
+    eprintln!("hub inbox: {}", items[0]);
+    assert_eq!(items[0]["chatId"], chat_id);
+    phone
+        .send(
+            "ask_response",
+            json!({ "request_id": request_id, "value": "Deny" }),
+        )
+        .await;
+    let decided = tokio::time::timeout(Duration::from_secs(20), raised)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    eprintln!("exec.approval.request answered: {decided}");
+    assert_eq!(decided["decision"], "deny");
+    assert!(
+        get(link, "/api/v1/notifications").await["notifications"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let items = eventually(&inbox, 2).await;
+    eprintln!("hub inbox: {}", items[1]);
+    assert_eq!(items[1]["resolved"], true);
+
+    phone
+        .send("cancel", json!({ "session_id": session_id }))
+        .await;
+    let events = phone.until("chat_cancelled").await;
+    eprintln!("turn 3: cancelled after {} more events", events.len());
+    let page = get(link, &format!("/api/v1/chats/{encoded}/messages")).await;
+    assert!(page["activeRun"].is_null());
+    let users = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["role"] == "user")
+        .count();
+    eprintln!("transcript holds {users} user messages after 3 turns");
+    assert_eq!(users, 3, "one user message per turn: nothing re-sent");
 }
