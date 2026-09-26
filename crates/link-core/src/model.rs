@@ -10,8 +10,16 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// OAL's error codes (§15) the host core answers with.
+/// OAL's error codes (§15), and the JSON-RPC and ACP codes a host answers
+/// with.
 pub mod code {
+    /// No common protocol version (then close 4002).
+    pub const VERSION_MISMATCH: i64 = -33001;
+    /// The first request wasn't `host/hello` or `host/pair`, or its
+    /// credentials failed (then close 4001).
+    pub const UNAUTHENTICATED: i64 = -33002;
+    /// A wrong, expired or used pairing code.
+    pub const PAIRING_REFUSED: i64 = -33003;
     /// The agent named isn't on this host.
     pub const UNKNOWN_AGENT: i64 = -33004;
     /// The agent isn't running and can't be started.
@@ -22,10 +30,26 @@ pub mod code {
     pub const ALREADY_ANSWERED: i64 = -33007;
     /// An answer to a request the host doesn't know.
     pub const UNKNOWN_REQUEST: i64 = -33008;
+    /// A file couldn't be fetched or is too large.
+    pub const ATTACHMENT_FAILED: i64 = -33009;
+    /// Host policy refuses the request.
+    pub const NOT_PERMITTED: i64 = -33010;
     /// The runtime failed the turn.
     pub const TURN_FAILED: i64 = -33011;
+    /// ACP: authentication required.
+    pub const AUTH_REQUIRED: i64 = -32000;
+    /// ACP: resource not found (a session the agent doesn't know).
+    pub const NOT_FOUND: i64 = -32002;
+    /// JSON-RPC: invalid request.
+    pub const INVALID_REQUEST: i64 = -32600;
+    /// JSON-RPC: method not found.
+    pub const METHOD_NOT_FOUND: i64 = -32601;
     /// JSON-RPC invalid params: an option that isn't one of the request's.
     pub const INVALID_PARAMS: i64 = -32602;
+    /// JSON-RPC: internal error.
+    pub const INTERNAL: i64 = -32603;
+    /// ACP: the request was cancelled (`$/cancel_request`).
+    pub const REQUEST_CANCELLED: i64 = -32800;
 }
 
 /// One agent the host runs (`host/agents`, §7.2).
@@ -150,9 +174,15 @@ pub struct PendingRequest {
     /// RFC 3339, UTC.
     pub created_at: String,
     /// The request in the owner's words, for clients that show a sentence
-    /// rather than the tool call. Not part of OAL's `PendingRequest`.
+    /// rather than the tool call, where the runtime gave its own (empty
+    /// otherwise). Not part of OAL's `PendingRequest`.
     #[serde(skip)]
     pub words: Words,
+    /// The agent's `session/request_permission` params, as it sent them:
+    /// what every attached client is sent, unchanged. Not part of OAL's
+    /// `PendingRequest`.
+    #[serde(skip)]
+    pub params: Value,
 }
 
 /// A permission request as the owner reads it.
@@ -245,6 +275,28 @@ pub struct ErrorObject {
     pub code: i64,
     /// One plain sentence for the owner.
     pub message: String,
+    /// Details for software: the agent's own text of an error whose message
+    /// the host made plain (`detail`), the version ranges of a mismatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl ErrorObject {
+    pub fn new(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    /// With `data`.
+    pub fn with_data(self, data: Value) -> Self {
+        Self {
+            data: Some(data),
+            ..self
+        }
+    }
 }
 
 /// `host/turn` (§9): a turn started, is running, or ended.
@@ -334,10 +386,58 @@ pub fn rfc3339(secs: i64, millis: u32) -> String {
     )
 }
 
+/// Unix seconds of an RFC 3339 time (`2026-09-26T14:23:13.025Z`,
+/// `…+02:00`).
+pub fn unix_seconds(text: &str) -> Option<f64> {
+    let b = text.as_bytes();
+    let num = |from: usize, len: usize| -> Option<i64> { text.get(from..from + len)?.parse().ok() };
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't' | b' ') {
+        return None;
+    }
+    let (year, month, day) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
+    let (hour, minute, second) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
+    let mut rest = &text[19..];
+    let mut fraction = 0.0;
+    if let Some(after) = rest.strip_prefix('.') {
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        fraction = format!("0.{}", &after[..digits]).parse().unwrap_or(0.0);
+        rest = &after[digits..];
+    }
+    let offset = match rest {
+        "Z" | "z" | "" => 0,
+        _ => {
+            let sign = match rest.as_bytes().first()? {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            sign * (rest.get(1..3)?.parse::<i64>().ok()? * 3600
+                + rest.get(4..6)?.parse::<i64>().ok()? * 60)
+        }
+    };
+    // Days from 1970-01-01 (Howard Hinnant's days_from_civil).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((days * 86_400 + hour * 3600 + minute * 60 + second - offset) as f64 + fraction)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rfc3339_times_read_back() {
+        assert_eq!(unix_seconds("1970-01-01T00:00:00Z"), Some(0.0));
+        assert_eq!(unix_seconds("2026-09-26T14:23:13.025Z"), Some(1_790_432_593.025));
+        assert_eq!(unix_seconds("2026-09-26T16:23:13+02:00"), Some(1_790_432_593.0));
+        assert_eq!(unix_seconds("yesterday"), None);
+    }
 
     #[test]
     fn times_are_rfc3339_utc() {
@@ -371,6 +471,7 @@ mod tests {
                 summary: "run `ls`".into(),
                 labels: vec!["Allow once".into()],
             },
+            params: json!({ "sessionId": "s1" }),
         };
         let update = PendingUpdate {
             change: PendingChange::Resolved,

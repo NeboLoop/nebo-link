@@ -35,9 +35,11 @@ use nebo_runtimes::openclaw::gateway::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::adapter::{
+    Ask, Chat, Control, Message, Role, Runtime, ToolCall, ToolResult, Turn, TurnEvent,
+};
 use crate::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, PermissionOption,
-    Role, StopReason, ToolCall, ToolCallUpdate, ToolResult, Turn, TurnEvent, Usage, Words,
+    Agent, BoxFuture, Error, PermissionOption, StopReason, ToolCallUpdate, Usage, Words,
 };
 use crate::model::ToolCallStatus;
 
@@ -445,7 +447,7 @@ impl Openclaw {
     }
 }
 
-impl Backend for Openclaw {
+impl Runtime for Openclaw {
     fn ready(&self) -> BoxFuture<'_, Result<(), String>> {
         async move {
             let gateway = self.gateway().await.map_err(|e| e.message("OpenClaw"))?;
@@ -579,14 +581,13 @@ impl Backend for Openclaw {
         .boxed()
     }
 
-    /// Hermes and OpenClaw keep their own approval settings: the
-    /// permission is not theirs to take.
+    /// Hermes and OpenClaw keep their own approval settings: Nebo's
+    /// permission mode for an employee is not theirs to take.
     fn turn<'a>(
         &'a self,
         agent: &'a str,
         chat: &'a str,
         prompt: String,
-        _permission: Option<Permission>,
     ) -> BoxFuture<'a, Result<Turn, Error>> {
         async move {
             let gateway = self.gateway().await?;

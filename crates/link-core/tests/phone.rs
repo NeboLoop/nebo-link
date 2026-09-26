@@ -95,8 +95,9 @@ async fn a_chat_frame_asks_is_answered_and_completes() {
         vec![(Some("call_1".to_owned()), "allow".to_owned())]
     );
     assert_eq!(
-        *fake.permissions.lock().unwrap(),
-        vec![Some(link_core::backend::Permission::Plan)]
+        *fake.prompts.lock().unwrap(),
+        vec!["hi".to_owned()],
+        "a runtime without modes of its own takes the turn as it is"
     );
     assert_eq!(
         contract

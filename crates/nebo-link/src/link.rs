@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use link_core::acp::Client;
+use link_core::adapter::Adapted;
 use link_core::backend::Backend;
 use link_core::host::Host;
 use link_core::phone::Contract;
@@ -489,16 +490,22 @@ async fn member(
         .ok_or_else(|| format!("{} was not found on this computer", runtime_name(agent.runtime)))?;
     let agent_dir = dir.agent(&agent.id);
     let backend: Arc<dyn Backend> = match agent.runtime {
-        Runtime::Hermes => Arc::new(hermes_backend(&agent_dir, agent.runtime, settings, install).await?),
+        Runtime::Hermes => Arc::new(Adapted::new(
+            agent.label.clone(),
+            hermes_backend(&agent_dir, agent.runtime, settings, install).await?,
+        )),
         Runtime::Openclaw => {
             let gateway = install::ui_addr(install).ok_or_else(|| "OpenClaw has no gateway to reach".to_owned())?;
-            Arc::new(link_core::openclaw::Openclaw::new(
-                openclaw::gateway::Connect::new(
-                    format!("ws://{gateway}"),
-                    &proxy_access(link, settings),
-                    proxy::FORWARDED_FOR,
+            Arc::new(Adapted::new(
+                agent.label.clone(),
+                link_core::openclaw::Openclaw::new(
+                    openclaw::gateway::Connect::new(
+                        format!("ws://{gateway}"),
+                        &proxy_access(link, settings),
+                        proxy::FORWARDED_FOR,
+                    ),
+                    openclaw::gateway::FileDeviceStore::new(agent_dir.device_file()),
                 ),
-                openclaw::gateway::FileDeviceStore::new(agent_dir.device_file()),
             ))
         }
         Runtime::Acp(_) => unreachable!("an ACP agent is run by its saved command"),
