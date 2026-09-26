@@ -22,6 +22,9 @@ pub struct Fake {
     pub permissions: Mutex<Vec<Option<Permission>>>,
     /// What each turn was answered with.
     pub answers: Arc<Mutex<Vec<Answer>>>,
+    /// The runtime's other agents, by their runtime ids (an OpenClaw's
+    /// agents, Hermes profiles).
+    pub others: Vec<&'static str>,
 }
 
 impl Backend for Fake {
@@ -32,20 +35,24 @@ impl Backend for Fake {
 
     fn agents(&self) -> BoxFuture<'_, Result<Vec<Agent>, Error>> {
         let down = self.down;
+        let others = self.others.clone();
         Box::pin(async move {
             if down {
                 return Err(Error::Unavailable("not answering".into()));
             }
-            Ok(vec![Agent {
-                id: "fake".into(),
+            let agent = |id: &str, is_default: bool| Agent {
+                id: id.into(),
                 name: "Fake".into(),
                 description: String::new(),
-                is_default: true,
+                is_default,
                 folder: Some("/work".into()),
                 capabilities: json!({ "loadSession": true }),
                 modes: None,
                 offline_reason: None,
-            }])
+            };
+            Ok(std::iter::once(agent("fake", true))
+                .chain(others.iter().map(|id| agent(id, false)))
+                .collect())
         })
     }
 

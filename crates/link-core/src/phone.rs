@@ -101,6 +101,10 @@ struct State {
     notices: Vec<Notice>,
     seen: HashSet<String>,
     seen_order: VecDeque<String>,
+    /// The id a caller named an agent by on a chat, by (agent, chat), where
+    /// it named it by an id saved before the ids took their one form: that
+    /// chat's frames carry the id it knows.
+    named: HashMap<(String, String), String>,
 }
 
 /// One row of the contract's notifications: a pending approval.
@@ -380,13 +384,34 @@ impl Contract {
         self.roster().agents().await.map_err(|e| self.refuse(e))
     }
 
-    /// The hosted agent a contract id names.
+    /// The hosted agent a contract id names; an id saved before the ids
+    /// took their one form still names its agent.
     async fn resolve(&self, id: &str) -> Result<Agent, Refusal> {
+        let canonical = match self.roster().canonical(id).await {
+            Ok(canonical) => canonical,
+            Err(Error::NotFound(_)) => return Err(Refusal::new(404, format!("No agent {id} on this bot."))),
+            Err(e) => return Err(self.refuse(e)),
+        };
         self.roster_agents()
             .await?
             .into_iter()
-            .find(|a| a.id == id)
+            .find(|a| a.id == canonical)
             .ok_or_else(|| Refusal::new(404, format!("No agent {id} on this bot.")))
+    }
+
+    /// The id the phone knows `agent` by on `chat`.
+    fn named(&self, agent: &str, chat: &str) -> String {
+        let state = self.state.lock().expect("contract state");
+        state
+            .named
+            .get(&(agent.to_owned(), chat.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| agent.to_owned())
+    }
+
+    /// A turn's frame fields, with the agent as the phone knows it.
+    fn payload(&self, agent: &str, chat: &str, turn_id: &str) -> Value {
+        payload(&self.named(agent, chat), chat, turn_id)
     }
 
     /// The agents a chat may belong to, the one running it first: the REST
@@ -446,7 +471,7 @@ impl Contract {
                 None
             }
             "cancel" => {
-                self.cancel(&data);
+                self.cancel(data);
                 None
             }
             "ask_response" => {
@@ -519,6 +544,13 @@ impl Contract {
                 }
             },
         };
+        if agent.id != agent_id {
+            self.state
+                .lock()
+                .expect("contract state")
+                .named
+                .insert((agent.id.clone(), chat_id.clone()), agent_id.clone());
+        }
         let session_id = session_key(&agent_id, &chat_id);
         if prompt.is_empty() {
             self.broadcast(
@@ -549,7 +581,7 @@ impl Contract {
             );
             return;
         }
-        self.start(&agent_id, &chat_id, prompt, permission);
+        self.start(&agent.id, &chat_id, prompt, permission);
     }
 
     /// Starts a turn on a chat whose slot in `running` is taken.
@@ -560,9 +592,10 @@ impl Contract {
                 state.running.remove(chat_id);
                 state.queued.remove(chat_id);
             }
+            let named = self.named(agent_id, chat_id);
             self.broadcast(
                 "chat_error",
-                json!({ "agent_id": agent_id, "session_id": session_key(agent_id, chat_id), "error": refused.message }),
+                json!({ "agent_id": named, "session_id": session_key(&named, chat_id), "error": refused.message }),
             );
         }
     }
@@ -571,7 +604,7 @@ impl Contract {
     fn on_event(self: &Arc<Self>, event: Event) {
         match event {
             Event::Update(update) => {
-                let data = payload(&update.agent, &update.session_id, &update.turn_id);
+                let data = self.payload(&update.agent, &update.session_id, &update.turn_id);
                 match update.update {
                     Update::Text(content) => {
                         self.broadcast("chat_stream", with(data, json!({ "content": content, "done": false })));
@@ -623,7 +656,7 @@ impl Contract {
 
     /// A turn's end as the phone reads it.
     fn ended(&self, turn: &TurnUpdate) {
-        let data = payload(&turn.agent, &turn.session_id, &turn.turn_id);
+        let data = self.payload(&turn.agent, &turn.session_id, &turn.turn_id);
         if let Some(error) = &turn.error {
             self.broadcast("chat_error", with(data, json!({ "error": error.message })));
         } else if turn.stop_reason == Some(StopReason::Cancelled) {
@@ -695,7 +728,7 @@ impl Contract {
         let turn_id = request.turn_id.as_deref().unwrap_or("");
         self.broadcast(
             "ask_request",
-            with(payload(&request.agent, &request.session_id, turn_id), card(request)),
+            with(self.payload(&request.agent, &request.session_id, turn_id), card(request)),
         );
     }
 
@@ -727,14 +760,31 @@ impl Contract {
 
     /// A `cancel {session_id | agent_id}`: stops the chat's turn, or every
     /// turn of the agent. With nothing running the phone is told so.
-    fn cancel(&self, data: &Value) {
-        let session_id = data["session_id"].as_str();
-        let chat_id = session_id.and_then(parse_session_key).map(|(_, chat)| chat);
-        let agent_id = data["agent_id"].as_str();
-        if self.host.cancel(agent_id, chat_id) == 0 {
+    fn cancel(self: &Arc<Self>, data: Value) {
+        let session_id = data["session_id"].as_str().map(str::to_owned);
+        let chat_id = session_id.as_deref().and_then(parse_session_key).map(|(_, chat)| chat.to_owned());
+        let agent_id = data["agent_id"].as_str().map(str::to_owned);
+        match (&chat_id, &agent_id) {
+            // An agent by an id saved before the ids took their one form is
+            // stopped by its id now.
+            (None, Some(agent)) => {
+                let contract = self.clone();
+                let agent = agent.clone();
+                tokio::spawn(async move {
+                    let canonical = contract.roster().canonical(&agent).await.unwrap_or_else(|_| agent.clone());
+                    contract.stop(Some(&canonical), None, Some(&agent), None);
+                });
+            }
+            _ => self.stop(agent_id.as_deref(), chat_id.as_deref(), agent_id.as_deref(), session_id.as_deref()),
+        }
+    }
+
+    /// Stops the turns [`Host::cancel`] names; with none, tells the phone.
+    fn stop(&self, agent: Option<&str>, chat: Option<&str>, named: Option<&str>, session_id: Option<&str>) {
+        if self.host.cancel(agent, chat) == 0 {
             self.broadcast(
                 "chat_cancelled",
-                json!({ "agent_id": agent_id, "session_id": session_id.unwrap_or("default") }),
+                json!({ "agent_id": named, "session_id": session_id.unwrap_or("default") }),
             );
         }
     }
