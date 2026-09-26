@@ -23,6 +23,7 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use link_core::adapter::Adapted;
 use link_core::backend::Backend;
 use link_core::hermes::Hermes;
 use link_core::host::Host;
@@ -476,7 +477,7 @@ async fn serve_roster(
 /// The contract in front of a Hermes API server at `hermes`.
 async fn start_link(hermes: SocketAddr, hub: &str) -> SocketAddr {
     let backend = Hermes::new(&format!("http://{hermes}"), KEY, vec!["coder".into()]);
-    serve_contract(("hermes", "Hermes"), Arc::new(backend), hub).await
+    serve_contract(("hermes", "Hermes"), Arc::new(Adapted::new("Hermes", backend)), hub).await
 }
 
 /// One stamped request, as the tunnel delivers it.
@@ -726,8 +727,8 @@ async fn the_phone_flow_against_hermes_0_19_0() {
     let ask = phone.until("ask_request").await.pop().unwrap();
     let request_id = ask["data"]["request_id"].as_str().unwrap().to_owned();
     assert!(
-        request_id.ends_with("-ask-1"),
-        "0.19.0 sends no request id; the link mints one: {request_id}"
+        request_id.starts_with("run_2-"),
+        "0.19.0 sends no request id; the host names it by its tool call: {request_id}"
     );
     assert!(
         ask["data"]["prompt"]
@@ -801,11 +802,13 @@ async fn the_phone_flow_against_hermes_0_19_0() {
         )
         .await;
     let events = phone.until("chat_complete").await;
+    // Hermes reports the blocked call without starting it: its card, then
+    // its result.
     assert_eq!(
         kinds(&events),
-        ["tool_result", "chat_stream", "usage", "chat_complete"]
+        ["tool_start", "tool_result", "chat_stream", "usage", "chat_complete"]
     );
-    assert_eq!(events[0]["data"]["is_error"], true);
+    assert_eq!(events[1]["data"]["is_error"], true);
     let answer = &hermes.seen("POST", "/v1/runs/run_2/approval")[0].body;
     assert_eq!(answer["choice"], "deny");
     assert!(
@@ -964,7 +967,7 @@ async fn live_hermes_phone_flow() {
     };
     let (hub_url, inbox) = serve_hub().await;
     let backend = Hermes::new(&url, &key, Vec::new());
-    let link = serve_contract(("hermes", "Hermes"), Arc::new(backend), &hub_url).await;
+    let link = serve_contract(("hermes", "Hermes"), Arc::new(Adapted::new("Hermes", backend)), &hub_url).await;
 
     let health = get(link, "/health").await;
     eprintln!("health: {health}");
@@ -1355,7 +1358,7 @@ async fn start_openclaw_link(
         Connect::new(&gateway.url, &access, FORWARDED_FOR),
         FileDeviceStore::new(dir.join("openclaw-device.json")),
     );
-    serve_contract(("openclaw", "OpenClaw"), Arc::new(backend), hub).await
+    serve_contract(("openclaw", "OpenClaw"), Arc::new(Adapted::new("OpenClaw", backend)), hub).await
 }
 
 #[tokio::test]
@@ -1561,7 +1564,7 @@ async fn live_openclaw_phone_flow() {
         Connect::new(&url, &access, FORWARDED_FOR),
         FileDeviceStore::new(dir.path().join("openclaw-device.json")),
     );
-    let link = serve_contract(("openclaw", "OpenClaw"), Arc::new(backend), &hub_url).await;
+    let link = serve_contract(("openclaw", "OpenClaw"), Arc::new(Adapted::new("OpenClaw", backend)), &hub_url).await;
 
     let health = get(link, "/health").await;
     eprintln!("health: {health}");
@@ -2214,7 +2217,9 @@ async fn an_acp_agent_that_exits_is_started_again_and_reopens_the_chat() {
         .iter()
         .map(|r| r["content"].as_str().unwrap())
         .collect();
-    assert_eq!(contents, ["hello", "Hello", "hello", "Hello"]);
+    // The host's record of the chat: what the owner said, the one that
+    // failed included, and every answer.
+    assert_eq!(contents, ["hello", "Hello", "exit", "hello", "Hello"]);
     assert_eq!(get(link, "/health").await["chat"], true);
 }
 

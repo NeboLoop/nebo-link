@@ -1,22 +1,26 @@
-//! What the host needs from a runtime: its agents, their chats and
-//! transcripts, and one streamed turn at a time. Each runtime implements
-//! this once ([`crate::acp`], [`crate::hermes`], [`crate::openclaw`]);
-//! everything a client sees is built from these types by the host, so no
-//! runtime shape leaks past this file.
+//! What the host needs from a runtime: its agents, and ACP to each of them.
+//! Every runtime speaks ACP to the host: a coding agent natively
+//! ([`crate::acp`]), OpenClaw and Hermes through [`crate::adapter`], which
+//! maps them into ACP as Open Agent Link's Appendix A says. So the host keeps
+//! one record of every session, in ACP's own messages, whoever reads it: an
+//! Open Agent Link client, or the phone contract.
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
-pub use crate::model::{PermissionOption, SessionModeState, StopReason, ToolCallUpdate, Usage, Words};
+pub use crate::model::{
+    ErrorObject, PermissionOption, SessionModeState, StopReason, ToolCallUpdate, Usage, Words,
+};
 
-/// A boxed future, so the trait is object-safe and one link can hold any
+/// A boxed future, so the trait is object-safe and one host can hold any
 /// runtime's backend.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Why a backend call failed.
+/// Why a runtime could not be asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The runtime's API is not answering; the owner reads "Could not
@@ -61,173 +65,103 @@ pub struct Agent {
     pub offline_reason: Option<String>,
 }
 
-/// One conversation: a runtime session.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chat {
-    /// The runtime's session id.
-    pub id: String,
-    pub title: String,
-    pub preview: String,
-    /// Unix seconds of the last activity.
-    pub last_active: Option<f64>,
-    pub message_count: u64,
+/// What one of the runtime's agents sent the host, beyond its answers.
+#[derive(Debug)]
+pub struct FromAgent {
+    /// The runtime's id of the agent.
+    pub agent: String,
+    pub message: AgentMessage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    User,
-    Assistant,
-    /// A tool's output, answering one of an assistant message's calls.
-    Tool,
-}
-
-/// A stored message of a chat.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Message {
-    pub id: String,
-    pub role: Role,
-    pub text: String,
-    /// Unix seconds.
-    pub created_at: Option<f64>,
-    /// The calls an assistant message made, in order.
-    pub tool_calls: Vec<ToolCall>,
-    /// The result a tool message carries.
-    pub tool_result: Option<ToolResult>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub input: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    pub content: String,
-    pub is_error: bool,
-}
-
-/// The runtime stopped for the owner's decision: ACP's
-/// `session/request_permission`, and the same in the owner's words.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Ask {
-    /// The runtime's id for the request, when it gives one.
-    pub request_id: Option<String>,
-    /// The call it asks about.
-    pub tool_call: ToolCallUpdate,
-    /// The answers it offers; an option's id is what it is answered with.
-    pub options: Vec<PermissionOption>,
-    pub words: Words,
-}
-
-/// What a turn emits, in order, ending with exactly one of `Completed`,
-/// `Failed` or `Cancelled`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TurnEvent {
-    Text(String),
-    Thinking(String),
-    ToolStart {
-        id: String,
-        name: String,
-        input: Value,
+#[derive(Debug)]
+pub enum AgentMessage {
+    /// ACP `session/update`: `update` is its `SessionUpdate`, as sent.
+    Update { session_id: String, update: Value },
+    /// ACP `session/request_permission`: `params` as sent. The host answers
+    /// through `reply`; a reply dropped unanswered is `cancelled`.
+    Permission {
+        session_id: String,
+        params: Value,
+        /// The request in the owner's words, where the runtime has its own
+        /// (an adapted runtime's question); `None` for an ACP agent's.
+        words: Option<Words>,
+        reply: Reply,
     },
-    ToolResult {
-        id: String,
-        name: String,
-        result: String,
-        is_error: bool,
-        duration_ms: Option<u64>,
-    },
-    Ask(Box<Ask>),
-    /// An ask was answered, from anywhere (the runtime's own UI included).
-    AskAnswered {
-        request_id: Option<String>,
-    },
-    Completed {
-        stop_reason: StopReason,
-        usage: Option<Usage>,
-    },
-    Failed(String),
-    Cancelled,
+    /// The agent took back a permission request it sent (ACP
+    /// `$/cancel_request`, or an adapted runtime whose question was answered
+    /// in its own interface): the host resolves it with nobody's answer.
+    Withdrawn { reply: u64 },
 }
 
-/// What the host sends a running turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Control {
-    Cancel,
-    Answer {
-        request_id: Option<String>,
-        /// A [`PermissionOption::option_id`] of the ask.
-        choice: String,
-    },
+/// Where the answer to an agent's permission request goes.
+#[derive(Debug)]
+pub struct Reply {
+    /// Unique within the backend: what [`AgentMessage::Withdrawn`] names.
+    pub id: u64,
+    pub tx: oneshot::Sender<Value>,
 }
 
-/// How much the owner lets the employee do without asking: Nebo's
-/// permission mode for it (`types::permissions::Mode`, as Nebo names it on
-/// the `chat` frame). A runtime with modes of its own runs the turn in the
-/// one this maps to; one without ignores it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Permission {
-    /// Every change asks.
-    Ask,
-    /// Acts inside its job (its folder); anything else asks.
-    Automatic,
-    /// Reads and plans; changes nothing.
-    Plan,
-    /// Nothing asks.
-    FullAccess,
-}
+impl Reply {
+    /// A reply and where its answer arrives: the ACP
+    /// `RequestPermissionResponse` (`{"outcome": …}`).
+    pub fn new(id: u64) -> (Self, oneshot::Receiver<Value>) {
+        let (tx, rx) = oneshot::channel();
+        (Self { id, tx }, rx)
+    }
 
-impl Permission {
-    /// Nebo's name for the mode: `ask`, `automatic`, `plan`, `full_access`.
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "ask" => Some(Permission::Ask),
-            "automatic" => Some(Permission::Automatic),
-            "plan" => Some(Permission::Plan),
-            "full_access" => Some(Permission::FullAccess),
-            _ => None,
-        }
+    pub fn send(self, response: Value) {
+        let _ = self.tx.send(response);
     }
 }
 
-/// A turn in progress: its events, and the channel to steer it.
-pub struct Turn {
-    pub events: mpsc::Receiver<TurnEvent>,
-    pub control: mpsc::Sender<Control>,
-}
+/// Where a backend hands what its agents send. Called in the order the
+/// agents sent it, and before the answer to any request they sent after it
+/// resolves: a `session/prompt` that returns has had every update of its turn
+/// handed over.
+pub type Inbox = Arc<dyn Fn(FromAgent) + Send + Sync>;
 
 /// A runtime behind the host.
 pub trait Backend: Send + Sync + 'static {
-    /// Whether the runtime can serve chats now: reachable, and every feature
-    /// the host needs present. The error says what is missing.
+    /// Whether the runtime can serve its agents now: reachable, and every
+    /// feature the host needs present. The error says what is missing.
     fn ready(&self) -> BoxFuture<'_, Result<(), String>>;
+
     fn agents(&self) -> BoxFuture<'_, Result<Vec<Agent>, Error>>;
-    /// The agent's chats, most recent first.
-    fn chats<'a>(&'a self, agent: &'a str) -> BoxFuture<'a, Result<Vec<Chat>, Error>>;
-    fn create_chat<'a>(&'a self, agent: &'a str) -> BoxFuture<'a, Result<Chat, Error>>;
-    /// The chat's transcript, oldest first.
-    fn messages<'a>(
+
+    /// Where what the agents send goes from now on. The host calls it when
+    /// the backend joins it.
+    fn connect(&self, inbox: Inbox);
+
+    /// One ACP request to `agent` (the runtime's id), answered with its
+    /// result or its JSON-RPC error: `session/new`, `session/load`,
+    /// `session/resume`, `session/list`, `session/prompt`,
+    /// `session/set_mode`, `session/set_config_option`, `session/close`,
+    /// `session/delete`. An agent that is not running and can't be started
+    /// answers `agent_unavailable` with the reason, in plain words.
+    fn request<'a>(
         &'a self,
         agent: &'a str,
-        chat: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Message>, Error>>;
-    /// The model `chat` runs on, or the agent's current model without one.
+        method: &'a str,
+        params: Value,
+    ) -> BoxFuture<'a, Result<Value, ErrorObject>>;
+
+    /// One ACP notification to `agent`: `session/cancel`.
+    fn notify(&self, agent: &str, method: &str, params: Value);
+
+    /// Whether the runtime's sessions also change outside the host (its own
+    /// interface, its other channels): the host then reads a session afresh
+    /// from the runtime whenever a client loads it with nothing running,
+    /// rather than from its record. A coding agent's sessions have one
+    /// client, the host, so its record is the session.
+    fn shared_sessions(&self) -> bool {
+        false
+    }
+
+    /// The model `session` runs on, or the agent's current model without
+    /// one, for the phone contract's `/chats/{id}` and `/models`.
     fn model<'a>(
         &'a self,
         agent: &'a str,
-        chat: Option<&'a str>,
+        session: Option<&'a str>,
     ) -> BoxFuture<'a, Result<String, Error>>;
-    /// Sends `prompt` on `chat` and starts streaming the turn. The runtime
-    /// holds the transcript; only the new message is sent. `permission` is
-    /// the owner's choice for the employee, when Nebo sent one.
-    fn turn<'a>(
-        &'a self,
-        agent: &'a str,
-        chat: &'a str,
-        prompt: String,
-        permission: Option<Permission>,
-    ) -> BoxFuture<'a, Result<Turn, Error>>;
 }

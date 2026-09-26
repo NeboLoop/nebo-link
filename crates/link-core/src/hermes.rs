@@ -39,9 +39,11 @@ use nebo_runtimes::hermes::runs::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::adapter::{
+    Ask, Chat, Control, Message, Role, Runtime, ToolCall, ToolResult, Turn, TurnEvent,
+};
 use crate::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, PermissionOption,
-    Role, StopReason, ToolCall, ToolCallUpdate, ToolResult, Turn, TurnEvent, Usage, Words,
+    Agent, BoxFuture, Error, PermissionOption, StopReason, ToolCallUpdate, Usage, Words,
 };
 use crate::model::ToolCallStatus;
 
@@ -108,7 +110,7 @@ impl Hermes {
     }
 }
 
-impl Backend for Hermes {
+impl Runtime for Hermes {
     fn ready(&self) -> BoxFuture<'_, Result<(), String>> {
         async move {
             let client = Client::new(&self.base_url, None, &self.key);
@@ -234,14 +236,13 @@ impl Backend for Hermes {
         .boxed()
     }
 
-    /// Hermes and OpenClaw keep their own approval settings: the
-    /// permission is not theirs to take.
+    /// Hermes and OpenClaw keep their own approval settings: Nebo's
+    /// permission mode for an employee is not theirs to take.
     fn turn<'a>(
         &'a self,
         agent: &'a str,
         chat: &'a str,
         prompt: String,
-        _permission: Option<Permission>,
     ) -> BoxFuture<'a, Result<Turn, Error>> {
         async move {
             let client = self.client(agent)?;

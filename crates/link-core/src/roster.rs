@@ -1,4 +1,4 @@
-//! Every agent a computer's host runs, behind one [`Backend`]. Each hosted
+//! Every agent a computer's host runs. Each hosted
 //! agent (a Claude Code in one folder, a Codex in another, an OpenClaw
 //! install) is a [`Member`] with its own backend, so two instances of one
 //! runtime share nothing: not a process, a session, a question or a folder.
@@ -13,20 +13,15 @@
 //!   a bot had one. Ids saved before this rule (`<member>.<agent>`, a
 //!   runtime's own id with capitals or underscores) still name their agent:
 //!   an id that names none is read as [`agent_id`] of itself.
-//! - **Chats.** A chat's id is its runtime session's, prefixed
-//!   `<member>~` on every member but the first, so a chat id names its
-//!   agent even where the REST paths give no agent, and two agents whose
-//!   runtimes number sessions alike never share one.
+//! - **Sessions** are the runtime's own ids, scoped by the agent they
+//!   belong to.
 //! - **Membership** changes while the host runs ([`Roster::set`]): a member
 //!   that stays keeps its backend, running process and sessions.
 
 use std::sync::{Arc, RwLock};
 
 use crate::PRIMARY;
-use crate::backend::{Agent, Backend, BoxFuture, Chat, Error, Message, Permission, Turn};
-
-/// What separates a member's id from its runtime's session id in a chat id.
-const SEP: char = '~';
+use crate::backend::{Agent, Backend, Error};
 
 /// One hosted agent.
 #[derive(Clone)]
@@ -117,7 +112,7 @@ impl Roster {
     /// The member an agent id names, and that agent's id in the member's
     /// runtime. An id saved before the ids took their one form is read as
     /// [`agent_id`] of itself.
-    async fn locate(&self, agent: &str) -> Result<(Member, String), Error> {
+    pub async fn locate(&self, agent: &str) -> Result<(Member, String), Error> {
         if let Some(found) = self.find(agent).await? {
             return Ok(found);
         }
@@ -181,32 +176,6 @@ impl Roster {
             .map(|(_, id)| id)
             .ok_or_else(|| Error::NotFound(format!("The agent {agent}")))
     }
-
-    /// A member's chat as the contract names it.
-    fn exposed(member: &Member, chat: &str) -> String {
-        if member.id == PRIMARY {
-            chat.to_owned()
-        } else {
-            format!("{}{SEP}{chat}", member.id)
-        }
-    }
-
-    /// The member's own session id for a contract chat id, when the chat is
-    /// that member's.
-    fn session(&self, member: &Member, chat: &str) -> Result<String, Error> {
-        let not_found = || Error::NotFound("That conversation".to_owned());
-        if member.id != PRIMARY {
-            return chat
-                .strip_prefix(member.id.as_str())
-                .and_then(|rest| rest.strip_prefix(SEP))
-                .map(str::to_owned)
-                .ok_or_else(not_found);
-        }
-        let another = chat
-            .split_once(SEP)
-            .is_some_and(|(prefix, _)| self.members().iter().any(|m| m.id != PRIMARY && m.id == prefix));
-        if another { Err(not_found()) } else { Ok(chat.to_owned()) }
-    }
 }
 
 /// The id of each of `member`'s agents ([`agent_id`]), in order: its default
@@ -258,115 +227,49 @@ fn unreachable(member: &Member, error: Error) -> Error {
     }
 }
 
-impl Backend for Roster {
+impl Roster {
     /// Ready when one agent is: the members are asked in order, and the
     /// first that answers ends it, so the others start only when used.
-    fn ready(&self) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move {
-            let members = self.members();
-            let mut first_error = None;
-            for member in &members {
-                match member.backend.ready().await {
-                    Ok(()) => return Ok(()),
-                    Err(why) => {
-                        first_error.get_or_insert(why);
-                    }
+    pub async fn ready(&self) -> Result<(), String> {
+        let members = self.members();
+        let mut first_error = None;
+        for member in &members {
+            match member.backend.ready().await {
+                Ok(()) => return Ok(()),
+                Err(why) => {
+                    first_error.get_or_insert(why);
                 }
             }
-            Err(first_error.unwrap_or_else(|| "no agent is linked; add one with `nebo-link add`".to_owned()))
-        })
+        }
+        Err(first_error.unwrap_or_else(|| "no agent is linked; add one with `nebo-link add`".to_owned()))
     }
 
     /// Every member's agents; a member whose runtime doesn't answer is left
     /// out, unless none answers.
-    fn agents(&self) -> BoxFuture<'_, Result<Vec<Agent>, Error>> {
-        Box::pin(async move {
-            let mut all = Vec::new();
-            let mut failed = None;
-            let members = self.members();
-            let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
-            for member in &members {
-                match member.backend.agents().await {
-                    Ok(agents) => all.extend(member_agents(member, agents, &ids)),
-                    Err(e) => {
-                        failed.get_or_insert(unreachable(member, e));
-                    }
+    pub async fn agents(&self) -> Result<Vec<Agent>, Error> {
+        let mut all = Vec::new();
+        let mut failed = None;
+        let members = self.members();
+        let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
+        for member in &members {
+            match member.backend.agents().await {
+                Ok(agents) => all.extend(member_agents(member, agents, &ids)),
+                Err(e) => {
+                    failed.get_or_insert(unreachable(member, e));
                 }
             }
-            match failed {
-                Some(e) if all.is_empty() => Err(e),
-                _ => Ok(all),
-            }
-        })
-    }
-
-    fn chats<'a>(&'a self, agent: &'a str) -> BoxFuture<'a, Result<Vec<Chat>, Error>> {
-        Box::pin(async move {
-            let (member, sub) = self.locate(agent).await?;
-            let chats = member.backend.chats(&sub).await.map_err(|e| unreachable(&member, e))?;
-            Ok(chats
-                .into_iter()
-                .map(|c| Chat {
-                    id: Self::exposed(&member, &c.id),
-                    ..c
-                })
-                .collect())
-        })
-    }
-
-    fn create_chat<'a>(&'a self, agent: &'a str) -> BoxFuture<'a, Result<Chat, Error>> {
-        Box::pin(async move {
-            let (member, sub) = self.locate(agent).await?;
-            let chat = member.backend.create_chat(&sub).await.map_err(|e| unreachable(&member, e))?;
-            Ok(Chat {
-                id: Self::exposed(&member, &chat.id),
-                ..chat
-            })
-        })
-    }
-
-    fn messages<'a>(&'a self, agent: &'a str, chat: &'a str) -> BoxFuture<'a, Result<Vec<Message>, Error>> {
-        Box::pin(async move {
-            let (member, sub) = self.locate(agent).await?;
-            let session = self.session(&member, chat)?;
-            member.backend.messages(&sub, &session).await.map_err(|e| unreachable(&member, e))
-        })
-    }
-
-    fn model<'a>(&'a self, agent: &'a str, chat: Option<&'a str>) -> BoxFuture<'a, Result<String, Error>> {
-        Box::pin(async move {
-            let (member, sub) = self.locate(agent).await?;
-            let session = chat.map(|c| self.session(&member, c)).transpose()?;
-            member
-                .backend
-                .model(&sub, session.as_deref())
-                .await
-                .map_err(|e| unreachable(&member, e))
-        })
-    }
-
-    fn turn<'a>(
-        &'a self,
-        agent: &'a str,
-        chat: &'a str,
-        prompt: String,
-        permission: Option<Permission>,
-    ) -> BoxFuture<'a, Result<Turn, Error>> {
-        Box::pin(async move {
-            let (member, sub) = self.locate(agent).await?;
-            let session = self.session(&member, chat)?;
-            member
-                .backend
-                .turn(&sub, &session, prompt, permission)
-                .await
-                .map_err(|e| unreachable(&member, e))
-        })
+        }
+        match failed {
+            Some(e) if all.is_empty() => Err(e),
+            _ => Ok(all),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BoxFuture;
 
     fn agent(id: &str, is_default: bool) -> Agent {
         Agent {
@@ -390,20 +293,13 @@ mod tests {
         fn agents(&self) -> BoxFuture<'_, Result<Vec<Agent>, Error>> {
             Box::pin(async { Ok(Vec::new()) })
         }
-        fn chats<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<Chat>, Error>> {
-            Box::pin(async { Ok(Vec::new()) })
+        fn connect(&self, _: crate::backend::Inbox) {}
+        fn request<'a>(&'a self, _: &'a str, _: &'a str, _: serde_json::Value) -> BoxFuture<'a, Result<serde_json::Value, crate::model::ErrorObject>> {
+            Box::pin(async { Ok(serde_json::json!({})) })
         }
-        fn create_chat<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Chat, Error>> {
-            Box::pin(async { Err(Error::NotFound("chat".into())) })
-        }
-        fn messages<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Vec<Message>, Error>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
+        fn notify(&self, _: &str, _: &str, _: serde_json::Value) {}
         fn model<'a>(&'a self, _: &'a str, _: Option<&'a str>) -> BoxFuture<'a, Result<String, Error>> {
             Box::pin(async { Ok(String::new()) })
-        }
-        fn turn<'a>(&'a self, _: &'a str, _: &'a str, _: String, _: Option<Permission>) -> BoxFuture<'a, Result<Turn, Error>> {
-            Box::pin(async { Err(Error::NotFound("turn".into())) })
         }
     }
 

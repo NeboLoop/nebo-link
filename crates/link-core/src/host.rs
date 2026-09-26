@@ -1,120 +1,309 @@
-//! The host core: every agent a computer runs (its [`Roster`]), their
-//! sessions, one turn at a time per session, the permission requests those
-//! turns stop for, and what clients are told about all of it, in Open Agent
-//! Link's types (`spec/oal-0.1.md` §7–§10). No transport: whoever embeds the
-//! host (the nebo-link daemon, Nebo itself) carries it to clients.
+//! The host core: every agent a computer runs (its [`Roster`]), each spoken
+//! to in ACP, and Open Agent Link's rules for many clients sharing them
+//! (`spec/oal-0.1.md` §7–§10, §12). No transport: whoever embeds the host
+//! (the nebo-link daemon, Nebo itself) carries it to clients, and each client
+//! (an OAL connection, the phone contract) is a [`ClientId`] reading the
+//! host's [`Event`]s.
 //!
+//! - **Sessions.** The host is the only ACP client of every agent. For each
+//!   session open in an agent it keeps a record: every `session/update` sent
+//!   about it (the agent's replay when it was opened, the prompts, every
+//!   turn's updates), its modes and config options, its running turn, the
+//!   last turn's end, and its pending permission requests.
+//!   [`Host::open_session`] answers a session already open from that record,
+//!   and opens any other in its agent.
 //! - **Turns.** [`Host::prompt`] starts one on a session and says so with
 //!   [`TurnUpdate`] `running`; every turn it accepts ends with exactly one
-//!   `ended`, carrying the stop reason and this turn's usage, or the error.
-//!   A second prompt while one runs is refused with `turn_in_progress`.
-//! - **Permission requests.** A question the runtime stops for becomes a
+//!   `ended`, after its last update and after [`Event::Answered`] carries the
+//!   agent's answer. A second prompt while one runs is refused with
+//!   `turn_in_progress`.
+//! - **Permission requests.** One an agent sends becomes a
 //!   [`PendingRequest`] on the host-wide list and a [`PendingUpdate`]
-//!   `added`. The first answer wins ([`Host::answer`], or the runtime's own
-//!   interface); a turn that ends resolves what it left open as `cancelled`.
+//!   `added`. The first answer wins ([`Host::answer`], a cancel, the agent
+//!   taking it back); a turn that ends resolves what it left open as
+//!   `cancelled`.
 //! - **Agents.** [`Host::agents`] lists every hosted agent, one whose
 //!   runtime doesn't answer included, offline with the reason;
 //!   [`Host::set_members`] and [`Host::refresh`] announce what changed with
 //!   [`AgentUpdate`].
+//! - **Order.** Every event carries the host's sequence number, and a
+//!   snapshot ([`Opened::seq`]) the number it was taken at, so a client that
+//!   attaches to a session skips the events its snapshot already holds.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::SystemTime;
 
+use nebo_runtimes::acp::protocol;
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
-use crate::backend::{Backend, Chat, Control, Error, Message, Permission, TurnEvent};
+use crate::backend::{AgentMessage, Error, FromAgent, Inbox, Reply};
 use crate::model::{
     self, Agent, AgentChange, AgentUpdate, DeviceRef, ErrorObject, Outcome, PendingChange,
-    PendingRequest, PendingUpdate, StopReason, TurnState, TurnUpdate, code,
+    PendingRequest, PendingUpdate, StopReason, ToolCallUpdate, TurnState, TurnUpdate, Usage, code,
 };
 use crate::roster::{Member, Roster, member_agents};
 
 /// How many resolved request ids are remembered, so a late answer reads
 /// `already_answered` rather than `unknown_request`.
 const RESOLVED_REMEMBERED: usize = 256;
+/// How many sessions keep their record; past it, the least recently used
+/// with nothing running or waiting is let go (a later load opens it again).
+const OPEN_SESSIONS: usize = 256;
+/// How many updates for a session the host doesn't know yet are kept for
+/// when it learns of it (an agent's first updates can come before its
+/// answer to `session/new`).
+const STRAYS: usize = 64;
+
+/// A client of the host: an Open Agent Link connection, the phone contract.
+/// Events that a client caused and already knows name it
+/// ([`SessionUpdate::skip`], [`Answered::client`]).
+pub type ClientId = u64;
 
 /// What the host tells its clients, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// `host/turn`: a turn started or ended.
     Turn(TurnUpdate),
-    /// What a running turn produced.
+    /// ACP `session/update`, recorded.
     Update(SessionUpdate),
+    /// The agent's answer to a turn's `session/prompt`: just before the
+    /// turn's `ended`, for the client that sent the prompt.
+    Answered(Answered),
     /// `host/pending_update`: a permission request was added or resolved.
     Pending(Box<PendingUpdate>),
     /// `host/agent_update`: an agent was added, changed or removed.
     Agent(AgentUpdate),
+    /// The session was closed or deleted: every client is detached from it.
+    Closed { agent: String, session_id: String },
 }
 
-/// Something a running turn produced, on its session.
+/// An event and its place in the host's order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stamped {
+    pub seq: u64,
+    pub event: Event,
+}
+
+/// One `session/update` of a session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionUpdate {
     pub agent: String,
     pub session_id: String,
-    pub turn_id: String,
-    pub update: Update,
+    /// The ACP `SessionUpdate`, as the agent sent it (or as the host made it:
+    /// a prompt's echo, a mode change).
+    pub update: Value,
+    /// The client that caused it and so already knows it (its own prompt,
+    /// its own mode change), which is not sent it again.
+    pub skip: Option<ClientId>,
 }
 
-/// A turn's output as it streams.
+/// A turn's `session/prompt`, answered.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Update {
-    /// Reply text (ACP `agent_message_chunk`).
-    Text(String),
-    /// Thinking, or a plan as steps (ACP `agent_thought_chunk`, `plan`).
-    Thinking(String),
-    /// A tool call, once the runtime says what it is (ACP `tool_call`).
-    ToolStart {
-        id: String,
-        name: String,
-        input: Value,
-    },
-    /// A tool call finished (ACP `tool_call_update` `completed`/`failed`).
-    ToolResult {
-        id: String,
-        name: String,
-        result: String,
-        is_error: bool,
-        duration_ms: Option<u64>,
-    },
+pub struct Answered {
+    pub agent: String,
+    pub session_id: String,
+    pub turn_id: String,
+    /// The client that sent the prompt.
+    pub client: Option<ClientId>,
+    /// The agent's `PromptResponse`, or its error.
+    pub response: Result<Value, ErrorObject>,
 }
 
-/// Every agent on the computer, and their turns.
+/// One recorded update and when the host received it live (`None` for one
+/// replayed when the session was opened).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recorded {
+    pub update: Value,
+    /// Unix seconds.
+    pub at: Option<f64>,
+}
+
+/// A session as a client attaching to it gets it (§8, §12).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opened {
+    /// The host's sequence number when this was taken: events up to it are
+    /// in it.
+    pub seq: u64,
+    /// Every update of the session so far (`session/load`; empty for
+    /// `session/resume`).
+    pub record: Vec<Recorded>,
+    /// The session's most recent `host/turn`: its running turn, else the last
+    /// turn's end.
+    pub turn: Option<TurnUpdate>,
+    /// The answer to `session/load` or `session/resume`: the agent's own when
+    /// the host opened the session now, else the session's current modes and
+    /// config options.
+    pub response: Value,
+    /// The session's pending permission requests, oldest first.
+    pub pending: Vec<PendingRequest>,
+}
+
+/// How `session/load` and `session/resume` differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Open {
+    /// Replays the session.
+    Load,
+    /// Reopens it without the replay.
+    Resume,
+}
+
+impl Open {
+    fn method(self) -> &'static str {
+        match self {
+            Open::Load => "session/load",
+            Open::Resume => "session/resume",
+        }
+    }
+}
+
+/// Every agent on the computer, and their sessions.
 pub struct Host {
     roster: Arc<Roster>,
-    events: broadcast::Sender<Event>,
+    events: broadcast::Sender<Stamped>,
     state: Mutex<State>,
+    /// One session opened in an agent at a time, so none is opened twice.
+    opening: tokio::sync::Mutex<()>,
+    clients: AtomicU64,
+    /// The backends handed the host's inbox, by address.
+    connected: Mutex<std::collections::HashSet<usize>>,
+    me: Weak<Host>,
 }
 
 #[derive(Default)]
 struct State {
-    /// The turn running on each session.
-    turns: HashMap<String, Running>,
+    seq: u64,
+    sessions: HashMap<Key, Session>,
+    /// Which session an agent's message is about: (member, runtime agent,
+    /// session) to the host's key.
+    index: HashMap<(String, String, String), Key>,
+    /// Updates for sessions the host doesn't know yet.
+    strays: HashMap<(String, String, String), Vec<Value>>,
     /// Every pending permission request, oldest first.
-    pending: Vec<PendingRequest>,
+    pending: Vec<Pending>,
     /// Requests resolved lately, newest last.
     resolved: VecDeque<String>,
     /// The agents as last announced; `None` until first listed.
     known: Option<Vec<Agent>>,
+    /// Bumped on every use of a session, for letting the least used go.
+    tick: u64,
+}
+
+/// (agent, session).
+type Key = (String, String);
+
+struct Session {
+    member: String,
+    runtime_agent: String,
+    record: Vec<Recorded>,
+    modes: Option<Value>,
+    config_options: Option<Value>,
+    model: Option<String>,
+    turn: Option<Running>,
+    last_ended: Option<TurnUpdate>,
+    /// Being opened in its agent: its replay is recorded but not announced.
+    opening: bool,
+    used: u64,
+}
+
+impl Session {
+    fn new(member: &str, runtime_agent: &str) -> Self {
+        Self {
+            member: member.to_owned(),
+            runtime_agent: runtime_agent.to_owned(),
+            record: Vec::new(),
+            modes: None,
+            config_options: None,
+            model: None,
+            turn: None,
+            last_ended: None,
+            opening: false,
+            used: 0,
+        }
+    }
+
+    /// Takes in what an agent's answer says about the session.
+    fn answered(&mut self, result: &Value) {
+        if result["modes"].is_object() {
+            self.modes = Some(result["modes"].clone());
+        }
+        if result["configOptions"].is_array() {
+            self.config_options = Some(result["configOptions"].clone());
+        }
+        if let Some(model) = protocol::model(result) {
+            self.model = Some(model);
+        }
+    }
+
+    /// Takes in what an update says about the session.
+    fn apply(&mut self, update: &Value) {
+        match update["sessionUpdate"].as_str() {
+            Some("current_mode_update") => {
+                if let (Some(modes), Some(mode)) = (&mut self.modes, update.get("currentModeId")) {
+                    modes["currentModeId"] = mode.clone();
+                }
+            }
+            Some("config_option_update") => {
+                if update["configOptions"].is_array() {
+                    self.config_options = Some(update["configOptions"].clone());
+                }
+                if let Some(model) = protocol::model(update) {
+                    self.model = Some(model);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The session's current modes and config options, as `session/load`
+    /// answers for a session already open.
+    fn current(&self) -> Value {
+        let mut answer = json!({});
+        if let Some(modes) = &self.modes {
+            answer["modes"] = modes.clone();
+        }
+        if let Some(options) = &self.config_options {
+            answer["configOptions"] = options.clone();
+        }
+        answer
+    }
+
+    fn latest_turn(&self) -> Option<TurnUpdate> {
+        self.turn.as_ref().map(|r| r.turn.clone()).or_else(|| self.last_ended.clone())
+    }
 }
 
 struct Running {
     turn: TurnUpdate,
-    /// `None` while the runtime is still starting the turn.
-    control: Option<mpsc::Sender<Control>>,
-    /// The runtime's own id of each of the turn's pending requests, by the
-    /// host's id.
-    asks: Vec<(String, Option<String>)>,
+    client: Option<ClientId>,
+}
+
+struct Pending {
+    request: PendingRequest,
+    member: String,
+    /// The agent's reply, and its id within its backend.
+    reply: Option<Reply>,
+    reply_id: u64,
 }
 
 impl Host {
     pub fn new(roster: Arc<Roster>) -> Arc<Self> {
-        let (events, _) = broadcast::channel(1024);
-        Arc::new(Self {
+        let (events, _) = broadcast::channel(4096);
+        let host = Arc::new_cyclic(|me| Self {
             roster,
             events,
             state: Mutex::new(State::default()),
-        })
+            opening: tokio::sync::Mutex::new(()),
+            clients: AtomicU64::new(0),
+            connected: Mutex::new(std::collections::HashSet::new()),
+            me: me.clone(),
+        });
+        for member in host.roster.members() {
+            host.ensure(&member);
+        }
+        host
     }
 
     pub fn roster(&self) -> &Arc<Roster> {
@@ -122,12 +311,55 @@ impl Host {
     }
 
     /// Every event from now on.
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Stamped> {
         self.events.subscribe()
     }
 
-    fn emit(&self, event: Event) {
-        let _ = self.events.send(event);
+    /// A new client's id.
+    pub fn client(&self) -> ClientId {
+        self.clients.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Hands a member's backend the host's inbox once: a member the roster
+    /// took in directly ([`Roster::set`]) is connected when first used.
+    fn ensure(&self, member: &Member) {
+        let address = Arc::as_ptr(&member.backend) as *const () as usize;
+        if self.connected.lock().expect("connected").insert(address) {
+            self.connect(member);
+        }
+    }
+
+    /// The backend of the member `id`, connected.
+    fn backend(&self, id: &str) -> Option<Arc<dyn crate::backend::Backend>> {
+        let member = self.roster.members().into_iter().find(|m| m.id == id)?;
+        self.ensure(&member);
+        Some(member.backend)
+    }
+
+    /// Hands a member's backend the host's inbox.
+    fn connect(&self, member: &Member) {
+        let me = self.me.clone();
+        let id = member.id.clone();
+        let inbox: Inbox = Arc::new(move |message: FromAgent| {
+            if let Some(host) = me.upgrade() {
+                host.receive(&id, message);
+            }
+        });
+        member.backend.connect(inbox);
+    }
+
+    /// Emits `event` in order; the state's lock is held, so the order is the
+    /// order the state changed in.
+    fn emit(state: &mut State, events: &broadcast::Sender<Stamped>, event: Event) {
+        state.seq += 1;
+        let _ = events.send(Stamped {
+            seq: state.seq,
+            event,
+        });
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().expect("host state")
     }
 
     /// Whether any agent can take a prompt now; the error says why not.
@@ -141,7 +373,7 @@ impl Host {
     /// is listed offline, with the reason.
     pub async fn agents(&self) -> Vec<Agent> {
         let now = self.current().await;
-        let mut state = self.state.lock().expect("host state");
+        let mut state = self.lock();
         state.known.get_or_insert_with(|| now.clone());
         now
     }
@@ -152,17 +384,15 @@ impl Host {
         let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
         for member in &members {
             match member.backend.agents().await {
-                Ok(agents) => all.extend(member_agents(member, agents, &ids).into_iter().map(|a| {
-                    Agent {
-                        online: a.offline_reason.is_none(),
-                        id: a.id,
-                        label: a.name,
-                        runtime: member.runtime.clone(),
-                        folder: a.folder,
-                        offline_reason: a.offline_reason,
-                        capabilities: a.capabilities,
-                        modes: a.modes,
-                    }
+                Ok(agents) => all.extend(member_agents(member, agents, &ids).into_iter().map(|a| Agent {
+                    online: a.offline_reason.is_none(),
+                    id: a.id,
+                    label: a.name,
+                    runtime: member.runtime.clone(),
+                    folder: a.folder,
+                    offline_reason: a.offline_reason,
+                    capabilities: a.capabilities,
+                    modes: a.modes,
                 })),
                 Err(e) => all.push(Agent {
                     id: member.id.clone(),
@@ -187,6 +417,9 @@ impl Host {
     /// Replaces the hosted agents: one that stays keeps its backend (its
     /// running process and sessions). What changed is announced.
     pub fn set_members(self: &Arc<Self>, members: Vec<Member>) {
+        for member in &members {
+            self.ensure(member);
+        }
         self.roster.set(members);
         let host = self.clone();
         tokio::spawn(async move { host.refresh().await });
@@ -196,83 +429,316 @@ impl Host {
     /// (came online, went offline, was renamed) or removed since last time.
     pub async fn refresh(&self) {
         // Nothing was announced yet, so nothing can have changed for anyone.
-        if self.state.lock().expect("host state").known.is_none() {
+        if self.lock().known.is_none() {
             return;
         }
         let now = self.current().await;
-        let updates = {
-            let mut state = self.state.lock().expect("host state");
-            let Some(before) = state.known.replace(now.clone()) else {
-                return;
-            };
-            let mut updates = Vec::new();
-            for agent in &now {
-                match before.iter().find(|b| b.id == agent.id) {
-                    None => updates.push((AgentChange::Added, agent.clone())),
-                    Some(b) if b != agent => updates.push((AgentChange::Updated, agent.clone())),
-                    Some(_) => {}
-                }
-            }
-            for gone in before
-                .into_iter()
-                .filter(|b| !now.iter().any(|a| a.id == b.id))
-            {
-                updates.push((AgentChange::Removed, gone));
-            }
-            updates
+        let mut state = self.lock();
+        let Some(before) = state.known.replace(now.clone()) else {
+            return;
         };
-        for (change, agent) in updates {
-            self.emit(Event::Agent(AgentUpdate { change, agent }));
+        let mut updates = Vec::new();
+        for agent in &now {
+            match before.iter().find(|b| b.id == agent.id) {
+                None => updates.push((AgentChange::Added, agent.clone())),
+                Some(b) if b != agent => updates.push((AgentChange::Updated, agent.clone())),
+                Some(_) => {}
+            }
         }
+        for gone in before.into_iter().filter(|b| !now.iter().any(|a| a.id == b.id)) {
+            updates.push((AgentChange::Removed, gone));
+        }
+        for (change, agent) in updates {
+            Self::emit(&mut state, &self.events, Event::Agent(AgentUpdate { change, agent }));
+        }
+    }
+
+    /// The member hosting `agent` and the agent's id in its runtime.
+    async fn locate(&self, agent: &str) -> Result<(Member, String), ErrorObject> {
+        let found = self.roster.locate(agent).await.map_err(|e| match e {
+            Error::NotFound(_) => ErrorObject::new(code::UNKNOWN_AGENT, format!("There's no agent called {agent} on this computer.")),
+            Error::Unavailable(why) | Error::Failed(why) => ErrorObject::new(code::AGENT_UNAVAILABLE, why),
+        })?;
+        self.ensure(&found.0);
+        Ok(found)
     }
 
     // -- Sessions -------------------------------------------------------------
 
-    /// The agent's sessions, most recent first.
-    pub async fn sessions(&self, agent: &str) -> Result<Vec<Chat>, Error> {
-        self.roster.chats(agent).await
+    /// ACP `session/new` on `agent`; the session is open from its answer on.
+    pub async fn new_session(&self, agent: &str, params: Value) -> Result<Value, ErrorObject> {
+        let (member, runtime_agent) = self.locate(agent).await?;
+        let result = member.backend.request(&runtime_agent, "session/new", params).await?;
+        let Some(session_id) = result["sessionId"].as_str() else {
+            return Err(ErrorObject::new(
+                code::INTERNAL,
+                format!("{} started a conversation without an id.", member.label),
+            ));
+        };
+        let mut state = self.lock();
+        let mut session = Session::new(&member.id, &runtime_agent);
+        session.answered(&result);
+        let key = (agent.to_owned(), session_id.to_owned());
+        Self::insert(&mut state, key, session);
+        Ok(result)
     }
 
-    pub async fn new_session(&self, agent: &str) -> Result<Chat, Error> {
-        self.roster.create_chat(agent).await
+    /// Records a session the host now holds open, with any updates that came
+    /// before it, and lets the least used go past [`OPEN_SESSIONS`].
+    fn insert(state: &mut State, key: Key, mut session: Session) {
+        let index = (session.member.clone(), session.runtime_agent.clone(), key.1.clone());
+        if let Some(strays) = state.strays.remove(&index) {
+            session.record.extend(strays.into_iter().map(|update| Recorded { update, at: None }));
+        }
+        state.tick += 1;
+        session.used = state.tick;
+        state.index.insert(index, key.clone());
+        state.sessions.insert(key, session);
+        while state.sessions.len() > OPEN_SESSIONS {
+            let idle = state
+                .sessions
+                .iter()
+                .filter(|(k, s)| {
+                    s.turn.is_none() && !s.opening && !state.pending.iter().any(|p| p.request.agent == k.0 && p.request.session_id == k.1)
+                })
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone());
+            let Some(idle) = idle else { break };
+            Self::forget(state, &idle);
+        }
     }
 
-    /// The session's transcript, oldest first.
-    pub async fn transcript(&self, agent: &str, session: &str) -> Result<Vec<Message>, Error> {
-        self.roster.messages(agent, session).await
+    fn forget(state: &mut State, key: &Key) -> Option<Session> {
+        let session = state.sessions.remove(key)?;
+        state
+            .index
+            .remove(&(session.member.clone(), session.runtime_agent.clone(), key.1.clone()));
+        Some(session)
     }
 
-    /// The model the session runs on, or the agent's current one.
-    pub async fn model(&self, agent: &str, session: Option<&str>) -> Result<String, Error> {
-        self.roster.model(agent, session).await
+    /// ACP `session/load` or `session/resume` (`params` as the client sent
+    /// them): a session already open is answered from its record; any other
+    /// is opened in its agent, which replays it into the record.
+    /// A runtime whose sessions change outside the host
+    /// ([`crate::backend::Backend::shared_sessions`]) is asked afresh on
+    /// every `session/load` of a session with nothing running or waiting.
+    pub async fn open_session(&self, agent: &str, how: Open, params: Value) -> Result<Opened, ErrorObject> {
+        let session_id = params["sessionId"].as_str().unwrap_or("").to_owned();
+        let key = (agent.to_owned(), session_id.clone());
+        let (member, runtime_agent) = self.locate(agent).await?;
+        let refresh = how == Open::Load && member.backend.shared_sessions();
+        if !refresh && let Some(opened) = self.snapshot(&key, how, None) {
+            return Ok(opened);
+        }
+        let _one = self.opening.lock().await;
+        let was_open = {
+            let mut state = self.lock();
+            let busy = state.sessions.get(&key).is_some_and(|s| s.turn.is_some())
+                || state.pending.iter().any(|p| p.request.agent == key.0 && p.request.session_id == key.1);
+            let open = state.sessions.get(&key).is_some_and(|s| !s.opening);
+            if open && (!refresh || busy) {
+                None
+            } else {
+                Some(match state.sessions.get_mut(&key) {
+                    Some(session) => {
+                        // Read afresh: the runtime's replay is the record.
+                        session.record.clear();
+                        session.opening = true;
+                        true
+                    }
+                    None => {
+                        let mut session = Session::new(&member.id, &runtime_agent);
+                        session.opening = true;
+                        Self::insert(&mut state, key.clone(), session);
+                        false
+                    }
+                })
+            }
+        };
+        let Some(was_open) = was_open else {
+            return self
+                .snapshot(&key, how, None)
+                .ok_or_else(|| ErrorObject::new(code::NOT_FOUND, "That conversation was closed."));
+        };
+        match member.backend.request(&runtime_agent, how.method(), params).await {
+            Ok(result) => {
+                {
+                    let mut state = self.lock();
+                    if let Some(session) = state.sessions.get_mut(&key) {
+                        session.opening = false;
+                        session.answered(&result);
+                    }
+                }
+                self.snapshot(&key, how, Some(result)).ok_or_else(|| {
+                    ErrorObject::new(code::NOT_FOUND, "That conversation was closed.")
+                })
+            }
+            Err(e) => {
+                let mut state = self.lock();
+                match state.sessions.get_mut(&key) {
+                    Some(session) if was_open => session.opening = false,
+                    _ => {
+                        Self::forget(&mut state, &key);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The session as a client attaching to it gets it, if it is open.
+    fn snapshot(&self, key: &Key, how: Open, response: Option<Value>) -> Option<Opened> {
+        let mut state = self.lock();
+        state.tick += 1;
+        let tick = state.tick;
+        let session = state.sessions.get_mut(key).filter(|s| !s.opening)?;
+        session.used = tick;
+        let record = match how {
+            Open::Load => session.record.clone(),
+            Open::Resume => Vec::new(),
+        };
+        let turn = session.latest_turn();
+        let response = response.unwrap_or_else(|| session.current());
+        let pending = state
+            .pending
+            .iter()
+            .filter(|p| p.request.agent == key.0 && p.request.session_id == key.1)
+            .map(|p| p.request.clone())
+            .collect();
+        Some(Opened {
+            seq: state.seq,
+            record,
+            turn,
+            response,
+            pending,
+        })
+    }
+
+    /// Whether `agent`'s runtime keeps sessions that change outside the host
+    /// ([`crate::backend::Backend::shared_sessions`]).
+    pub async fn shared_sessions(&self, agent: &str) -> bool {
+        self.roster.locate(agent).await.is_ok_and(|(member, _)| member.backend.shared_sessions())
+    }
+
+    /// Whether the session is open in the host.
+    pub fn is_open(&self, agent: &str, session: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(&(agent.to_owned(), session.to_owned()))
+            .is_some_and(|s| !s.opening)
+    }
+
+    /// The session's current modes (ACP `SessionModeState`), when it has
+    /// modes and is open.
+    pub fn modes(&self, agent: &str, session: &str) -> Option<Value> {
+        self.lock()
+            .sessions
+            .get(&(agent.to_owned(), session.to_owned()))
+            .and_then(|s| s.modes.clone())
+    }
+
+    /// ACP `session/list` on `agent`.
+    pub async fn list_sessions(&self, agent: &str, params: Value) -> Result<Value, ErrorObject> {
+        let (member, runtime_agent) = self.locate(agent).await?;
+        member.backend.request(&runtime_agent, "session/list", params).await
+    }
+
+    /// ACP `session/set_mode`, `session/set_config_option`, `session/close`
+    /// or `session/delete` on an open session. A mode or option changed is
+    /// recorded and told to every other client (`client` caused it); a
+    /// session closed or deleted is let go.
+    pub async fn change_session(
+        &self,
+        agent: &str,
+        method: &str,
+        params: Value,
+        client: Option<ClientId>,
+    ) -> Result<Value, ErrorObject> {
+        let session_id = params["sessionId"].as_str().unwrap_or("").to_owned();
+        let key = (agent.to_owned(), session_id.clone());
+        let (member, runtime_agent) = {
+            let state = self.lock();
+            let session = state.sessions.get(&key).filter(|s| !s.opening).ok_or_else(not_open)?;
+            (session.member.clone(), session.runtime_agent.clone())
+        };
+        let backend = self
+            .backend(&member)
+            .ok_or_else(|| ErrorObject::new(code::UNKNOWN_AGENT, format!("There's no agent called {agent} on this computer.")))?;
+        let result = backend.request(&runtime_agent, method, params.clone()).await?;
+        let mut state = self.lock();
+        let update = match method {
+            "session/set_mode" => Some(json!({ "sessionUpdate": "current_mode_update", "currentModeId": params["modeId"] })),
+            "session/set_config_option" if result["configOptions"].is_array() => {
+                Some(json!({ "sessionUpdate": "config_option_update", "configOptions": result["configOptions"] }))
+            }
+            "session/close" | "session/delete" => {
+                self.resolve_session(&mut state, &key, None);
+                Self::forget(&mut state, &key);
+                Self::emit(&mut state, &self.events, Event::Closed { agent: key.0.clone(), session_id });
+                None
+            }
+            _ => None,
+        };
+        if let Some(update) = update {
+            self.record(&mut state, &key, update, client);
+        }
+        Ok(result)
+    }
+
+    /// Records an update on an open session and announces it.
+    fn record(&self, state: &mut State, key: &Key, update: Value, skip: Option<ClientId>) {
+        let Some(session) = state.sessions.get_mut(key) else { return };
+        session.apply(&update);
+        let at = session.turn.is_some().then(unix_now);
+        session.record.push(Recorded { update: update.clone(), at });
+        if session.opening {
+            return;
+        }
+        Self::emit(
+            state,
+            &self.events,
+            Event::Update(SessionUpdate {
+                agent: key.0.clone(),
+                session_id: key.1.clone(),
+                update,
+                skip,
+            }),
+        );
     }
 
     // -- Turns ----------------------------------------------------------------
 
-    /// The turn running on `session`, if any.
-    pub fn turn(&self, session: &str) -> Option<TurnUpdate> {
-        let state = self.state.lock().expect("host state");
-        state.turns.get(session).map(|r| r.turn.clone())
+    /// The turn running on the session, if any.
+    pub fn turn(&self, agent: &str, session: &str) -> Option<TurnUpdate> {
+        self.lock()
+            .sessions
+            .get(&(agent.to_owned(), session.to_owned()))
+            .and_then(|s| s.turn.as_ref().map(|r| r.turn.clone()))
     }
 
     /// Every running turn.
     pub fn turns(&self) -> Vec<TurnUpdate> {
-        let state = self.state.lock().expect("host state");
-        state.turns.values().map(|r| r.turn.clone()).collect()
+        self.lock()
+            .sessions
+            .values()
+            .filter_map(|s| s.turn.as_ref().map(|r| r.turn.clone()))
+            .collect()
     }
 
-    /// Sends `text` to `agent` on `session` and starts the turn, in the
-    /// agent's mode for `permission` when one is given. The turn is
-    /// announced `running` now and `ended` when it ends, however it ends;
-    /// the only refusal is `turn_in_progress`.
+    /// ACP `session/prompt` on an open session: `prompt` is its content
+    /// blocks, `by` the device and `client` the client that sent it. The
+    /// turn is announced `running` now, each block recorded as the owner's
+    /// message and told to every other client, and `ended` when it ends,
+    /// however it ends.
     pub fn prompt(
         self: &Arc<Self>,
         agent: &str,
         session: &str,
-        text: String,
-        permission: Option<Permission>,
+        prompt: Vec<Value>,
         by: Option<DeviceRef>,
+        client: Option<ClientId>,
     ) -> Result<TurnUpdate, ErrorObject> {
+        let key = (agent.to_owned(), session.to_owned());
         let turn = TurnUpdate {
             agent: agent.to_owned(),
             session_id: session.to_owned(),
@@ -284,319 +750,313 @@ impl Host {
             error: None,
             usage: None,
         };
-        {
-            let mut state = self.state.lock().expect("host state");
-            if state.turns.contains_key(session) {
-                return Err(ErrorObject {
-                    code: code::TURN_IN_PROGRESS,
-                    message: format!(
-                        "{} is still working on the last message. Wait for it or stop it.",
-                        self.label(agent)
-                    ),
-                });
+        let (member, runtime_agent) = {
+            let mut state = self.lock();
+            let session_state = state.sessions.get_mut(&key).filter(|s| !s.opening).ok_or_else(not_open)?;
+            if session_state.turn.is_some() {
+                return Err(ErrorObject::new(
+                    code::TURN_IN_PROGRESS,
+                    format!("{} is still working on the last message. Wait for it or stop it.", self.label(agent)),
+                ));
             }
-            state.turns.insert(
-                session.to_owned(),
-                Running {
-                    turn: turn.clone(),
-                    control: None,
-                    asks: Vec::new(),
-                },
-            );
-        }
-        self.emit(Event::Turn(turn.clone()));
+            session_state.turn = Some(Running {
+                turn: turn.clone(),
+                client,
+            });
+            let found = (session_state.member.clone(), session_state.runtime_agent.clone());
+            Self::emit(&mut state, &self.events, Event::Turn(turn.clone()));
+            for block in &prompt {
+                self.record(&mut state, &key, json!({ "sessionUpdate": "user_message_chunk", "content": block }), client);
+            }
+            found
+        };
         let host = self.clone();
         let started = turn.clone();
-        tokio::spawn(async move { host.run(started, text, permission).await });
+        tokio::spawn(async move {
+            let backend = host.backend(&member);
+            let answer = match backend {
+                Some(backend) => {
+                    backend
+                        .request(&runtime_agent, "session/prompt", json!({ "sessionId": started.session_id, "prompt": prompt }))
+                        .await
+                }
+                None => Err(ErrorObject::new(
+                    code::AGENT_UNAVAILABLE,
+                    format!("{} is no longer on this computer.", host.label(&started.agent)),
+                )),
+            };
+            host.end(started, answer);
+        });
         Ok(turn)
     }
 
-    /// Runs one accepted turn to its end.
-    async fn run(self: Arc<Self>, turn: TurnUpdate, text: String, permission: Option<Permission>) {
-        let end = match self
-            .roster
-            .turn(&turn.agent, &turn.session_id, text, permission)
-            .await
-        {
-            Ok(started) => {
-                {
-                    let mut state = self.state.lock().expect("host state");
-                    if let Some(running) = state.turns.get_mut(&turn.session_id) {
-                        running.control = Some(started.control);
-                    }
-                }
-                self.relay(started.events, &turn).await
-            }
-            Err(e) => Ended::Error(ErrorObject {
-                code: match e {
-                    Error::NotFound(_) => code::UNKNOWN_AGENT,
-                    Error::Unavailable(_) => code::AGENT_UNAVAILABLE,
-                    Error::Failed(_) => code::TURN_FAILED,
-                },
-                message: e.message(&self.label(&turn.agent)),
-            }),
+    /// Frees the turn's session, resolves what it left pending, and
+    /// announces the answer and then the turn's end.
+    fn end(&self, turn: TurnUpdate, answer: Result<Value, ErrorObject>) {
+        let mut state = self.lock();
+        let key = (turn.agent.clone(), turn.session_id.clone());
+        let client = state
+            .sessions
+            .get_mut(&key)
+            .and_then(|s| s.turn.take())
+            .and_then(|r| r.client);
+        let left: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|p| p.request.turn_id.as_deref() == Some(turn.turn_id.as_str()))
+            .map(|p| p.request.id.clone())
+            .collect();
+        for id in left {
+            self.resolve(&mut state, &id, Some(Outcome::Cancelled), None);
+        }
+        let (stop_reason, usage, error) = match &answer {
+            Ok(result) => (
+                Some(StopReason::parse(result["stopReason"].as_str().unwrap_or("end_turn"))),
+                usage(result),
+                None,
+            ),
+            Err(error) => (None, None, Some(error.clone())),
         };
-        self.end(turn, end);
-    }
-
-    /// Announces a turn's events until it ends, and how it ended.
-    async fn relay(&self, mut events: mpsc::Receiver<TurnEvent>, turn: &TurnUpdate) -> Ended {
-        let update = |update: Update| {
-            Event::Update(SessionUpdate {
+        Self::emit(
+            &mut state,
+            &self.events,
+            Event::Answered(Answered {
                 agent: turn.agent.clone(),
                 session_id: turn.session_id.clone(),
                 turn_id: turn.turn_id.clone(),
-                update,
-            })
-        };
-        while let Some(event) = events.recv().await {
-            match event {
-                TurnEvent::Text(text) => self.emit(update(Update::Text(text))),
-                TurnEvent::Thinking(text) => self.emit(update(Update::Thinking(text))),
-                TurnEvent::ToolStart { id, name, input } => {
-                    self.emit(update(Update::ToolStart { id, name, input }))
-                }
-                TurnEvent::ToolResult {
-                    id,
-                    name,
-                    result,
-                    is_error,
-                    duration_ms,
-                } => self.emit(update(Update::ToolResult {
-                    id,
-                    name,
-                    result,
-                    is_error,
-                    duration_ms,
-                })),
-                TurnEvent::Ask(ask) => self.ask(turn, *ask),
-                TurnEvent::AskAnswered { request_id } => {
-                    let taken = {
-                        let mut state = self.state.lock().expect("host state");
-                        match state.turns.get_mut(&turn.session_id) {
-                            Some(running) => take_ask(&mut running.asks, request_id.as_deref()),
-                            None => None,
-                        }
-                    };
-                    if let Some(id) = taken {
-                        self.resolve(&id, None, None);
-                    }
-                }
-                TurnEvent::Completed { stop_reason, usage } => {
-                    return Ended::Stopped(stop_reason, usage);
-                }
-                TurnEvent::Failed(message) => {
-                    return Ended::Error(ErrorObject {
-                        code: code::TURN_FAILED,
-                        message,
-                    });
-                }
-                TurnEvent::Cancelled => return Ended::Stopped(StopReason::Cancelled, None),
-            }
-        }
-        // The runtime stopped without saying how.
-        Ended::Error(ErrorObject {
-            code: code::AGENT_UNAVAILABLE,
-            message: format!(
-                "Could not connect to {}. Try again.",
-                self.label(&turn.agent)
-            ),
-        })
-    }
-
-    /// Frees the turn's session, resolves what it left pending, and
-    /// announces its end.
-    fn end(&self, turn: TurnUpdate, how: Ended) {
-        let left = {
-            let mut state = self.state.lock().expect("host state");
-            state
-                .turns
-                .remove(&turn.session_id)
-                .map(|r| r.asks.into_iter().map(|(id, _)| id).collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
-        for id in left {
-            self.resolve(&id, Some(Outcome::Cancelled), None);
-        }
-        let (stop_reason, usage, error) = match how {
-            Ended::Stopped(reason, usage) => (Some(reason), usage, None),
-            Ended::Error(error) => (None, None, Some(error)),
-        };
-        self.emit(Event::Turn(TurnUpdate {
+                client,
+                response: answer,
+            }),
+        );
+        let ended = TurnUpdate {
             state: TurnState::Ended,
             stop_reason,
             usage,
             error,
             ..turn
-        }));
+        };
+        if let Some(session) = state.sessions.get_mut(&key) {
+            session.last_ended = Some(ended.clone());
+        }
+        Self::emit(&mut state, &self.events, Event::Turn(ended));
+    }
+
+    /// ACP `session/cancel` for the session: the agent is told, and its
+    /// pending permission requests are answered `cancelled`, as ACP requires
+    /// of a client (`by` is the device that cancelled).
+    pub fn cancel_session(&self, agent: &str, session: &str, by: Option<DeviceRef>) {
+        let key = (agent.to_owned(), session.to_owned());
+        let target = {
+            let mut state = self.lock();
+            let Some(found) = state.sessions.get(&key).map(|s| (s.member.clone(), s.runtime_agent.clone())) else {
+                return;
+            };
+            self.resolve_session(&mut state, &key, by);
+            found
+        };
+        let (member, runtime_agent) = target;
+        if let Some(backend) = self.backend(&member) {
+            backend.notify(&runtime_agent, "session/cancel", json!({ "sessionId": session }));
+        }
     }
 
     /// Stops the running turns on `session`, or every turn of `agent`, or
-    /// every turn. Returns how many were told to stop; a turn still starting
-    /// is not among them.
+    /// every turn. Returns how many were told to stop.
     pub fn cancel(&self, agent: Option<&str>, session: Option<&str>) -> usize {
-        let controls: Vec<mpsc::Sender<Control>> = {
-            let state = self.state.lock().expect("host state");
-            state
-                .turns
-                .iter()
-                .filter(|(id, running)| match (session, agent) {
-                    (Some(session), _) => id.as_str() == session,
-                    (None, Some(agent)) => running.turn.agent == agent,
-                    (None, None) => true,
-                })
-                .filter_map(|(_, running)| running.control.clone())
-                .collect()
-        };
-        let count = controls.len();
-        for control in controls {
-            tokio::spawn(async move {
-                let _ = control.send(Control::Cancel).await;
-            });
+        let running: Vec<(String, String)> = self
+            .turns()
+            .into_iter()
+            .filter(|t| match (session, agent) {
+                (Some(session), Some(agent)) => t.session_id == session && t.agent == agent,
+                (Some(session), None) => t.session_id == session,
+                (None, Some(agent)) => t.agent == agent,
+                (None, None) => true,
+            })
+            .map(|t| (t.agent, t.session_id))
+            .collect();
+        for (agent, session) in &running {
+            self.cancel_session(agent, session, None);
         }
-        count
+        running.len()
     }
 
     // -- Permission requests --------------------------------------------------
 
     /// Every pending permission request, oldest first (`host/pending`).
     pub fn pending(&self) -> Vec<PendingRequest> {
-        self.state.lock().expect("host state").pending.clone()
+        self.lock().pending.iter().map(|p| p.request.clone()).collect()
     }
 
-    /// A question the runtime stopped for: pending now, and announced.
-    fn ask(&self, turn: &TurnUpdate, ask: crate::backend::Ask) {
-        let request = {
-            let mut state = self.state.lock().expect("host state");
-            let Some(running) = state.turns.get(&turn.session_id) else {
-                return;
-            };
-            // The runtime's id, unless another pending request already has it
-            // (two agents numbering their tool calls alike): the answer must
-            // reach the one that asked.
-            let mut id = match &ask.request_id {
-                Some(id) => id.clone(),
-                None => format!("{}-ask-{}", turn.turn_id, running.asks.len() + 1),
-            };
-            while state.pending.iter().any(|p| p.id == id) {
-                id.push('+');
-            }
-            let request = PendingRequest {
-                id: id.clone(),
-                agent: turn.agent.clone(),
-                session_id: turn.session_id.clone(),
-                turn_id: Some(turn.turn_id.clone()),
-                tool_call: ask.tool_call,
-                options: ask.options,
-                created_at: model::now(),
-                words: ask.words,
-            };
-            if let Some(running) = state.turns.get_mut(&turn.session_id) {
-                running.asks.push((id, ask.request_id));
-            }
-            state.pending.push(request.clone());
-            request
+    /// Answers the pending request `id` with `outcome` (`host/answer`, or a
+    /// client's answer to its copy); `by` is the device that answered.
+    pub fn answer(&self, id: &str, outcome: Outcome, by: Option<DeviceRef>) -> Result<(), ErrorObject> {
+        let mut state = self.lock();
+        let Some(pending) = state.pending.iter().find(|p| p.request.id == id) else {
+            return Err(if state.resolved.iter().any(|r| r == id) {
+                ErrorObject::new(code::ALREADY_ANSWERED, "This was already answered on another device.")
+            } else {
+                ErrorObject::new(code::UNKNOWN_REQUEST, "That request is no longer waiting.")
+            });
         };
-        self.emit(Event::Pending(Box::new(PendingUpdate {
-            change: PendingChange::Added,
-            request,
-            outcome: None,
-            answered_by: None,
-        })));
-    }
-
-    /// Answers the pending request `id` with `option_id`, one of its
-    /// options (`host/answer`); `by` is the device that answered.
-    pub fn answer(
-        &self,
-        id: &str,
-        option_id: &str,
-        by: Option<DeviceRef>,
-    ) -> Result<(), ErrorObject> {
-        let (control, backend_id) = {
-            let mut state = self.state.lock().expect("host state");
-            let Some(request) = state.pending.iter().find(|p| p.id == id) else {
-                let answered = state.resolved.iter().any(|r| r == id);
-                return Err(if answered {
-                    ErrorObject {
-                        code: code::ALREADY_ANSWERED,
-                        message: "This was already answered.".to_owned(),
-                    }
-                } else {
-                    ErrorObject {
-                        code: code::UNKNOWN_REQUEST,
-                        message: "That request is no longer waiting.".to_owned(),
-                    }
-                });
-            };
-            if !request.options.iter().any(|o| o.option_id == option_id) {
-                return Err(ErrorObject {
-                    code: code::INVALID_PARAMS,
-                    message: "That isn't one of the answers this request offers.".to_owned(),
-                });
-            }
-            let session = request.session_id.clone();
-            let Some(running) = state.turns.get_mut(&session) else {
-                return Err(ErrorObject {
-                    code: code::UNKNOWN_REQUEST,
-                    message: "That request is no longer waiting.".to_owned(),
-                });
-            };
-            let Some(control) = running.control.clone() else {
-                return Err(ErrorObject {
-                    code: code::UNKNOWN_REQUEST,
-                    message: "That request is no longer waiting.".to_owned(),
-                });
-            };
-            let backend_id = match running.asks.iter().position(|(ask, _)| ask == id) {
-                Some(i) => running.asks.remove(i).1,
-                None => None,
-            };
-            (control, backend_id)
-        };
-        let choice = option_id.to_owned();
-        tokio::spawn(async move {
-            let _ = control
-                .send(Control::Answer {
-                    request_id: backend_id,
-                    choice,
-                })
-                .await;
-        });
-        self.resolve(
-            id,
-            Some(Outcome::Selected {
-                option_id: option_id.to_owned(),
-            }),
-            by,
-        );
+        if let Outcome::Selected { option_id } = &outcome
+            && !pending.request.options.iter().any(|o| &o.option_id == option_id)
+        {
+            return Err(ErrorObject::new(code::INVALID_PARAMS, "That isn't one of the answers this request offers."));
+        }
+        self.resolve(&mut state, id, Some(outcome), by);
         Ok(())
     }
 
-    /// Takes `id` off the pending list and announces how it was resolved.
-    fn resolve(&self, id: &str, outcome: Option<Outcome>, by: Option<DeviceRef>) {
-        let request = {
-            let mut state = self.state.lock().expect("host state");
-            let Some(i) = state.pending.iter().position(|p| p.id == id) else {
-                return;
-            };
-            let request = state.pending.remove(i);
-            state.resolved.push_back(request.id.clone());
-            if state.resolved.len() > RESOLVED_REMEMBERED {
-                state.resolved.pop_front();
-            }
-            request
+    /// Answers every pending request of the session `cancelled`.
+    fn resolve_session(&self, state: &mut State, key: &Key, by: Option<DeviceRef>) {
+        let ids: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|p| p.request.agent == key.0 && p.request.session_id == key.1)
+            .map(|p| p.request.id.clone())
+            .collect();
+        for id in ids {
+            self.resolve(state, &id, Some(Outcome::Cancelled), by.clone());
+        }
+    }
+
+    /// Takes `id` off the pending list, answers the agent with `outcome`
+    /// (none: it took the request back), and announces how it was resolved.
+    fn resolve(&self, state: &mut State, id: &str, outcome: Option<Outcome>, by: Option<DeviceRef>) {
+        let Some(i) = state.pending.iter().position(|p| p.request.id == id) else {
+            return;
         };
-        self.emit(Event::Pending(Box::new(PendingUpdate {
-            change: PendingChange::Resolved,
-            request,
-            outcome,
-            answered_by: by,
-        })));
+        let mut pending = state.pending.remove(i);
+        if let (Some(reply), Some(outcome)) = (pending.reply.take(), &outcome) {
+            reply.send(json!({ "outcome": outcome }));
+        }
+        state.resolved.push_back(pending.request.id.clone());
+        if state.resolved.len() > RESOLVED_REMEMBERED {
+            state.resolved.pop_front();
+        }
+        Self::emit(
+            state,
+            &self.events,
+            Event::Pending(Box::new(PendingUpdate {
+                change: PendingChange::Resolved,
+                request: pending.request,
+                outcome,
+                answered_by: by,
+            })),
+        );
+    }
+
+    // -- From the agents ------------------------------------------------------
+
+    /// What a member's agent sent.
+    fn receive(&self, member: &str, message: FromAgent) {
+        let FromAgent { agent: runtime_agent, message } = message;
+        let mut state = self.lock();
+        match message {
+            AgentMessage::Update { session_id, update } => {
+                let index = (member.to_owned(), runtime_agent, session_id);
+                match state.index.get(&index).cloned() {
+                    Some(key) => self.record(&mut state, &key, update, None),
+                    None => {
+                        if state.strays.len() < OPEN_SESSIONS || state.strays.contains_key(&index) {
+                            let strays = state.strays.entry(index).or_default();
+                            if strays.len() < STRAYS {
+                                strays.push(update);
+                            }
+                        }
+                    }
+                }
+            }
+            AgentMessage::Permission {
+                session_id,
+                params,
+                words,
+                reply,
+            } => {
+                let index = (member.to_owned(), runtime_agent, session_id.clone());
+                // Nobody can answer for a session the host doesn't hold: the
+                // reply drops, and the agent reads `cancelled`.
+                let Some(key) = state.index.get(&index).cloned() else { return };
+                let turn_id = state.sessions.get(&key).and_then(|s| s.turn.as_ref()).map(|r| r.turn.turn_id.clone());
+                let tool_call: ToolCallUpdate = serde_json::from_value(params["toolCall"].clone()).unwrap_or_else(|_| ToolCallUpdate {
+                    tool_call_id: params["toolCall"]["toolCallId"].as_str().unwrap_or("").to_owned(),
+                    ..ToolCallUpdate::default()
+                });
+                // One pending request per tool call: an older one for the
+                // same call is over.
+                let same: Vec<String> = state
+                    .pending
+                    .iter()
+                    .filter(|p| p.request.agent == key.0 && p.request.session_id == key.1 && p.request.tool_call.tool_call_id == tool_call.tool_call_id)
+                    .map(|p| p.request.id.clone())
+                    .collect();
+                for id in same {
+                    self.resolve(&mut state, &id, Some(Outcome::Cancelled), None);
+                }
+                let mut id = if tool_call.tool_call_id.is_empty() { format!("ask-{}", reply.id) } else { tool_call.tool_call_id.clone() };
+                while state.pending.iter().any(|p| p.request.id == id) {
+                    id.push('+');
+                }
+                let request = PendingRequest {
+                    id,
+                    agent: key.0.clone(),
+                    session_id,
+                    turn_id,
+                    tool_call,
+                    options: serde_json::from_value(params["options"].clone()).unwrap_or_default(),
+                    created_at: model::now(),
+                    words: words.unwrap_or_default(),
+                    params,
+                };
+                let reply_id = reply.id;
+                state.pending.push(Pending {
+                    request: request.clone(),
+                    member: member.to_owned(),
+                    reply: Some(reply),
+                    reply_id,
+                });
+                Self::emit(
+                    &mut state,
+                    &self.events,
+                    Event::Pending(Box::new(PendingUpdate {
+                        change: PendingChange::Added,
+                        request,
+                        outcome: None,
+                        answered_by: None,
+                    })),
+                );
+            }
+            AgentMessage::Withdrawn { reply } => {
+                let found = state
+                    .pending
+                    .iter()
+                    .find(|p| p.member == member && p.reply_id == reply)
+                    .map(|p| p.request.id.clone());
+                if let Some(id) = found {
+                    self.resolve(&mut state, &id, None, None);
+                }
+            }
+        }
+    }
+
+    /// The model the session runs on, or the agent's current one.
+    pub async fn model(&self, agent: &str, session: Option<&str>) -> Result<String, Error> {
+        if let Some(session) = session
+            && let Some(model) = self
+                .lock()
+                .sessions
+                .get(&(agent.to_owned(), session.to_owned()))
+                .and_then(|s| s.model.clone())
+        {
+            return Ok(model);
+        }
+        let (member, runtime_agent) = self.roster.locate(agent).await?;
+        self.ensure(&member);
+        member.backend.model(&runtime_agent, session).await
     }
 
     /// The name of the member hosting `agent`, for the owner's messages.
-    fn label(&self, agent: &str) -> String {
+    pub fn label(&self, agent: &str) -> String {
         let members = self.roster.members();
         members
             .iter()
@@ -604,11 +1064,7 @@ impl Host {
             .or_else(|| {
                 members
                     .iter()
-                    .filter(|m| {
-                        agent
-                            .strip_prefix(m.id.as_str())
-                            .is_some_and(|rest| rest.starts_with('-'))
-                    })
+                    .filter(|m| agent.strip_prefix(m.id.as_str()).is_some_and(|rest| rest.starts_with('-')))
                     .max_by_key(|m| m.id.len())
             })
             .or_else(|| members.iter().find(|m| m.id == crate::PRIMARY))
@@ -617,23 +1073,31 @@ impl Host {
     }
 }
 
-/// How a turn ended.
-enum Ended {
-    /// With an answer (cancelled included).
-    Stopped(StopReason, Option<model::Usage>),
-    Error(ErrorObject),
+fn not_open() -> ErrorObject {
+    ErrorObject::new(code::NOT_FOUND, "Load the session on this connection first.")
 }
 
-/// The host's id of the ask `request_id` names: that one, or the oldest
-/// when the runtime gave no id.
-fn take_ask(asks: &mut Vec<(String, Option<String>)>, request_id: Option<&str>) -> Option<String> {
-    let i = match request_id {
-        Some(id) => asks
-            .iter()
-            .position(|(_, backend)| backend.as_deref() == Some(id)),
-        None => (!asks.is_empty()).then_some(0),
-    };
-    i.map(|i| asks.remove(i).0)
+/// A turn's tokens as its `PromptResponse`'s `usage` reports them (ACP's
+/// unstable `usage`, which the Claude Code and Codex adapters send).
+fn usage(result: &Value) -> Option<Usage> {
+    let usage = result.get("usage").filter(|u| u.is_object())?;
+    let count = |key: &str| usage[key].as_u64();
+    Some(Usage {
+        input_tokens: count("inputTokens").unwrap_or(0),
+        output_tokens: count("outputTokens").unwrap_or(0),
+        thought_tokens: count("thoughtTokens"),
+        cached_read_tokens: count("cachedReadTokens"),
+        cached_write_tokens: count("cachedWriteTokens"),
+        total_tokens: count("totalTokens"),
+        cost: serde_json::from_value(usage["cost"].clone()).ok(),
+    })
+}
+
+fn unix_now() -> f64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -641,14 +1105,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn asks_are_taken_by_the_runtimes_id_or_oldest_first() {
-        let mut asks = vec![
-            ("a".to_owned(), None),
-            ("b".to_owned(), Some("b".to_owned())),
-        ];
-        assert_eq!(take_ask(&mut asks, Some("b")), Some("b".to_owned()));
-        assert_eq!(take_ask(&mut asks, Some("zz")), None);
-        assert_eq!(take_ask(&mut asks, None), Some("a".to_owned()));
-        assert_eq!(take_ask(&mut asks, None), None);
+    fn usage_reads_the_prompt_response() {
+        let result = json!({ "stopReason": "end_turn", "usage": { "inputTokens": 12, "outputTokens": 5, "totalTokens": 17,
+            "cost": { "amount": 0.01, "currency": "USD" } } });
+        let usage = usage(&result).unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens, usage.total_tokens), (12, 5, Some(17)));
+        assert_eq!(usage.cost.unwrap().currency, "USD");
+        assert_eq!(super::usage(&json!({ "stopReason": "end_turn" })), None);
     }
 }

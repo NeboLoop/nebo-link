@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use link_core::adapter::{Adapted, Ask, Chat, Control, Message, Runtime, Turn, TurnEvent};
 use link_core::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, PermissionOption,
-    StopReason, ToolCallUpdate, Turn, TurnEvent, Usage, Words,
+    Agent, BoxFuture, Error, PermissionOption, StopReason, ToolCallUpdate, Usage, Words,
 };
 use link_core::roster::Member;
 use serde_json::json;
@@ -18,8 +18,8 @@ pub type Answer = (Option<String>, String);
 #[derive(Default)]
 pub struct Fake {
     pub down: bool,
-    /// The permission each turn was sent with.
-    pub permissions: Mutex<Vec<Option<Permission>>>,
+    /// The prompt each turn was sent.
+    pub prompts: Mutex<Vec<String>>,
     /// What each turn was answered with.
     pub answers: Arc<Mutex<Vec<Answer>>>,
     /// The runtime's other agents, by their runtime ids (an OpenClaw's
@@ -27,7 +27,7 @@ pub struct Fake {
     pub others: Vec<&'static str>,
 }
 
-impl Backend for Fake {
+impl Runtime for Fake {
     fn ready(&self) -> BoxFuture<'_, Result<(), String>> {
         let down = self.down;
         Box::pin(async move { if down { Err("down".into()) } else { Ok(()) } })
@@ -93,9 +93,8 @@ impl Backend for Fake {
         _agent: &'a str,
         _chat: &'a str,
         prompt: String,
-        permission: Option<Permission>,
     ) -> BoxFuture<'a, Result<Turn, Error>> {
-        self.permissions.lock().unwrap().push(permission);
+        self.prompts.lock().unwrap().push(prompt.clone());
         let answers = self.answers.clone();
         Box::pin(async move {
             let (events, events_rx) = mpsc::channel(16);
@@ -166,6 +165,6 @@ pub fn member(id: &str, label: &str, fake: Arc<Fake>) -> Member {
         id: id.into(),
         label: label.into(),
         runtime: "claude-code".into(),
-        backend: fake,
+        backend: Arc::new(Adapted::new(label, fake)),
     }
 }

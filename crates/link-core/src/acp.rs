@@ -1,64 +1,47 @@
 //! The ACP backend: one agent process (Claude Code, Codex, Gemini CLI,
 //! OpenCode, or any command that speaks ACP) driven over stdio
-//! ([`nebo_runtimes::acp`]). The agent is its member's one agent, a session
-//! is a chat, and a turn is one `session/prompt`.
+//! ([`nebo_runtimes::acp`]). The host is its only ACP client: requests go
+//! to it as the host sends them, and what it sends back (updates, permission
+//! requests, requests it takes back) goes to the host's inbox unchanged.
 //!
 //! - **The process.** Started on first use (the readiness probe is the first
 //!   use, so it runs while the host does) in the agent's folder, kept
 //!   running, and started again on the next use after it exits: the probe
 //!   every 30 s is what brings a crashed agent back. Its stderr goes to its
 //!   log file. Starting runs detached from the caller, so a probe
-//!   that times out while `npx` fetches the adapter doesn't kill it.
-//! - **Sessions.** `session/new` in the working folder, with no MCP servers.
-//!   One Nebo chat is one session; the agent keeps the transcript and only
-//!   the owner's newest message is sent. A session this process has not seen
-//!   is reopened with `session/load` (which replays it, giving the
-//!   transcript) or else `session/resume`.
-//! - **Chats.** `session/list` for the working folder where the agent serves
-//!   it (so a conversation begun in the terminal there shows too), else the
-//!   host's own record of the sessions it created.
-//! - **Turns.** Message chunks are text; thought chunks and plans are
-//!   thinking; tool calls are tool cards, announced once the agent says what
-//!   the call is (it names a Bash call "Terminal" before its command
-//!   arrives); `session/request_permission` is an ask whose choices are the
-//!   agent's options; `session/prompt`'s `usage` is the turn's tokens.
-//!   Cancel is `session/cancel`, and any question still open is answered
-//!   `cancelled`, as ACP requires.
+//!   that times out while `npx` fetches the adapter doesn't kill it. The
+//!   host initializes it with no file system, no terminal and no
+//!   elicitation, so it uses its own tools on its own computer.
+//! - **Sessions** outlive the process: a request for a session the running
+//!   process hasn't opened (it restarted) first reopens it, with
+//!   `session/load` (whose replay the host already has, so it is not handed
+//!   on) or else `session/resume`.
+//! - **Chats.** `session/list` goes to the agent where it serves it (so a
+//!   conversation begun in the terminal there shows too); for one that
+//!   doesn't, the backend answers from its own record of the sessions it
+//!   created.
 //! - **Sign-in.** The agent runs under its owner's own login. `-32000`
 //!   "Authentication required" reads "Claude Code isn't signed in on this
-//!   computer. Run `claude` once to sign in."
+//!   computer. Run `claude` once to sign in.", with the agent's text in
+//!   `data.detail`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
-
-use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, SystemTime};
 
 use nebo_runtimes::RuntimeCommand;
 use nebo_runtimes::acp::Agent as AcpAgent;
-use nebo_runtimes::acp::client::{
-    self, AUTH_REQUIRED, CLOSED, Connection, Incoming, METHOD_NOT_FOUND, NOT_FOUND, Responder,
-    RpcError,
-};
-use nebo_runtimes::acp::protocol::{
-    self, Initialized, Modes, PermissionRequest, PlanEntry, PromptResult, SessionMode,
-    ToolCall as AcpToolCall, ToolStatus, Update,
-};
+use nebo_runtimes::acp::client::{self, AUTH_REQUIRED, CLOSED, Connection, Incoming, METHOD_NOT_FOUND, Responder, RpcError};
+use nebo_runtimes::acp::protocol::{self, Initialized};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
-use crate::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, Role, ToolCall,
-    ToolResult, Turn, TurnEvent,
-};
-use crate::model::{
-    PermissionOption, SessionMode as ModeInfo, SessionModeState, StopReason, ToolCallStatus,
-    ToolCallUpdate, Usage, Words,
-};
+use crate::backend::{Agent, AgentMessage, Backend, BoxFuture, Error, ErrorObject, FromAgent, Inbox, Reply};
+use crate::model::{SessionMode as ModeInfo, SessionModeState, code};
 
 /// How long the agent gets to answer `initialize`: `npx` may be fetching the
 /// adapter on a first start.
@@ -130,6 +113,8 @@ impl Acp {
                 live: tokio::sync::Mutex::new(None),
                 opening: tokio::sync::Mutex::new(()),
                 known: Mutex::new(Known::default()),
+                inbox: Mutex::new(None),
+                next_reply: AtomicU64::new(0),
             }),
         }
     }
@@ -137,32 +122,26 @@ impl Acp {
     /// Runs `work` on its own task, so a caller that gives up (a probe's
     /// timeout, a phone that hung up) never leaves a start or a session
     /// load half done.
-    async fn detached<T, F, Fut>(&self, work: F) -> Result<T, Error>
+    async fn detached<T, F, Fut>(&self, work: F) -> Result<T, ErrorObject>
     where
         T: Send + 'static,
         F: FnOnce(Arc<Shared>) -> Fut,
-        Fut: Future<Output = Result<T, Error>> + Send + 'static,
+        Fut: Future<Output = Result<T, ErrorObject>> + Send + 'static,
     {
         tokio::spawn(work(self.shared.clone()))
             .await
-            .unwrap_or_else(|e| Err(Error::Unavailable(e.to_string())))
-    }
-
-    fn check_agent(&self, agent: &str) -> Result<(), Error> {
-        if agent == self.shared.settings.agent.key() {
-            Ok(())
-        } else {
-            Err(Error::NotFound(format!("The agent {agent}")))
-        }
+            .unwrap_or_else(|e| Err(ErrorObject::new(code::AGENT_UNAVAILABLE, e.to_string())))
     }
 }
 
 struct Shared {
     settings: Settings,
     live: tokio::sync::Mutex<Option<Arc<Live>>>,
-    /// One session load at a time, so two callers never load one twice.
+    /// One session reopened at a time, so none is reopened twice.
     opening: tokio::sync::Mutex<()>,
     known: Mutex<Known>,
+    inbox: Mutex<Option<Inbox>>,
+    next_reply: AtomicU64,
 }
 
 /// What the agent last said about itself, for its roster entry.
@@ -187,25 +166,27 @@ struct Live {
 
 #[derive(Default)]
 struct Sessions {
-    map: HashMap<String, Session>,
-    /// The model the agent last said it runs.
+    /// The sessions this process has open.
+    open: HashSet<String>,
+    /// Sessions being reopened after a restart: their replay is the host's
+    /// already.
+    reopening: HashSet<String>,
+    /// The model the agent last said it runs, and each session's.
     model: Option<String>,
-}
-
-#[derive(Default)]
-struct Session {
-    transcript: Transcript,
-    turn: Option<Sink>,
-    model: Option<String>,
-    title: Option<String>,
-    /// The permission modes the agent offers this session, and the one it
-    /// is in; `None` when it offers none.
-    modes: Option<Modes>,
+    models: HashMap<String, String>,
+    titles: HashMap<String, String>,
+    /// Each permission request of the agent's still open: its JSON-RPC id
+    /// (as text) to the reply the host was given.
+    asks: HashMap<String, u64>,
 }
 
 impl Shared {
     fn name(&self) -> &str {
         &self.settings.name
+    }
+
+    fn key(&self) -> &'static str {
+        self.settings.agent.key()
     }
 
     /// The running agent, started if it is not.
@@ -226,14 +207,7 @@ impl Shared {
                 Arc::new(live)
             }
             Err(e) => {
-                known.failed = Some(match &e {
-                    // Why it did not start, as one sentence.
-                    Error::Unavailable(why) => {
-                        let mut chars = why.chars();
-                        chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
-                    }
-                    other => other.message(self.name()),
-                });
+                known.failed = Some(sentence(&e, self.name()));
                 return Err(e);
             }
         };
@@ -243,7 +217,7 @@ impl Shared {
     }
 
     /// The agent started, and the capabilities it answered `initialize` with.
-    async fn start(&self) -> Result<(Live, Value), Error> {
+    async fn start(self: &Arc<Self>) -> Result<(Live, Value), Error> {
         let settings = &self.settings;
         std::fs::create_dir_all(&settings.workdir).map_err(|e| {
             Error::Unavailable(format!(
@@ -256,11 +230,12 @@ impl Shared {
             .unwrap_or_else(|_| Stdio::null());
         let state: Arc<Mutex<Sessions>> = Arc::default();
         let handler_state = state.clone();
+        let me = Arc::downgrade(self);
         let (child, conn) = client::spawn(
             &settings.command,
             &settings.workdir,
             stderr,
-            Box::new(move |incoming, responder| handle(&handler_state, incoming, responder)),
+            Box::new(move |incoming, responder| handle(&me, &handler_state, incoming, responder)),
         )
         .map_err(|e| Error::Unavailable(format!("could not start {}: {e}", self.name())))?;
         let answered = tokio::time::timeout(
@@ -310,24 +285,44 @@ impl Shared {
         ))
     }
 
-    /// What an error answer means to the owner.
-    fn refusal(&self, e: RpcError) -> Error {
-        match e.code {
-            AUTH_REQUIRED => Error::Failed(self.settings.agent.sign_in(self.name())),
-            NOT_FOUND => Error::NotFound("That conversation".to_owned()),
-            CLOSED => Error::Unavailable(format!("{} stopped", self.name())),
-            _ => Error::Failed(format!("{}: {}", self.name(), e.message)),
+    /// Hands a message to the host; `false` when no host is connected.
+    fn tell(&self, message: AgentMessage) -> bool {
+        let inbox = self.inbox.lock().expect("inbox").clone();
+        match inbox {
+            Some(inbox) => {
+                inbox(FromAgent {
+                    agent: self.key().to_owned(),
+                    message,
+                });
+                true
+            }
+            None => false,
         }
     }
 
-    /// Makes `chat` a session of the running agent: loaded (replayed) or
-    /// resumed if this process has not seen it.
-    async fn open(&self, live: &Live, chat: &str) -> Result<(), Error> {
-        if live.state.lock().expect("sessions").map.contains_key(chat) {
+    /// What an error answer means, as the host passes it on: unchanged,
+    /// except a sign-in the owner must do and an agent that stopped.
+    fn refusal(&self, e: RpcError) -> ErrorObject {
+        match e.code {
+            AUTH_REQUIRED => ErrorObject::new(AUTH_REQUIRED, self.settings.agent.sign_in(self.name()))
+                .with_data(json!({ "detail": e.message })),
+            CLOSED => ErrorObject::new(
+                code::AGENT_UNAVAILABLE,
+                format!("Could not connect to {}. Try again.", self.name()),
+            ),
+            code => ErrorObject::new(code, e.message),
+        }
+    }
+
+    /// Makes `session` a session of the running agent: reopened with
+    /// `session/load` (its replay not handed on) or `session/resume` if
+    /// this process has not seen it.
+    async fn ensure_open(&self, live: &Live, session: &str) -> Result<(), ErrorObject> {
+        if live.state.lock().expect("sessions").open.contains(session) {
             return Ok(());
         }
         let _one = self.opening.lock().await;
-        if live.state.lock().expect("sessions").map.contains_key(chat) {
+        if live.state.lock().expect("sessions").open.contains(session) {
             return Ok(());
         }
         let method = if live.init.load_session {
@@ -335,687 +330,204 @@ impl Shared {
         } else if live.init.resume_session {
             "session/resume"
         } else {
-            return Err(Error::Failed(format!(
-                "{} can't reopen a conversation after it restarts. Start a new chat.",
-                self.name()
-            )));
+            return Err(ErrorObject::new(
+                code::NOT_FOUND,
+                format!("{} can't reopen a conversation after it restarts. Start a new chat.", self.name()),
+            ));
         };
-        // In place first, so the replay lands in its transcript.
-        live.state
-            .lock()
-            .expect("sessions")
-            .map
-            .insert(chat.to_owned(), Session::default());
+        live.state.lock().expect("sessions").reopening.insert(session.to_owned());
         let answered = live
             .conn
             .request(
                 method,
-                json!({ "sessionId": chat, "cwd": self.settings.workdir, "mcpServers": [] }),
+                json!({ "sessionId": session, "cwd": self.settings.workdir, "mcpServers": [] }),
             )
             .await;
         let mut state = live.state.lock().expect("sessions");
-        match answered {
-            Ok(result) => {
-                let model = protocol::model(&result);
-                if let Some(session) = state.map.get_mut(chat) {
-                    session.model = model.clone();
-                    session.modes = protocol::modes(&result);
-                }
-                state.model = model.or(state.model.take());
-                Ok(())
-            }
-            Err(e) => {
-                state.map.remove(chat);
-                Err(self.refusal(e))
-            }
-        }
-    }
-
-    async fn chats(self: Arc<Self>) -> Result<Vec<Chat>, Error> {
-        let live = self.live().await?;
-        if !live.init.list_sessions {
-            return Ok(recorded(&self.settings.chats_file)
-                .into_iter()
-                .map(|r| Chat {
-                    id: r.id,
-                    title: r.title,
-                    preview: String::new(),
-                    last_active: Some(r.updated),
-                    message_count: 0,
-                })
-                .collect());
-        }
-        let result = live
-            .conn
-            .request("session/list", json!({ "cwd": self.settings.workdir }))
-            .await
-            .map_err(|e| self.refusal(e))?;
-        Ok(protocol::sessions(&result)
-            .into_iter()
-            .map(|s| Chat {
-                id: s.id,
-                title: s.title.unwrap_or_else(|| "New chat".to_owned()),
-                preview: String::new(),
-                last_active: s.updated_at.as_deref().and_then(unix_seconds),
-                message_count: 0,
-            })
-            .collect())
-    }
-
-    async fn create_chat(self: Arc<Self>) -> Result<Chat, Error> {
-        let live = self.live().await?;
-        let result = live
-            .conn
-            .request(
-                "session/new",
-                json!({ "cwd": self.settings.workdir, "mcpServers": [] }),
-            )
-            .await
-            .map_err(|e| self.refusal(e))?;
-        let id = result["sessionId"]
-            .as_str()
-            .ok_or_else(|| {
-                Error::Failed(format!(
-                    "{} started a conversation without an id",
-                    self.name()
-                ))
-            })?
-            .to_owned();
-        let model = protocol::model(&result);
-        if let Some(modes) = mode_state(&result) {
-            self.known.lock().expect("known").modes = Some(modes);
-        }
-        {
-            let mut state = live.state.lock().expect("sessions");
-            state.model = model.clone().or(state.model.take());
-            state.map.insert(
-                id.clone(),
-                Session {
-                    model,
-                    modes: protocol::modes(&result),
-                    ..Session::default()
-                },
-            );
-        }
-        record(&self.settings.chats_file, &id, None);
-        Ok(Chat {
-            id,
-            title: "New chat".to_owned(),
-            preview: String::new(),
-            last_active: Some(now()),
-            message_count: 0,
-        })
-    }
-
-    async fn messages(self: Arc<Self>, chat: String) -> Result<Vec<Message>, Error> {
-        let live = self.live().await?;
-        self.open(&live, &chat).await?;
-        let state = live.state.lock().expect("sessions");
-        Ok(state
-            .map
-            .get(&chat)
-            .map(|s| s.transcript.messages.clone())
-            .unwrap_or_default())
-    }
-
-    async fn model(self: Arc<Self>, chat: Option<String>) -> Result<String, Error> {
-        let live = self.live().await?;
-        let state = live.state.lock().expect("sessions");
-        let model = chat
-            .and_then(|c| state.map.get(&c).and_then(|s| s.model.clone()))
-            .or_else(|| state.model.clone())
-            .or_else(|| live.init.title.clone())
-            .unwrap_or_else(|| self.name().to_owned());
-        Ok(model)
-    }
-
-    /// Runs `chat` in the agent's mode for `permission`, switching it with
-    /// `session/set_mode` when it is in another. A mode the agent does not
-    /// offer leaves the session as it is (its own requests still ask); a
-    /// switch it refuses fails the turn, so nothing runs looser than the
-    /// owner chose.
-    async fn apply_permission(&self, live: &Live, chat: &str, permission: Permission) -> Result<(), Error> {
-        let wanted = {
-            let state = live.state.lock().expect("sessions");
-            let Some(modes) = state.map.get(chat).and_then(|s| s.modes.as_ref()) else {
-                return Ok(());
-            };
-            match mode_for(permission, &modes.available) {
-                Some(id) if id != modes.current => id.to_owned(),
-                _ => return Ok(()),
-            }
-        };
-        live.conn
-            .request("session/set_mode", json!({ "sessionId": chat, "modeId": wanted }))
-            .await
-            .map_err(|e| {
-                Error::Failed(format!("{} could not switch to its {wanted} mode: {}", self.name(), e.message))
-            })?;
-        tracing::info!(session = %chat, mode = %wanted, ?permission, "acp: session mode set");
-        if let Some(modes) = live
-            .state
-            .lock()
-            .expect("sessions")
-            .map
-            .get_mut(chat)
-            .and_then(|s| s.modes.as_mut())
-        {
-            modes.current = wanted;
+        state.reopening.remove(session);
+        let result = answered.map_err(|e| self.refusal(e))?;
+        state.open.insert(session.to_owned());
+        if let Some(model) = protocol::model(&result) {
+            state.models.insert(session.to_owned(), model.clone());
+            state.model = Some(model);
         }
         Ok(())
     }
 
-    async fn turn(
-        self: Arc<Self>,
-        chat: String,
-        prompt: String,
-        permission: Option<Permission>,
-    ) -> Result<Turn, Error> {
-        let live = self.live().await?;
-        self.open(&live, &chat).await?;
-        if let Some(permission) = permission {
-            self.apply_permission(&live, &chat, permission).await?;
+    async fn request(self: Arc<Self>, method: String, mut params: Value) -> Result<Value, ErrorObject> {
+        let live = self.live().await.map_err(|e| {
+            ErrorObject::new(code::AGENT_UNAVAILABLE, sentence(&e, self.name()))
+        })?;
+        let session = params["sessionId"].as_str().map(str::to_owned);
+        match method.as_str() {
+            "session/list" if !live.init.list_sessions => return Ok(self.recorded_sessions()),
+            "session/list" => {
+                if params.get("cwd").is_none_or(Value::is_null) {
+                    params["cwd"] = json!(self.settings.workdir);
+                }
+            }
+            "session/new" | "session/load" | "session/resume" => {}
+            _ => {
+                if let Some(session) = &session {
+                    self.ensure_open(&live, session).await?;
+                }
+            }
         }
-        let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<TurnEvent>();
-        {
-            let mut state = live.state.lock().expect("sessions");
-            let session = state
-                .map
-                .get_mut(&chat)
-                .ok_or_else(|| Error::NotFound("That conversation".to_owned()))?;
-            if session.turn.is_some() {
-                return Err(Error::Failed(format!(
-                    "{} is still working on this conversation.",
-                    self.name()
-                )));
-            }
-            session.transcript.user(&prompt, None, Some(now()));
-            session.turn = Some(Sink::new(sink_tx.clone()));
-        }
-        let (events_tx, events_rx) = mpsc::channel(64);
-        tokio::spawn(async move {
-            while let Some(event) = sink_rx.recv().await {
-                let last = matches!(
-                    event,
-                    TurnEvent::Completed { .. } | TurnEvent::Failed(_) | TurnEvent::Cancelled
-                );
-                if events_tx.send(event).await.is_err() || last {
-                    return;
+        let result = live.conn.request(&method, params).await.map_err(|e| self.refusal(e))?;
+        let mut state = live.state.lock().expect("sessions");
+        let session = session.or_else(|| result["sessionId"].as_str().map(str::to_owned));
+        match (method.as_str(), &session) {
+            ("session/new" | "session/load" | "session/resume", Some(session)) => {
+                state.open.insert(session.clone());
+                if let Some(model) = protocol::model(&result) {
+                    state.models.insert(session.clone(), model.clone());
+                    state.model = Some(model);
                 }
-            }
-        });
-        let (control_tx, mut control_rx) = mpsc::channel(8);
-        tracing::info!(agent = self.settings.agent.key(), session = %chat, prompt_len = prompt.len(), "acp: prompt sent");
-        tokio::spawn(async move {
-            let request = live.conn.request(
-                "session/prompt",
-                json!({ "sessionId": chat, "prompt": [{ "type": "text", "text": prompt }] }),
-            );
-            tokio::pin!(request);
-            let mut controls_open = true;
-            let answered = loop {
-                tokio::select! {
-                    answered = &mut request => break answered,
-                    control = control_rx.recv(), if controls_open => match control {
-                        Some(control) => self.control(&live, &chat, control),
-                        None => controls_open = false,
-                    },
-                }
-            };
-            let (sink, title) = {
-                let mut state = live.state.lock().expect("sessions");
-                match state.map.get_mut(&chat) {
-                    Some(session) => (session.turn.take(), session.title.clone()),
-                    None => (None, None),
-                }
-            };
-            let responder = live.conn.responder();
-            if let Some(mut sink) = sink {
-                sink.flush();
-                // A question nobody answered dies with its turn.
-                for (_, id) in sink.asks.drain() {
-                    responder.respond(&id, Ok(protocol::cancelled()));
-                }
-            }
-            record(&self.settings.chats_file, &chat, title.as_deref());
-            match &answered {
-                Ok(result) => tracing::info!(session = %chat, stop_reason = %PromptResult::parse(result).stop_reason, "acp: turn ended"),
-                Err(e) => tracing::info!(session = %chat, code = e.code, "acp: turn failed"),
-            }
-            let end = match answered {
-                Ok(result) => {
-                    let usage = usage(&result);
-                    match PromptResult::parse(&result).stop_reason.as_str() {
-                        "cancelled" => TurnEvent::Cancelled,
-                        "refusal" => {
-                            TurnEvent::Failed(format!("{} declined to do that.", self.name()))
-                        }
-                        other => TurnEvent::Completed {
-                            stop_reason: StopReason::parse(other),
-                            usage,
-                        },
+                if method == "session/new" {
+                    if let Some(modes) = mode_state(&result) {
+                        self.known.lock().expect("known").modes = Some(modes);
                     }
+                    record(&self.settings.chats_file, session, None);
                 }
-                Err(e) if e.code == CLOSED => {
-                    TurnEvent::Failed(format!("Could not connect to {}. Try again.", self.name()))
-                }
-                Err(e) => TurnEvent::Failed(self.refusal(e).message(self.name())),
-            };
-            let _ = sink_tx.send(end);
-        });
-        Ok(Turn {
-            events: events_rx,
-            control: control_tx,
-        })
+            }
+            ("session/prompt", Some(session)) => {
+                record(&self.settings.chats_file, session, state.titles.get(session).map(String::as_str));
+            }
+            ("session/close" | "session/delete", Some(session)) => {
+                state.open.remove(session);
+            }
+            _ => {}
+        }
+        Ok(result)
     }
 
-    fn control(&self, live: &Live, chat: &str, control: Control) {
-        let responder = live.conn.responder();
-        let mut state = live.state.lock().expect("sessions");
-        let Some(sink) = state.map.get_mut(chat).and_then(|s| s.turn.as_mut()) else {
-            return;
-        };
-        match control {
-            Control::Cancel => {
-                tracing::info!(session = %chat, open_asks = sink.asks.len(), "acp: turn cancelled by the owner");
-                live.conn
-                    .notify("session/cancel", json!({ "sessionId": chat }));
-                for (_, id) in sink.asks.drain() {
-                    responder.respond(&id, Ok(protocol::cancelled()));
-                }
-            }
-            Control::Answer { request_id, choice } => {
-                let id = match request_id {
-                    Some(request_id) => sink.asks.remove(&request_id),
-                    None => sink
-                        .asks
-                        .keys()
-                        .next()
-                        .cloned()
-                        .and_then(|k| sink.asks.remove(&k)),
-                };
-                match id {
-                    Some(id) => {
-                        tracing::info!(session = %chat, choice = %choice, "acp: permission answered");
-                        responder.respond(&id, Ok(protocol::selected(&choice)))
-                    }
-                    None => tracing::info!("an answer for a question the agent no longer asks"),
-                }
-            }
-        }
+    /// `session/list`'s answer from the backend's own record, for an agent
+    /// that doesn't list its sessions.
+    fn recorded_sessions(&self) -> Value {
+        let sessions: Vec<Value> = recorded(&self.settings.chats_file)
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "sessionId": r.id,
+                    "cwd": self.settings.workdir,
+                    "title": r.title,
+                    "updatedAt": crate::model::rfc3339(r.updated as i64, (r.updated.fract() * 1000.0) as u32),
+                })
+            })
+            .collect();
+        json!({ "sessions": sessions })
+    }
+
+    async fn model(self: Arc<Self>, session: Option<String>) -> Result<String, Error> {
+        let live = self.live().await?;
+        let state = live.state.lock().expect("sessions");
+        Ok(session
+            .and_then(|s| state.models.get(&s).cloned())
+            .or_else(|| state.model.clone())
+            .or_else(|| live.init.title.clone())
+            .unwrap_or_else(|| self.name().to_owned()))
     }
 }
 
-/// What the agent sends: session updates into their session (and its turn),
-/// permission requests into the turn as asks. The agent was offered no file
-/// system and no terminal, so every other request is refused.
-fn handle(state: &Mutex<Sessions>, incoming: Incoming, responder: &Responder) {
+/// An error as the one sentence the owner reads.
+fn sentence(e: &Error, name: &str) -> String {
+    match e {
+        Error::Unavailable(why) => {
+            let mut chars = why.chars();
+            chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+        }
+        other => other.message(name),
+    }
+}
+
+/// What the agent sends: updates and permission requests to the host, and
+/// the requests it takes back. The agent was offered no file system and no
+/// terminal, so every other request is refused.
+fn handle(shared: &Weak<Shared>, state: &Arc<Mutex<Sessions>>, incoming: Incoming, responder: &Responder) {
+    let Some(shared) = shared.upgrade() else {
+        if let Incoming::Request { id, .. } = incoming {
+            responder.respond(&id, Ok(protocol::cancelled()));
+        }
+        return;
+    };
     match incoming {
         Incoming::Notification { method, params } if method == "session/update" => {
-            let Some((session, update)) = protocol::update(&params) else {
+            let Some(session) = params["sessionId"].as_str().map(str::to_owned) else {
                 return;
             };
-            let mut state = state.lock().expect("sessions");
-            if let Update::Model(model) = &update {
-                state.model = Some(model.clone());
+            {
+                let mut state = state.lock().expect("sessions");
+                if state.reopening.contains(&session) {
+                    return;
+                }
+                match protocol::update(&params).map(|(_, update)| update) {
+                    Some(protocol::Update::Model(model)) => {
+                        state.models.insert(session.clone(), model.clone());
+                        state.model = Some(model);
+                    }
+                    Some(protocol::Update::Title(title)) => {
+                        state.titles.insert(session.clone(), title);
+                    }
+                    _ => {}
+                }
             }
-            if let Some(session) = state.map.get_mut(&session) {
-                session.apply(update);
+            shared.tell(AgentMessage::Update {
+                session_id: session,
+                update: params["update"].clone(),
+            });
+        }
+        Incoming::Notification { method, params } if method == "$/cancel_request" => {
+            let reply = state.lock().expect("sessions").asks.remove(&params["requestId"].to_string());
+            if let Some(reply) = reply {
+                shared.tell(AgentMessage::Withdrawn { reply });
             }
         }
         Incoming::Request { id, method, params } if method == "session/request_permission" => {
-            let Some(request) = PermissionRequest::parse(&params) else {
-                tracing::warn!("acp: a permission request that does not parse; refused");
-                responder.respond(
-                    &id,
-                    Err(RpcError::new(-32602, "invalid permission request")),
-                );
+            let Some(session) = params["sessionId"].as_str().map(str::to_owned) else {
+                responder.respond(&id, Err(RpcError::new(-32602, "invalid permission request")));
                 return;
             };
-            let mut state = state.lock().expect("sessions");
-            match state
-                .map
-                .get_mut(&request.session_id)
-                .and_then(|s| s.turn.as_mut())
-            {
-                Some(sink) => {
-                    tracing::info!(
-                        session = %request.session_id,
-                        tool = %request.tool_call.id,
-                        options = request.options.len(),
-                        "acp: permission requested; asking the owner"
-                    );
-                    sink.ask(id, request, &params)
-                }
-                // Nobody is there to answer: no turn of ours is running.
-                None => {
-                    tracing::info!(session = %request.session_id, "acp: permission requested with no turn running; cancelled");
-                    responder.respond(&id, Ok(protocol::cancelled()))
-                }
+            let reply_id = shared.next_reply.fetch_add(1, Ordering::Relaxed) + 1;
+            let (reply, answer) = Reply::new(reply_id);
+            state.lock().expect("sessions").asks.insert(id.to_string(), reply_id);
+            tracing::info!(session = %session, tool = %params["toolCall"]["toolCallId"], "acp: permission requested; asking the owner");
+            let id = id.clone();
+            let responder = responder.clone();
+            let asks = state.clone();
+            tokio::spawn(async move {
+                // A reply dropped unanswered (nobody holds the session) is
+                // `cancelled`, as ACP requires of a client.
+                let response = answer.await.unwrap_or_else(|_| protocol::cancelled());
+                asks.lock().expect("sessions").asks.remove(&id.to_string());
+                responder.respond(&id, Ok(response));
+            });
+            if !shared.tell(AgentMessage::Permission {
+                session_id: session,
+                params,
+                words: None,
+                reply,
+            }) {
+                tracing::info!("acp: permission requested with no host to ask; cancelled");
             }
         }
         Incoming::Request { id, method, .. } => {
             tracing::info!(method = %method, "acp: a request the host does not offer; refused");
             responder.respond(
                 &id,
-                Err(RpcError::new(
-                    METHOD_NOT_FOUND,
-                    format!("{method} is not offered"),
-                )),
+                Err(RpcError::new(METHOD_NOT_FOUND, format!("{method} is not offered"))),
             );
         }
         Incoming::Notification { .. } => {}
     }
 }
 
-impl Session {
-    fn apply(&mut self, update: Update) {
-        let live = self.turn.is_some().then(now);
-        match update {
-            Update::UserText { text, message_id } => self.transcript.user(&text, message_id, live),
-            Update::AgentText { text, message_id } => {
-                self.transcript.agent(&text, message_id, live);
-                if let Some(sink) = &mut self.turn {
-                    sink.flush();
-                    sink.send(TurnEvent::Text(text));
-                }
-            }
-            Update::Thought(text) => {
-                if let Some(sink) = &self.turn {
-                    sink.send(TurnEvent::Thinking(text));
-                }
-            }
-            Update::Plan(entries) => {
-                if let Some(sink) = &self.turn {
-                    sink.send(TurnEvent::Thinking(plan(&entries)));
-                }
-            }
-            Update::ToolCall(call) | Update::ToolCallUpdate(call) => {
-                self.transcript.tool(&call, live);
-                if let Some(sink) = &mut self.turn {
-                    sink.tool(call);
-                }
-            }
-            Update::Title(title) => self.title = Some(title),
-            Update::Model(model) => self.model = Some(model),
-            Update::Mode(mode) => {
-                if let Some(modes) = &mut self.modes {
-                    modes.current = mode;
-                }
-            }
-            Update::Other => {}
-        }
-    }
-}
-
-/// A plan as thinking text, one line per step.
-fn plan(entries: &[PlanEntry]) -> String {
-    let lines: Vec<String> = entries
-        .iter()
-        .map(|e| {
-            let mark = match e.status.as_str() {
-                "completed" => "[x]",
-                "in_progress" => "[~]",
-                _ => "[ ]",
-            };
-            format!("{mark} {}", e.content)
-        })
-        .collect();
-    format!("Plan:\n{}", lines.join("\n"))
-}
-
-/// A running turn's side of a session.
-struct Sink {
-    tx: mpsc::UnboundedSender<TurnEvent>,
-    tools: HashMap<String, Tool>,
-    /// Tool ids in the order the agent opened them.
-    order: Vec<String>,
-    /// Open questions: request id to the JSON-RPC id to answer.
-    asks: HashMap<String, Value>,
-}
-
-struct Tool {
-    call: AcpToolCall,
-    started: Instant,
-    announced: bool,
-    finished: bool,
-}
-
-impl Sink {
-    fn new(tx: mpsc::UnboundedSender<TurnEvent>) -> Self {
-        Self {
-            tx,
-            tools: HashMap::new(),
-            order: Vec::new(),
-            asks: HashMap::new(),
-        }
-    }
-
-    fn send(&self, event: TurnEvent) {
-        let _ = self.tx.send(event);
-    }
-
-    /// A tool call or its update: its card once the agent has said what it
-    /// is (running, finished, or asking), its result once it finished.
-    fn tool(&mut self, call: AcpToolCall) {
-        let id = call.id.clone();
-        if !self.tools.contains_key(&id) {
-            self.order.push(id.clone());
-        }
-        let tool = self.tools.entry(id.clone()).or_insert_with(|| Tool {
-            call: AcpToolCall {
-                id: id.clone(),
-                ..AcpToolCall::default()
-            },
-            started: Instant::now(),
-            announced: false,
-            finished: false,
-        });
-        tool.call.merge(call);
-        let status = tool.call.status;
-        if matches!(status, Some(ToolStatus::InProgress)) || status.is_some_and(ToolStatus::is_done)
-        {
-            self.announce(&id);
-        }
-        let tool = self.tools.get_mut(&id).expect("tool");
-        if let Some(status) = status.filter(|s| s.is_done())
-            && !tool.finished
-        {
-            tool.finished = true;
-            tracing::info!(tool = %id, ?status, "acp: tool call finished");
-            let event = TurnEvent::ToolResult {
-                id,
-                name: tool.call.label(),
-                result: tool.call.output(),
-                is_error: status == ToolStatus::Failed,
-                duration_ms: Some(tool.started.elapsed().as_millis() as u64),
-            };
-            self.send(event);
-        }
-    }
-
-    fn announce(&mut self, id: &str) {
-        let Some(tool) = self.tools.get_mut(id) else {
-            return;
-        };
-        if tool.announced {
-            return;
-        }
-        tool.announced = true;
-        tracing::info!(tool = id, kind = ?tool.call.kind, "acp: tool call");
-        let event = TurnEvent::ToolStart {
-            id: id.to_owned(),
-            name: tool.call.label(),
-            input: tool.call.raw_input.clone().unwrap_or_else(|| json!({})),
-        };
-        self.send(event);
-    }
-
-    /// Announces every call not yet shown, before text that follows them.
-    fn flush(&mut self) {
-        for id in self.order.clone() {
-            self.announce(&id);
-        }
-    }
-
-    /// The agent stops for the owner: the call's card, then the question.
-    /// `params` are the request as the agent sent it, which the pending
-    /// request carries unchanged.
-    fn ask(&mut self, rpc_id: Value, request: PermissionRequest, params: &Value) {
-        let call_id = request.tool_call.id.clone();
-        let tool_call = serde_json::from_value::<ToolCallUpdate>(params["toolCall"].clone())
-            .unwrap_or_else(|_| tool_call_update(&request.tool_call));
-        self.tool(request.tool_call);
-        self.announce(&call_id);
-        let call = &self.tools[&call_id].call;
-        let label = call.label();
-        let summary = match call.kind.as_deref() {
-            Some("execute") => format!("run `{label}`"),
-            Some("edit" | "delete" | "move") => format!("change {label}"),
-            Some("fetch") => format!("fetch {label}"),
-            _ => format!("use {label}"),
-        };
-        let prompt = match call.content.as_deref().filter(|c| *c != label) {
-            Some(detail) => format!("{label}\n{detail}"),
-            None => label.clone(),
-        };
-        let mut request_id = call_id.clone();
-        while self.asks.contains_key(&request_id) {
-            request_id.push('+');
-        }
-        let labels = request
-            .options
-            .iter()
-            .map(|o| match o.kind.as_str() {
-                "allow_once" => "Allow once".to_owned(),
-                "allow_always" => "Always allow".to_owned(),
-                "reject_once" => "Deny".to_owned(),
-                "reject_always" => "Never allow".to_owned(),
-                _ => o.name.clone(),
-            })
-            .collect();
-        let options = request
-            .options
-            .iter()
-            .map(|o| PermissionOption {
-                option_id: o.id.clone(),
-                name: o.name.clone(),
-                kind: o.kind.clone(),
-            })
-            .collect();
-        self.asks.insert(request_id.clone(), rpc_id);
-        self.send(TurnEvent::Ask(Box::new(Ask {
-            request_id: Some(request_id),
-            tool_call,
-            options,
-            words: Words {
-                question: prompt,
-                summary,
-                labels,
-            },
-        })));
-    }
-}
-
-/// A session's transcript as the agent streamed or replayed it.
-#[derive(Default)]
-struct Transcript {
-    messages: Vec<Message>,
-    /// The agent's id of the message being streamed.
-    current: Option<String>,
-    /// Each tool call: where it is (message, call index), its merged state,
-    /// and whether its result is in.
-    calls: HashMap<String, (usize, usize, AcpToolCall, bool)>,
-}
-
-impl Transcript {
-    fn push(&mut self, role: Role, text: &str, created_at: Option<f64>) {
-        self.messages.push(Message {
-            id: format!("m{}", self.messages.len()),
-            role,
-            text: text.to_owned(),
-            created_at,
-            tool_calls: Vec::new(),
-            tool_result: None,
-        });
-    }
-
-    /// Whether a chunk of `role` with `id` continues the last message.
-    fn continues(&self, role: Role, id: &Option<String>) -> bool {
-        let Some(last) = self.messages.last() else {
-            return false;
-        };
-        last.role == role
-            && last.tool_calls.is_empty()
-            && (id.is_none() || self.current.is_none() || *id == self.current)
-    }
-
-    fn user(&mut self, text: &str, id: Option<String>, created_at: Option<f64>) {
-        if self.continues(Role::User, &id) && id.is_some() {
-            self.messages.last_mut().expect("last").text.push_str(text);
-        } else {
-            self.push(Role::User, text, created_at);
-        }
-        self.current = id;
-    }
-
-    fn agent(&mut self, text: &str, id: Option<String>, created_at: Option<f64>) {
-        if self.continues(Role::Assistant, &id) {
-            self.messages.last_mut().expect("last").text.push_str(text);
-        } else {
-            self.push(Role::Assistant, text, created_at);
-        }
-        self.current = id;
-    }
-
-    fn tool(&mut self, update: &AcpToolCall, created_at: Option<f64>) {
-        if !self.calls.contains_key(&update.id) {
-            if self
-                .messages
-                .last()
-                .is_none_or(|m| m.role != Role::Assistant)
-            {
-                self.push(Role::Assistant, "", created_at);
-            }
-            let at = self.messages.len() - 1;
-            let index = self.messages[at].tool_calls.len();
-            self.messages[at].tool_calls.push(ToolCall {
-                id: update.id.clone(),
-                name: String::new(),
-                input: json!({}),
-            });
-            let fresh = AcpToolCall {
-                id: update.id.clone(),
-                ..AcpToolCall::default()
-            };
-            self.calls
-                .insert(update.id.clone(), (at, index, fresh, false));
-        }
-        let (at, index, call, resulted) = self.calls.get_mut(&update.id).expect("call");
-        call.merge(update.clone());
-        let entry = &mut self.messages[*at].tool_calls[*index];
-        entry.name = call.label();
-        entry.input = call.raw_input.clone().unwrap_or_else(|| json!({}));
-        if let Some(status) = call.status.filter(|s| s.is_done())
-            && !*resulted
-        {
-            *resulted = true;
-            let result = ToolResult {
-                tool_call_id: call.id.clone(),
-                content: call.output(),
-                is_error: status == ToolStatus::Failed,
-            };
-            self.push(Role::Tool, "", created_at);
-            self.messages.last_mut().expect("tool row").tool_result = Some(result);
-        }
-    }
-}
-
 impl Backend for Acp {
     fn ready(&self) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
-            self.detached(|shared| async move { shared.live().await.map(|_| ()) })
+            let shared = self.shared.clone();
+            tokio::spawn(async move { shared.live().await.map(|_| ()) })
                 .await
+                .unwrap_or_else(|e| Err(Error::Unavailable(e.to_string())))
                 .map_err(|e| match e {
                     Error::Unavailable(why) | Error::Failed(why) | Error::NotFound(why) => why,
                 })
@@ -1039,83 +551,74 @@ impl Backend for Acp {
         Box::pin(async move { Ok(vec![agent]) })
     }
 
-    fn chats<'a>(&'a self, agent: &'a str) -> BoxFuture<'a, Result<Vec<Chat>, Error>> {
-        Box::pin(async move {
-            self.check_agent(agent)?;
-            self.detached(Shared::chats).await
-        })
+    fn connect(&self, inbox: Inbox) {
+        *self.shared.inbox.lock().expect("inbox") = Some(inbox);
     }
 
-    fn create_chat<'a>(&'a self, agent: &'a str) -> BoxFuture<'a, Result<Chat, Error>> {
-        Box::pin(async move {
-            self.check_agent(agent)?;
-            self.detached(Shared::create_chat).await
-        })
-    }
-
-    fn messages<'a>(
+    fn request<'a>(
         &'a self,
         agent: &'a str,
-        chat: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<Message>, Error>> {
+        method: &'a str,
+        params: Value,
+    ) -> BoxFuture<'a, Result<Value, ErrorObject>> {
         Box::pin(async move {
-            self.check_agent(agent)?;
-            let chat = chat.to_owned();
-            self.detached(|shared| shared.messages(chat)).await
+            if agent != self.shared.key() {
+                return Err(ErrorObject::new(code::UNKNOWN_AGENT, format!("There's no agent called {agent} here.")));
+            }
+            let method = method.to_owned();
+            self.detached(|shared| shared.request(method, params)).await
         })
+    }
+
+    fn notify(&self, _agent: &str, method: &str, params: Value) {
+        let shared = self.shared.clone();
+        let method = method.to_owned();
+        tokio::spawn(async move {
+            // A notification never starts the agent: with none running there
+            // is nothing to tell.
+            let live = shared.live.lock().await.clone();
+            if let Some(live) = live.filter(|l| !l.conn.is_closed()) {
+                live.conn.notify(&method, params);
+            }
+        });
     }
 
     fn model<'a>(
         &'a self,
         agent: &'a str,
-        chat: Option<&'a str>,
+        session: Option<&'a str>,
     ) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(async move {
-            self.check_agent(agent)?;
-            let chat = chat.map(str::to_owned);
-            self.detached(|shared| shared.model(chat)).await
-        })
-    }
-
-    fn turn<'a>(
-        &'a self,
-        agent: &'a str,
-        chat: &'a str,
-        prompt: String,
-        permission: Option<Permission>,
-    ) -> BoxFuture<'a, Result<Turn, Error>> {
-        Box::pin(async move {
-            self.check_agent(agent)?;
-            let chat = chat.to_owned();
-            self.detached(|shared| shared.turn(chat, prompt, permission)).await
+            if agent != self.shared.key() {
+                return Err(Error::NotFound(format!("The agent {agent}")));
+            }
+            let shared = self.shared.clone();
+            let session = session.map(str::to_owned);
+            tokio::spawn(shared.model(session))
+                .await
+                .unwrap_or_else(|e| Err(Error::Unavailable(e.to_string())))
         })
     }
 }
 
-/// The agent's mode for a Nebo permission: by the ids Claude Code and Codex
-/// use, else by the kind any agent may say its modes are.
-///
-/// | Nebo        | Claude Code         | Codex               | kind          |
-/// |-------------|---------------------|---------------------|---------------|
-/// | Ask         | `default`           | `read-only`         | `standard`    |
-/// | Automatic   | `acceptEdits`       | `agent`             | `auto_review` |
-/// | Plan        | `plan`              | (as Ask)            | `plan`        |
-/// | Full access | `bypassPermissions` | `agent-full-access` | `full_access` |
-fn mode_for(permission: Permission, modes: &[SessionMode]) -> Option<&str> {
-    let (ids, kinds): (&[&str], &[&str]) = match permission {
-        Permission::Ask => (&["default", "read-only"], &["standard"]),
-        Permission::Automatic => (&["acceptEdits", "agent"], &["auto_review"]),
-        Permission::Plan => (&["plan", "default", "read-only"], &["plan", "standard"]),
-        Permission::FullAccess => (&["bypassPermissions", "agent-full-access"], &["full_access"]),
-    };
-    ids.iter()
-        .find_map(|id| modes.iter().find(|m| m.id == *id))
-        .or_else(|| {
-            kinds
-                .iter()
-                .find_map(|kind| modes.iter().find(|m| m.kind.as_deref() == Some(*kind)))
-        })
-        .map(|m| m.id.as_str())
+/// The modes a `session/new` answer says the session starts in.
+fn mode_state(result: &Value) -> Option<SessionModeState> {
+    let modes = &result["modes"];
+    Some(SessionModeState {
+        current_mode_id: modes["currentModeId"].as_str()?.to_owned(),
+        available_modes: modes["availableModes"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| {
+                let id = m["id"].as_str()?.to_owned();
+                Some(ModeInfo {
+                    name: m["name"].as_str().map(str::to_owned).unwrap_or_else(|| id.clone()),
+                    description: m["description"].as_str().map(str::to_owned),
+                    id,
+                })
+            })
+            .collect(),
+    })
 }
 
 /// One chat the host created, for agents that can't list their sessions.
@@ -1176,61 +679,6 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<(
     file.write_all(serde_json::to_string_pretty(value).expect("chats serialize").as_bytes())?;
     file.sync_all()?;
     std::fs::rename(&tmp, path)
-}
-
-/// A turn's tokens as `session/prompt`'s `usage` (unstable in ACP; sent by
-/// the Claude Code and Codex adapters) reports them.
-fn usage(result: &Value) -> Option<Usage> {
-    let usage = result.get("usage").filter(|u| u.is_object())?;
-    let count = |key: &str| usage[key].as_u64();
-    Some(Usage {
-        input_tokens: count("inputTokens").unwrap_or(0),
-        output_tokens: count("outputTokens").unwrap_or(0),
-        thought_tokens: count("thoughtTokens"),
-        cached_read_tokens: count("cachedReadTokens"),
-        cached_write_tokens: count("cachedWriteTokens"),
-        total_tokens: count("totalTokens"),
-        cost: None,
-    })
-}
-
-/// The modes a `session/new` answer says the session starts in.
-fn mode_state(result: &Value) -> Option<SessionModeState> {
-    let modes = &result["modes"];
-    Some(SessionModeState {
-        current_mode_id: modes["currentModeId"].as_str()?.to_owned(),
-        available_modes: modes["availableModes"]
-            .as_array()?
-            .iter()
-            .filter_map(|m| {
-                let id = m["id"].as_str()?.to_owned();
-                Some(ModeInfo {
-                    name: m["name"].as_str().map(str::to_owned).unwrap_or_else(|| id.clone()),
-                    description: m["description"].as_str().map(str::to_owned),
-                    id,
-                })
-            })
-            .collect(),
-    })
-}
-
-/// A tool call as ACP's `ToolCallUpdate`, from what the host merged of it,
-/// for a request whose own `toolCall` did not parse.
-fn tool_call_update(call: &AcpToolCall) -> ToolCallUpdate {
-    ToolCallUpdate {
-        tool_call_id: call.id.clone(),
-        title: call.title.clone(),
-        kind: call.kind.clone(),
-        status: call.status.map(|s| match s {
-            ToolStatus::Pending => ToolCallStatus::Pending,
-            ToolStatus::InProgress => ToolCallStatus::InProgress,
-            ToolStatus::Completed => ToolCallStatus::Completed,
-            ToolStatus::Failed => ToolCallStatus::Failed,
-        }),
-        raw_input: call.raw_input.clone(),
-        raw_output: call.raw_output.clone(),
-        content: call.content.as_deref().map(ToolCallUpdate::text),
-    }
 }
 
 /// How long a coding agent's first start may take (`npx` may be fetching
@@ -1306,152 +754,4 @@ fn now() -> f64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or_default()
-}
-
-/// Unix seconds of an RFC 3339 time (`2026-09-26T14:23:13.025Z`,
-/// `…+02:00`).
-fn unix_seconds(text: &str) -> Option<f64> {
-    let b = text.as_bytes();
-    let num = |from: usize, len: usize| -> Option<i64> { text.get(from..from + len)?.parse().ok() };
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't' | b' ') {
-        return None;
-    }
-    let (year, month, day) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
-    let (hour, minute, second) = (num(11, 2)?, num(14, 2)?, num(17, 2)?);
-    let mut rest = &text[19..];
-    let mut fraction = 0.0;
-    if let Some(after) = rest.strip_prefix('.') {
-        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
-        fraction = format!("0.{}", &after[..digits]).parse().unwrap_or(0.0);
-        rest = &after[digits..];
-    }
-    let offset = match rest {
-        "Z" | "z" | "" => 0,
-        _ => {
-            let sign = match rest.as_bytes().first()? {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            sign * (rest.get(1..3)?.parse::<i64>().ok()? * 3600
-                + rest.get(4..6)?.parse::<i64>().ok()? * 60)
-        }
-    };
-    // Days from 1970-01-01 (Howard Hinnant's days_from_civil).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some((days * 86_400 + hour * 3600 + minute * 60 + second - offset) as f64 + fraction)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn offered(modes: &[(&str, &str)]) -> Vec<SessionMode> {
-        modes
-            .iter()
-            .map(|(id, kind)| SessionMode {
-                id: (*id).into(),
-                kind: Some((*kind).into()),
-            })
-            .collect()
-    }
-
-    /// Each Nebo permission lands on the mode the adapters advertised on
-    /// 2026-09-26 (claude-agent-acp 0.81.2, codex-acp 1.13.1), and on any
-    /// other agent's by the kind it says the mode is.
-    #[test]
-    fn permissions_map_onto_the_agents_modes() {
-        let claude = offered(&[
-            ("default", "standard"),
-            ("acceptEdits", "standard"),
-            ("plan", "plan"),
-            ("auto", "auto_review"),
-            ("bypassPermissions", "full_access"),
-        ]);
-        let codex = offered(&[("read-only", "standard"), ("agent", "auto_review"), ("agent-full-access", "full_access")]);
-        let other = offered(&[("careful", "standard"), ("yolo", "full_access"), ("review", "auto_review")]);
-        let cases = [
-            (Permission::Ask, "default", "read-only", Some("careful")),
-            (Permission::Automatic, "acceptEdits", "agent", Some("review")),
-            (Permission::Plan, "plan", "read-only", Some("careful")),
-            (Permission::FullAccess, "bypassPermissions", "agent-full-access", Some("yolo")),
-        ];
-        for (permission, on_claude, on_codex, on_other) in cases {
-            assert_eq!(mode_for(permission, &claude), Some(on_claude), "{permission:?}");
-            assert_eq!(mode_for(permission, &codex), Some(on_codex), "{permission:?}");
-            assert_eq!(mode_for(permission, &other), on_other, "{permission:?}");
-        }
-        // Claude Code without bypass offered: full access is not invented.
-        let no_bypass = offered(&[("default", "standard"), ("acceptEdits", "standard")]);
-        assert_eq!(mode_for(Permission::FullAccess, &no_bypass), None);
-        assert_eq!(mode_for(Permission::Ask, &[]), None);
-    }
-
-    #[test]
-    fn rfc3339_times() {
-        assert_eq!(unix_seconds("1970-01-01T00:00:00Z"), Some(0.0));
-        assert_eq!(
-            unix_seconds("2026-09-26T14:23:13.025Z"),
-            Some(1_790_432_593.025)
-        );
-        assert_eq!(
-            unix_seconds("2026-09-26T16:23:13+02:00"),
-            Some(1_790_432_593.0)
-        );
-        assert_eq!(unix_seconds("yesterday"), None);
-    }
-
-    #[test]
-    fn a_replayed_session_reads_as_the_phone_shows_it() {
-        let mut t = Transcript::default();
-        t.user("Run it", Some("u1".into()), None);
-        let call = |status: Option<ToolStatus>, title: &str| AcpToolCall {
-            id: "t1".into(),
-            title: Some(title.into()),
-            status,
-            raw_input: Some(json!({ "command": "echo hi" })),
-            content: status.map(|_| "hi".to_owned()),
-            ..AcpToolCall::default()
-        };
-        t.tool(&call(None, "Terminal"), None);
-        t.tool(&call(Some(ToolStatus::Completed), "echo hi"), None);
-        t.agent("The command ", Some("a1".into()), None);
-        t.agent("printed hi.", Some("a1".into()), None);
-        t.user("Thanks", Some("u2".into()), None);
-        let roles: Vec<Role> = t.messages.iter().map(|m| m.role).collect();
-        assert_eq!(
-            roles,
-            [
-                Role::User,
-                Role::Assistant,
-                Role::Tool,
-                Role::Assistant,
-                Role::User
-            ]
-        );
-        assert_eq!(t.messages[1].tool_calls[0].name, "echo hi");
-        assert_eq!(t.messages[2].tool_result.as_ref().unwrap().content, "hi");
-        assert_eq!(t.messages[3].text, "The command printed hi.");
-    }
-
-    #[test]
-    fn plans_read_as_steps() {
-        let entries = vec![
-            PlanEntry {
-                content: "Read".into(),
-                status: "completed".into(),
-            },
-            PlanEntry {
-                content: "Fix".into(),
-                status: "in_progress".into(),
-            },
-        ];
-        assert_eq!(plan(&entries), "Plan:\n[x] Read\n[~] Fix");
-    }
 }
