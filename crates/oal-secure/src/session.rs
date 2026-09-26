@@ -52,9 +52,9 @@ pub async fn connect<T: Transport>(mut transport: T, store: &KeyStore, host: &Pe
     if host.side != Side::Host {
         return Err(Error::Protocol("connect is for hosts; that peer is a client"));
     }
-    // The store's record, not the caller's copy: it may have been revoked or
-    // updated since.
-    let host = store.peer(&host.public_key).ok_or(Error::UnknownPeer)?;
+    // The store's record, not the caller's copy: it may have been revoked, or
+    // the host's key rotated, since the caller read it.
+    let host = store.peers().into_iter().find(|p| p.side == Side::Host && p.id == host.id).ok_or(Error::UnknownPeer)?;
     let local = host.pinned;
     let private = store.private_for(&local).ok_or(Error::KeyRetired)?;
     let mut hs = handshake(&host.id, &private, Some(&host.public_key))?;

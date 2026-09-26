@@ -387,6 +387,7 @@ async fn a_frame_over_the_limit_is_refused() {
 async fn host_key_rotation_reaches_the_client_and_retires_the_old_key() {
     let d = devices();
     pair_both(&d).await;
+    let stale = host_peer(&d);
     let old = d.host.public_key();
     let new = d.host.rotate().unwrap();
 
@@ -404,6 +405,13 @@ async fn host_key_rotation_reaches_the_client_and_retires_the_old_key() {
 
     let (_c, h) = open(&d).await;
     assert_eq!(h.local_key(), new);
+    // A copy of the host's record read before the rotation still connects.
+    let (a, b) = pipe();
+    let (c, h) = tokio::join!(connect(a, &d.client, &stale, b"{}"), async {
+        accept(b, &d.host, "h1").await?.finish(b"{}").await
+    });
+    assert!(c.is_ok());
+    assert_eq!(h.unwrap().local_key(), new);
 }
 
 #[tokio::test]
