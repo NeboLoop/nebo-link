@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use nebo_link::credentials::Credentials;
 use nebo_link::endpoints::Endpoints;
 use nebo_link::link;
-use nebo_link::state::{Link, ModelsEndpoint, Root};
+use nebo_link::state::{Hosted, InstallLink, Link, ModelsEndpoint, PRIMARY, Root, Via};
 use nebo_runtimes::{Change, Journal, Runtime};
 
 /// The install's config, with `{port}` the gateway's port.
@@ -83,11 +83,7 @@ impl Linked {
 
         let root = Root::at(tmp.path().join("nebo-link"));
         let bot_id = uuid::Uuid::new_v4().to_string();
-        let link = Link {
-            bot_id: bot_id.clone(),
-            name: "test-mac · OpenClaw".into(),
-            runtime: Runtime::Openclaw,
-            owner_id: "owner-1".into(),
+        let settings = InstallLink {
             home: state_dir.clone(),
             env: vec![
                 // The temporary home, so OpenClaw's service definition is
@@ -95,30 +91,42 @@ impl Linked {
                 ("OPENCLAW_HOME".into(), tmp.path().display().to_string()),
                 ("OPENCLAW_STATE_DIR".into(), state_dir.display().to_string()),
             ],
-            endpoints: Endpoints {
-                api: "http://127.0.0.1:9".into(),
-                comms: hub_comms.into(),
-                tunnel: hub_tunnel.into(),
-                janus: "http://127.0.0.1:9".into(),
-            },
             local_password: "local-pw".into(),
             models: ModelsEndpoint {
                 port: free_port(),
                 key: "k".into(),
                 enabled: false,
             },
-            api_server_key: String::new(),
+            api_server_key: "s".into(),
             services: vec![],
-            acp: None,
+        };
+        let link = Link {
+            bot_id: bot_id.clone(),
+            name: "test-mac · OpenClaw".into(),
+            owner_id: "owner-1".into(),
+            endpoints: Endpoints {
+                api: "http://127.0.0.1:9".into(),
+                comms: hub_comms.into(),
+                tunnel: hub_tunnel.into(),
+                janus: "http://127.0.0.1:9".into(),
+            },
+            agents: vec![Hosted {
+                id: PRIMARY.into(),
+                label: "OpenClaw".into(),
+                runtime: Runtime::Openclaw,
+                via: Via::Install(settings.clone()),
+            }],
         };
         let dir = root.bot(&bot_id);
         dir.create().unwrap();
         dir.save(&link).unwrap();
         Credentials::open(&dir).save("bot-token").unwrap();
-        let install = nebo_link::install::find(&link).unwrap();
-        Journal::open(dir.journal_file())
+        let install = nebo_link::install::find(Runtime::Openclaw, &settings).unwrap();
+        let agent = dir.agent(PRIMARY);
+        agent.create().unwrap();
+        Journal::open(agent.journal_file())
             .unwrap()
-            .apply(&install, None, &Change::ProxyAccess(link::proxy_access(&link)))
+            .apply(&install, None, &Change::ProxyAccess(link::proxy_access(&link, &settings)))
             .unwrap();
         assert_ne!(std::fs::read_to_string(&config).unwrap(), original);
 
@@ -155,12 +163,11 @@ impl Linked {
         let state_dir = self.config.parent().unwrap().display().to_string();
         // The owner's gateway was running: nothing started, only restarted.
         assert_eq!(commands.trim(), format!("openclaw gateway restart OPENCLAW_STATE_DIR={state_dir}"));
-        assert!(!self.root.bot(&self.bot_id).processes_file().exists());
-
         let dir = self.root.bot(&self.bot_id);
+        assert!(!dir.agent(PRIMARY).processes_file().exists());
         assert!(!dir.token_file().exists());
         assert!(!dir.link_file().exists());
-        assert!(!dir.journal_file().exists());
+        assert!(!dir.agent(PRIMARY).journal_file().exists());
         assert!(!nebo_link::service::installed(&self.bot_id));
 
         let status = std::process::Command::new(env!("CARGO_BIN_EXE_nebo-link"))

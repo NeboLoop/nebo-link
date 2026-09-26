@@ -15,10 +15,10 @@
 //!    link records that it did, so `unlink` removes exactly that.
 //! 4. No service can be installed (the runtime has none for this process,
 //!    or its install refused): the foreground command is started detached,
-//!    in its own process group, its output in the bot directory, and started
+//!    in its own process group, its output in the bot's logs, and started
 //!    again with backoff when it exits. What the link started is recorded in
-//!    `processes.json`, so the next link process adopts it and `unlink`
-//!    stops it.
+//!    the agent's `processes.json`, so the next link process adopts it and
+//!    `unlink` stops it.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::error::Result;
-use crate::install::{self, runtime_key, runtime_name};
-use crate::state::{BotDir, read_json, write_json};
+use crate::install::{self, runtime_name};
+use crate::state::{AgentDir, read_json, write_json};
 
 /// How often a process that answers is checked again.
 pub const POLL: Duration = Duration::from_secs(30);
@@ -90,9 +90,8 @@ type StartedFile = BTreeMap<String, Started>;
 
 /// The processes of one linked installation.
 pub struct Supervisor {
-    dir: BotDir,
+    dir: AgentDir,
     runtime_name: &'static str,
-    runtime_key: &'static str,
     processes: Vec<ManagedProcess>,
     client: reqwest::Client,
     status: Mutex<BTreeMap<String, ProcessState>>,
@@ -101,11 +100,11 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn new(dir: &BotDir, runtime: Runtime, processes: Vec<ManagedProcess>) -> Arc<Self> {
+    /// The processes of the install the agent `dir` names.
+    pub fn new(dir: &AgentDir, runtime: Runtime, processes: Vec<ManagedProcess>) -> Arc<Self> {
         Arc::new(Self {
             dir: dir.clone(),
             runtime_name: runtime_name(runtime),
-            runtime_key: runtime_key(runtime),
             processes,
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -197,16 +196,11 @@ impl Supervisor {
     }
 
     fn record_service(&self, name: &str) -> Result<()> {
-        let mut link = self.dir.load()?;
-        if !link.services.iter().any(|s| s == name) {
-            link.services.push(name.to_owned());
-            self.dir.save(&link)?;
-        }
-        Ok(())
+        self.dir.record_service(name)
     }
 
     fn link_installed_service(&self, name: &str) -> bool {
-        self.dir.load().is_ok_and(|link| link.services.iter().any(|s| s == name))
+        self.dir.services().iter().any(|s| s == name)
     }
 
     fn started_file(&self) -> StartedFile {
@@ -214,6 +208,9 @@ impl Supervisor {
     }
 
     fn record_started(&self, name: &str, pid: u32) {
+        if let Err(e) = self.dir.create() {
+            tracing::warn!(error = %e, "could not make the agent's directory");
+        }
         let mut file = self.started_file();
         file.insert(
             name.to_owned(),
@@ -377,7 +374,7 @@ impl<S: std::ops::Deref<Target = Supervisor>> Worker<S> {
         }
 
         if let Some(service) = &self.process.service {
-            let log = self.sup.dir.runtime_log(self.sup.runtime_key);
+            let log = self.sup.dir.log(None);
             if service.definition.exists() {
                 if self.sup.link_installed_service(&name) {
                     return match install::run(&service.start, install::COMMAND_WAIT, &log).await {
@@ -425,7 +422,7 @@ impl<S: std::ops::Deref<Target = Supervisor>> Worker<S> {
             }
         }
 
-        let log = self.sup.dir.runtime_log(&format!("{}-{name}", self.sup.runtime_key));
+        let log = self.sup.dir.log(Some(&name));
         let spawned = install::detached(&self.process.run, &log).and_then(|mut cmd| {
             cmd.spawn()
                 .map_err(|e| crate::error::Error::Message(format!("could not run `{}`: {e}", install::shown(&self.process.run))))
@@ -490,7 +487,7 @@ pub struct Released {
 /// Stops every foreground process the link started and removes every
 /// service the link installed, never one the owner had. `services` are the
 /// process names whose service the link installed (`link.json`).
-pub async fn release(dir: &BotDir, runtime: Runtime, services: &[String], processes: &[ManagedProcess]) -> Released {
+pub async fn release(dir: &AgentDir, services: &[String], processes: &[ManagedProcess]) -> Released {
     let mut released = Released::default();
     let started: StartedFile = read_json(&dir.processes_file()).unwrap_or_default();
     for (name, record) in started {
@@ -500,7 +497,7 @@ pub async fn release(dir: &BotDir, runtime: Runtime, services: &[String], proces
         }
     }
     let _ = std::fs::remove_file(dir.processes_file());
-    let log = dir.runtime_log(runtime_key(runtime));
+    let log = dir.log(None);
     for process in processes.iter().filter(|p| services.contains(&p.name)) {
         let Some(service) = &process.service else { continue };
         match install::run(&service.uninstall, install::COMMAND_WAIT, &log).await {

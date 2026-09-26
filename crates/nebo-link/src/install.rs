@@ -7,7 +7,7 @@ use std::path::Path;
 use nebo_runtimes::{Environment, Installation, Runtime, RuntimeCommand, Service, detect};
 
 use crate::error::{Error, Result};
-use crate::state::Link;
+use crate::state::InstallLink;
 
 /// The key the hub stores in `bots.runtime`.
 pub fn runtime_key(runtime: Runtime) -> &'static str {
@@ -120,27 +120,20 @@ pub fn ui_addr(install: &Installation) -> Option<SocketAddr> {
         .map(|e| e.addr)
 }
 
-/// Finds the installation `link` names, with the environment overrides that
-/// selected it at pairing (a service does not inherit the owner's shell).
-/// An ACP agent is not looked for: its command was fixed at pairing
-/// ([`Link::acp`]).
-pub fn find(link: &Link) -> Result<Installation> {
-    if link.runtime.acp().is_some() {
-        return Err(Error::Message(format!(
-            "{} runs by the command saved when it was linked",
-            runtime_name(link.runtime)
-        )));
-    }
+/// Finds the `runtime` installation a hosted agent names, with the
+/// environment overrides that selected it when it was linked (a service does
+/// not inherit the owner's shell).
+pub fn find(runtime: Runtime, install: &InstallLink) -> Result<Installation> {
     let mut env = Environment::current();
-    env.vars.extend(link.env.iter().cloned());
+    env.vars.extend(install.env.iter().cloned());
     detect(&env)
         .into_iter()
-        .find(|i| i.runtime == link.runtime && i.home == link.home)
+        .find(|i| i.runtime == runtime && i.home == install.home)
         .ok_or_else(|| {
             Error::Message(format!(
                 "Could not find {} at {}. Is it still installed?",
-                runtime_name(link.runtime),
-                link.home.display()
+                runtime_name(runtime),
+                install.home.display()
             ))
         })
 }

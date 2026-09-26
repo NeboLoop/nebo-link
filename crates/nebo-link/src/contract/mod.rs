@@ -20,6 +20,7 @@ pub mod acp;
 pub mod backend;
 pub mod hermes;
 pub mod openclaw;
+pub mod roster;
 mod ws;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -783,11 +784,20 @@ impl Contract {
     fn ask(&self, chat_id: &str, ask: Ask) -> Option<Value> {
         let (card, notice) = {
             let mut state = self.state.lock().expect("contract state");
+            // The runtime's id, unless another chat's question already has
+            // it (two agents numbering their tool calls alike): the answer
+            // must reach the one that asked.
+            let mut id = match &ask.request_id {
+                Some(id) => id.clone(),
+                None => {
+                    let run = state.runs.get(chat_id)?;
+                    format!("{}-ask-{}", run.turn_id, run.asks.len() + 1)
+                }
+            };
+            while state.runs.values().any(|r| r.asks.iter().any(|a| a.id == id)) {
+                id.push('+');
+            }
             let run = state.runs.get_mut(chat_id)?;
-            let id = ask
-                .request_id
-                .clone()
-                .unwrap_or_else(|| format!("{}-ask-{}", run.turn_id, run.asks.len() + 1));
             let pending = PendingAsk {
                 id: id.clone(),
                 backend_id: ask.request_id,
