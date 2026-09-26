@@ -33,7 +33,9 @@ cargo build --release -p oal-conformance
 # Test a host. Add the suite's scripted agent to the host as an ACP agent
 # (it runs `oal-conformance agent`), get a pairing code from the host, then:
 oal-conformance host wss://<relay>/oal/hosts/<host id> --code ABCD-1234 --agent <agent id> \
-    [--pair-url wss://<relay>/oal/pair/ABCD-1234] [--header "Authorization: Bearer …"]
+    [--pair-url wss://<relay>/oal/pair] [--header "Authorization: Bearer …"]
+# With --pair-url the suite pairs at <pair-url>/<nameplate>: only the code's
+# first four characters go in the URL, never the rest.
 
 # Test a client. This serves a fake host with one fake agent; point the client
 # at it, pair with the code, and watch for spec violations in the output.

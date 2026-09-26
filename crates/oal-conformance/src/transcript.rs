@@ -3,8 +3,8 @@
 //! An example is a list of steps, each on a named connection (default
 //! `client`):
 //!
-//! - `{"connect": "host" | "pair"}` opens the connection (to the pair URL
-//!   for `pair`).
+//! - `{"connect": "host" | "pair"}` opens the connection (for `pair`, to
+//!   the relay's pairing endpoint with the code's nameplate, when given).
 //! - `{"send": frame}` sends a frame.
 //! - `{"expect": frame}` waits up to 5 s for a matching frame. With
 //!   `"ordered": true` the frame must also have arrived after the frame the
@@ -46,7 +46,8 @@ const WAIT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct Target {
     pub url: String,
-    /// Where `host/pair` goes; `url` when not set.
+    /// The relay's pairing endpoint (`wss://<relay>/oal/pair`): `host/pair`
+    /// goes to `<pair_url>/<nameplate>`. When not set, pairing goes to `url`.
     pub pair_url: Option<String>,
     /// Extra upgrade headers (a relay's `Authorization`).
     pub headers: Vec<(String, String)>,
@@ -141,11 +142,18 @@ impl Run<'_> {
 
     async fn step(&mut self, name: &str, step: &Value) -> Result<(), String> {
         if let Some(kind) = step["connect"].as_str() {
-            let url = match kind {
-                "pair" => self.target.pair_url.as_ref().unwrap_or(&self.target.url),
-                _ => &self.target.url,
+            let url = match (kind, &self.target.pair_url) {
+                ("pair", Some(base)) => {
+                    let code = self
+                        .captures
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    format!("{}/{}", base.trim_end_matches('/'), crate::nameplate(code))
+                }
+                _ => self.target.url.clone(),
             };
-            let socket = connect(url, &self.target.headers).await?;
+            let socket = connect(&url, &self.target.headers).await?;
             self.conns.insert(
                 name.to_owned(),
                 Conn {

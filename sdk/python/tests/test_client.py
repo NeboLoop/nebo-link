@@ -130,6 +130,19 @@ async def test_identity_round_trips(identity: Identity, tmp_path: Any) -> None:
     assert set(identity.to_dict()["device"]) == {"id", "name", "token", "publicKey", "privateKey"}
 
 
+async def test_pairs_through_a_relay_by_the_nameplate() -> None:
+    other = await start_fake_host("AAAA-BBBB")
+    try:
+        # The fake host plays the relay's /oal/pair/<nameplate> and refuses a
+        # pairing URL that carries more of the code than the nameplate.
+        relay = other.url.removesuffix("/oal")
+        paired = await pair(relay=relay, code="aaaa-bbbb", device_name="Relay laptop")
+        assert paired.host.id == "h-fake"
+        assert other.violations == []
+    finally:
+        await stop_fake_host(other)
+
+
 async def test_refuses_a_wrong_code() -> None:
     other = await start_fake_host("AAAA-BBBB")
     try:

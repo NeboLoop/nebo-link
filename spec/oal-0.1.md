@@ -133,6 +133,7 @@ A relay MUST:
 - pass WebSocket messages both ways, in order and unchanged, text and binary;
 - close the other side when either side closes, passing the close code on;
 - answer an upgrade for a host that is not connected with HTTP 503 and the JSON body `{"code":"host_offline","message":"<host name> is offline."}`;
+- answer a pairing upgrade for a nameplate no host has registered with HTTP 404 and `{"code":"unknown_nameplate","message":"That code didn't work. Get a new one on the computer."}`, and one whose path carries more than four code characters with HTTP 400 and `{"code":"bad_nameplate", …}`, without routing it;
 - work without reading frame contents, so that end-to-end encryption can be added (section 17).
 
 A relay MAY authenticate the client (for example with a bearer token for an account) before the upgrade. It MAY stamp the stream with the identity it verified, so the host can accept `{"type":"relay"}` authentication (section 5).
@@ -602,4 +603,5 @@ Agent channels: ACP v1, unchanged. The host serves `initialize`, `session/new`, 
   - Clients de-duplicate replayed updates until the replay cursor in 0.2 (sections 12, 18).
   - `$/cancel_request` goes to every connection holding a copy of a resolved permission request, including the one whose answer won (section 10).
   - An agent without a folder has no `folder` in `host/agents`. The client sends `cwd: "/"` and the host ignores `cwd` for that agent (sections 7.2, 8).
+  - A pairing code is a four-character nameplate, by which the relay routes, and a four-character secret the relay never sees. A relay refuses an unknown nameplate (404 `unknown_nameplate`) and a pairing path that carries more than the nameplate (400 `bad_nameplate`). Pairing through an untrusted relay and end-to-end encryption are specified for 0.2 (sections 4.4, 6, 16, 17).
 - **0.1, 2026-09-26**: first draft.

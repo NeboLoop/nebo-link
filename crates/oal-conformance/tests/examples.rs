@@ -16,7 +16,8 @@ async fn target() -> Target {
         .unwrap();
     Target {
         url: format!("ws://{addr}/oal"),
-        pair_url: None,
+        // Pair the way a relay routes it, by the code's nameplate.
+        pair_url: Some(format!("ws://{addr}/oal/pair")),
         headers: Vec::new(),
         known: vec![
             ("code".into(), json!("K7QM-3XRD")),
@@ -164,6 +165,28 @@ async fn an_out_of_order_frame_fails_an_ordered_step() {
     let outcomes = transcript::run(&target().await, &examples).await;
     let error = outcomes[2].result.as_ref().unwrap_err();
     assert!(error.contains("arrived before"), "{error}");
+}
+
+/// A pairing URL may carry only the nameplate: one with the whole code is
+/// refused, and so is a nameplate nobody registered (spec 4.4, 6.2).
+#[tokio::test]
+async fn a_pairing_url_carries_only_the_nameplate() {
+    let target = target().await;
+    let base = target.pair_url.unwrap();
+    for (path, status) in [("K7QM-3XRD", 400), ("ZZZZ", 404)] {
+        let error = tokio_tungstenite::connect_async(format!("{base}/{path}"))
+            .await
+            .unwrap_err();
+        match error {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status().as_u16(), status, "{path}")
+            }
+            other => panic!("{path}: {other}"),
+        }
+    }
+    tokio_tungstenite::connect_async(format!("{base}/k7qm"))
+        .await
+        .expect("the nameplate, in any case, is accepted");
 }
 
 /// `oal-conformance agent` speaks ACP on stdio, for a host under test.

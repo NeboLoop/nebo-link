@@ -80,12 +80,16 @@ pub async fn serve(addr: SocketAddr, config: Config) -> std::io::Result<SocketAd
             let _ = agent_events.send(Event::Agent(msg));
         }
     });
+    let upgrade = Upgrade {
+        nameplate: crate::nameplate(&config.code),
+        log: config.log,
+    };
     tokio::spawn(Host::new(config, to_agent).run(rx));
     tokio::spawn(async move {
         let mut next = 0;
         while let Ok((stream, _)) = listener.accept().await {
             next += 1;
-            tokio::spawn(connection(next, stream, events.clone()));
+            tokio::spawn(connection(next, stream, upgrade.clone(), events.clone()));
         }
     });
     Ok(local)
@@ -103,12 +107,17 @@ enum Out {
     Close(u16, String),
 }
 
-async fn connection(id: u64, stream: tokio::net::TcpStream, events: mpsc::UnboundedSender<Event>) {
+async fn connection(
+    id: u64,
+    stream: tokio::net::TcpStream,
+    upgrade: Upgrade,
+    events: mpsc::UnboundedSender<Event>,
+) {
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_FRAME))
         .max_frame_size(Some(MAX_FRAME));
     let Ok(ws) =
-        tokio_tungstenite::accept_hdr_async_with_config(stream, Subprotocol, Some(config)).await
+        tokio_tungstenite::accept_hdr_async_with_config(stream, upgrade, Some(config)).await
     else {
         return;
     };
@@ -139,11 +148,40 @@ async fn connection(id: u64, stream: tokio::net::TcpStream, events: mpsc::Unboun
     let _ = events.send(Event::Closed(id));
 }
 
-/// Selects the `oal` subprotocol when the client offers it (section 4.1).
-struct Subprotocol;
+/// The WebSocket upgrade. It selects the `oal` subprotocol when the client
+/// offers it (spec 4.1). The fake host takes any path, and also plays the
+/// relay's pairing endpoint: `/oal/pair/<nameplate>` must carry the code's
+/// nameplate and nothing more (spec 4.4, 6.2).
+#[derive(Clone)]
+struct Upgrade {
+    nameplate: String,
+    log: bool,
+}
 
-impl Callback for Subprotocol {
+impl Callback for Upgrade {
     fn on_request(self, req: &Request, mut resp: Response) -> Result<Response, ErrorResponse> {
+        if let Some(given) = req.uri().path().strip_prefix("/oal/pair/") {
+            let given = crate::normalize_code(given);
+            if given.len() > 4 {
+                if self.log {
+                    eprintln!(
+                        "pairing: SPEC VIOLATION: the pairing URL carries more than the nameplate; the rest of the code must never reach the relay"
+                    );
+                }
+                return Err(refusal(
+                    400,
+                    "bad_nameplate",
+                    "A pairing URL carries only the code's first four characters.",
+                ));
+            }
+            if given != self.nameplate {
+                return Err(refusal(
+                    404,
+                    "unknown_nameplate",
+                    "That code didn't work. Get a new one on the computer.",
+                ));
+            }
+        }
         let offered = req
             .headers()
             .get("sec-websocket-protocol")
@@ -155,6 +193,18 @@ impl Callback for Subprotocol {
         }
         Ok(resp)
     }
+}
+
+/// A refused upgrade, as a relay answers it (spec 4.4).
+fn refusal(status: u16, code: &str, message: &str) -> ErrorResponse {
+    let mut resp = ErrorResponse::new(Some(
+        json!({ "code": code, "message": message }).to_string(),
+    ));
+    *resp.status_mut() =
+        tokio_tungstenite::tungstenite::http::StatusCode::from_u16(status).expect("status");
+    resp.headers_mut()
+        .insert("content-type", "application/json".parse().expect("header"));
+    resp
 }
 
 fn close(code: u16, reason: &str) -> Message {
@@ -585,14 +635,9 @@ impl Host {
             self.reply(conn, None, id, Err(e));
             return self.close(conn, 4002, "No common protocol version.");
         }
-        let normal = |c: &str| {
-            c.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect::<String>()
-                .to_ascii_uppercase()
-        };
-        let given = normal(params["code"].as_str().unwrap_or(""));
-        if self.code_used || !equal(given.as_bytes(), normal(&self.config.code).as_bytes()) {
+        let given = crate::normalize_code(params["code"].as_str().unwrap_or(""));
+        let code = crate::normalize_code(&self.config.code);
+        if self.code_used || !equal(given.as_bytes(), code.as_bytes()) {
             let message = "That code didn't work. Get a new one on the computer.".to_owned();
             self.reply(conn, None, id, Err((code::PAIRING_REFUSED, message)));
             return self.close(conn, 4001, "Pairing refused.");
