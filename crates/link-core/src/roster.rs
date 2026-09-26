@@ -1,8 +1,7 @@
-//! Every agent a machine's link hosts, behind one contract: the bot's one
-//! [`Backend`]. Each hosted agent (a Claude Code in one folder, a Codex in
-//! another, an OpenClaw install) is a [`Member`] with its own backend, so
-//! two instances of one runtime share nothing: not a process, a session, a
-//! question or a folder.
+//! Every agent a computer's host runs, behind one [`Backend`]. Each hosted
+//! agent (a Claude Code in one folder, a Codex in another, an OpenClaw
+//! install) is a [`Member`] with its own backend, so two instances of one
+//! runtime share nothing: not a process, a session, a question or a folder.
 //!
 //! - **Agents.** A member's default agent takes the member's id (the first
 //!   member's is `assistant`); any other agent of it (an OpenClaw agent, a
@@ -12,13 +11,13 @@
 //!   `<member>~` on every member but the first, so a chat id names its
 //!   agent even where the REST paths give no agent, and two agents whose
 //!   runtimes number sessions alike never share one.
-//! - **Membership** changes while the bot runs ([`Roster::set`]): a member
+//! - **Membership** changes while the host runs ([`Roster::set`]): a member
 //!   that stays keeps its backend, running process and sessions.
 
 use std::sync::{Arc, RwLock};
 
-use super::PRIMARY;
-use super::backend::{Agent, Backend, BoxFuture, Chat, Error, Message, Permission, Turn};
+use crate::PRIMARY;
+use crate::backend::{Agent, Backend, BoxFuture, Chat, Error, Message, Permission, Turn};
 
 /// What separates a member's id from its runtime's session id in a chat id.
 const SEP: char = '~';
@@ -26,11 +25,36 @@ const SEP: char = '~';
 /// One hosted agent.
 #[derive(Clone)]
 pub struct Member {
-    /// The hosted agent's id ([`crate::state::Hosted::id`]).
+    /// The hosted agent's id, fixed when it was added: clients name it.
     pub id: String,
     /// Its name as the owner reads it in "Could not connect to <label>".
     pub label: String,
+    /// Its runtime's id: `claude-code`, `codex`, `openclaw`, `hermes`, ...
+    pub runtime: String,
     pub backend: Arc<dyn Backend>,
+}
+
+/// A new member's id: `label` as a slug ("Claude Code · api" →
+/// `claude-code-api`), `agent` when it has no letters or digits, made unique
+/// against `taken` with `-2`, `-3`, ...
+pub fn new_id(label: &str, taken: &[&str]) -> String {
+    let mut slug = String::new();
+    for c in label.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    let base = match slug.trim_end_matches('-') {
+        "" => "agent".to_owned(),
+        s => s.to_owned(),
+    };
+    let free = |id: &str| !taken.contains(&id);
+    if free(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{base}-{n}")).find(|id| free(id)).expect("a free id")
 }
 
 /// The hosted agents, in the link's order.
@@ -113,7 +137,23 @@ impl Roster {
     }
 }
 
-/// A member that doesn't answer reads as its own name, not the bot's.
+/// A member's agent as the roster names it: its default agent by the
+/// member's id, another by `<member>.<agent>` (on the first member, by its
+/// own id).
+pub(crate) fn member_agent(member: &Member, agent: Agent) -> Agent {
+    let id = match (agent.is_default, member.id == PRIMARY) {
+        (true, _) => member.id.clone(),
+        (false, true) => agent.id,
+        (false, false) => format!("{}.{}", member.id, agent.id),
+    };
+    Agent {
+        is_default: id == PRIMARY,
+        id,
+        ..agent
+    }
+}
+
+/// A member that doesn't answer reads as its own name, not the host's.
 fn unreachable(member: &Member, error: Error) -> Error {
     match error {
         Error::Unavailable(why) => {
@@ -151,18 +191,7 @@ impl Backend for Roster {
             let mut failed = None;
             for member in self.members() {
                 match member.backend.agents().await {
-                    Ok(agents) => all.extend(agents.into_iter().map(|a| {
-                        let id = match (a.is_default, member.id == PRIMARY) {
-                            (true, _) => member.id.clone(),
-                            (false, true) => a.id,
-                            (false, false) => format!("{}.{}", member.id, a.id),
-                        };
-                        Agent {
-                            is_default: id == PRIMARY,
-                            id,
-                            ..a
-                        }
-                    })),
+                    Ok(agents) => all.extend(agents.into_iter().map(|a| member_agent(&member, a))),
                     Err(e) => {
                         failed.get_or_insert(unreachable(&member, e));
                     }
@@ -236,5 +265,20 @@ impl Backend for Roster {
                 .await
                 .map_err(|e| unreachable(&member, e))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_unique_slugs_of_labels() {
+        assert_eq!(new_id("Claude Code", &[]), "claude-code");
+        assert_eq!(new_id("Claude Code · api", &[]), "claude-code-api");
+        assert_eq!(new_id("Site", &["site"]), "site-2");
+        assert_eq!(new_id("Site", &["site", "site-2"]), "site-3");
+        assert_eq!(new_id("···", &[]), "agent");
+        assert_eq!(new_id("Assistant", &[PRIMARY]), "assistant-2");
     }
 }

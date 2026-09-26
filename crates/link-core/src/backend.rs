@@ -1,13 +1,16 @@
-//! What the contract server needs from a runtime: its agents, their chats
-//! and transcripts, and one streamed turn at a time. Each runtime implements
-//! this once ([`super::hermes`]); everything the phone sees is rendered from
-//! these types by the contract, so no runtime shape leaks past this file.
+//! What the host needs from a runtime: its agents, their chats and
+//! transcripts, and one streamed turn at a time. Each runtime implements
+//! this once ([`crate::acp`], [`crate::hermes`], [`crate::openclaw`]);
+//! everything a client sees is built from these types by the host, so no
+//! runtime shape leaks past this file.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use serde_json::Value;
 use tokio::sync::mpsc;
+
+pub use crate::model::{PermissionOption, SessionModeState, StopReason, ToolCallUpdate, Usage, Words};
 
 /// A boxed future, so the trait is object-safe and one link can hold any
 /// runtime's backend.
@@ -16,7 +19,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Why a backend call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The runtime's API is not answering; the phone reads "Could not
+    /// The runtime's API is not answering; the owner reads "Could not
     /// connect to <runtime>. Try again."
     Unavailable(String),
     /// The agent, chat or run named does not exist.
@@ -36,16 +39,26 @@ impl Error {
     }
 }
 
-/// One agent of the runtime: an OpenClaw agent, a Hermes profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One agent of the runtime: an OpenClaw agent, a Hermes profile, a coding
+/// agent in its folder.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Agent {
     /// The runtime's own id.
     pub id: String,
     pub name: String,
     pub description: String,
-    /// The runtime's default agent, which the contract exposes as
-    /// `assistant`.
+    /// The runtime's default agent, which the roster names after its
+    /// member.
     pub is_default: bool,
+    /// Where its sessions work, for runtimes that have a folder.
+    pub folder: Option<String>,
+    /// ACP `AgentCapabilities`, as the agent last answered them or as the
+    /// adapter provides them.
+    pub capabilities: Value,
+    /// The modes a new session starts in, when it has modes.
+    pub modes: Option<SessionModeState>,
+    /// Why the agent can't take a prompt, when its last start failed.
+    pub offline_reason: Option<String>,
 }
 
 /// One conversation: a runtime session.
@@ -96,31 +109,17 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-/// One answer the owner can give to an [`Ask`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Choice {
-    /// What the runtime is answered with.
-    pub value: String,
-    /// What the owner reads on the card.
-    pub label: String,
-}
-
-/// The runtime stopped for the owner's decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The runtime stopped for the owner's decision: ACP's
+/// `session/request_permission`, and the same in the owner's words.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ask {
     /// The runtime's id for the request, when it gives one.
     pub request_id: Option<String>,
-    /// What is being asked, as the card shows it.
-    pub prompt: String,
-    /// What the runtime wants to do, for the inbox item's title.
-    pub summary: String,
-    pub choices: Vec<Choice>,
+    /// The call it asks about.
+    pub tool_call: ToolCallUpdate,
+    /// The answers it offers; an option's id is what it is answered with.
+    pub options: Vec<PermissionOption>,
+    pub words: Words,
 }
 
 /// What a turn emits, in order, ending with exactly one of `Completed`,
@@ -141,25 +140,26 @@ pub enum TurnEvent {
         is_error: bool,
         duration_ms: Option<u64>,
     },
-    Ask(Ask),
+    Ask(Box<Ask>),
     /// An ask was answered, from anywhere (the runtime's own UI included).
     AskAnswered {
         request_id: Option<String>,
     },
     Completed {
+        stop_reason: StopReason,
         usage: Option<Usage>,
     },
     Failed(String),
     Cancelled,
 }
 
-/// What the contract sends a running turn.
+/// What the host sends a running turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     Cancel,
     Answer {
         request_id: Option<String>,
-        /// A [`Choice::value`] of the ask.
+        /// A [`PermissionOption::option_id`] of the ask.
         choice: String,
     },
 }
@@ -199,10 +199,10 @@ pub struct Turn {
     pub control: mpsc::Sender<Control>,
 }
 
-/// A runtime behind the contract.
+/// A runtime behind the host.
 pub trait Backend: Send + Sync + 'static {
     /// Whether the runtime can serve chats now: reachable, and every feature
-    /// the contract needs present. The error says what is missing.
+    /// the host needs present. The error says what is missing.
     fn ready(&self) -> BoxFuture<'_, Result<(), String>>;
     fn agents(&self) -> BoxFuture<'_, Result<Vec<Agent>, Error>>;
     /// The agent's chats, most recent first.

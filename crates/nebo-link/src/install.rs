@@ -9,6 +9,9 @@ use nebo_runtimes::{Environment, Installation, Runtime, RuntimeCommand, Service,
 use crate::error::{Error, Result};
 use crate::state::InstallLink;
 
+/// A command as the owner would type it.
+pub use link_core::acp::shown;
+
 /// The key the hub stores in `bots.runtime`.
 pub fn runtime_key(runtime: Runtime) -> &'static str {
     match runtime {
@@ -170,13 +173,6 @@ pub async fn run(command: &RuntimeCommand, wait: std::time::Duration, log: &Path
     }
 }
 
-/// The command as the owner would type it.
-pub fn shown(command: &RuntimeCommand) -> String {
-    std::iter::once(command.program.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
 
 /// A command of the runtime's, set up to outlive the link: its own process
 /// group, never killed when dropped, its output appended to `log`.

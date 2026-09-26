@@ -35,7 +35,8 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
-use crate::contract::{self, Contract};
+use crate::contract;
+use link_core::phone::Contract;
 use crate::endpoints::WEB_ORIGIN;
 use crate::rewrite::{Coding, Direction, RewrittenBody, Rewriter};
 
@@ -167,7 +168,7 @@ async fn handle<C: Control>(
     if let Some(contract) = &contract
         && contract::routes(path)
     {
-        return Ok(contract.handle(req).await);
+        return Ok(contract::handle(contract, req).await);
     }
     match target.upstream {
         Some(upstream) => Ok(forward(req, &target, upstream, rewriter).await),

@@ -18,8 +18,8 @@ use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
-use super::{Contract, Outbound};
 use crate::proxy::{Body, full, text};
+use link_core::phone::{Contract, Outbound};
 
 /// The largest frame a phone sends (a prompt with its attachments).
 const MAX_FRAME: usize = 4 << 20;

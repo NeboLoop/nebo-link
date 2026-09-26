@@ -23,10 +23,13 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use nebo_link::contract::backend::Backend;
-use nebo_link::contract::hermes::Hermes;
-use nebo_link::contract::openclaw::Openclaw;
-use nebo_link::contract::{Contract, Inbox};
+use link_core::backend::Backend;
+use link_core::hermes::Hermes;
+use link_core::host::Host;
+use link_core::openclaw::Openclaw;
+use link_core::phone::Contract;
+use link_core::roster::{Member, Roster};
+use nebo_link::contract::Inbox;
 use nebo_link::proxy::{self, Body, BoxError, Control, FORWARDED_FOR, Target};
 use nebo_runtimes::openclaw::gateway::{Connect, FileDeviceStore};
 use nebo_runtimes::{PathMode, ProxyAccess, ProxyRoute};
@@ -410,11 +413,27 @@ impl Control for NoControl {
     }
 }
 
-/// The link's listener with the contract in front of `backend`, the way
-/// `run.rs` serves it; the runtime UI target is an unused port.
+/// The link's listener with the contract in front of `backend`, the bot's
+/// one agent.
 async fn serve_contract(
     runtime: (&'static str, &'static str),
     backend: Arc<dyn Backend>,
+    hub: &str,
+) -> SocketAddr {
+    let member = Member {
+        id: nebo_link::state::PRIMARY.into(),
+        label: runtime.1.into(),
+        runtime: runtime.0.into(),
+        backend,
+    };
+    serve_roster(runtime, Arc::new(Roster::new(vec![member])), hub).await
+}
+
+/// The link's listener with the contract in front of `roster`, the way
+/// `run.rs` serves it; the runtime UI target is an unused port.
+async fn serve_roster(
+    runtime: (&'static str, &'static str),
+    roster: Arc<Roster>,
     hub: &str,
 ) -> SocketAddr {
     let unused = TcpListener::bind("127.0.0.1:0")
@@ -437,9 +456,8 @@ async fn serve_contract(
     let contract = Contract::new(
         runtime.0,
         runtime.1,
-        BOT,
-        backend,
-        Some(Inbox::new(hub, BOT, token_rx)),
+        Host::new(roster),
+        Some(Arc::new(Inbox::new(hub, BOT, token_rx))),
     );
     let listener = proxy::bind_loopback("127.0.0.1:0".parse().unwrap())
         .await
@@ -1945,7 +1963,7 @@ async fn start_acp_link(
     dir: &std::path::Path,
     hub: &str,
 ) -> SocketAddr {
-    use nebo_link::contract::acp::{Acp, Settings};
+    use link_core::acp::{Acp, Settings};
     let command = nebo_runtimes::RuntimeCommand {
         program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
         args: ["fake_acp_agent_process", "--exact", "--nocapture", "--test-threads=1"]
@@ -1963,6 +1981,7 @@ async fn start_acp_link(
         workdir: dir.join("work"),
         log: dir.join("logs").join("agent.log"),
         chats_file: dir.join("acp-chats.json"),
+        client: nebo_link::link::CLIENT,
     });
     let runtime = nebo_link::install::runtime_name(nebo_runtimes::Runtime::Acp(agent));
     let key = nebo_link::install::runtime_key(nebo_runtimes::Runtime::Acp(agent));
@@ -2225,7 +2244,7 @@ async fn an_acp_agent_that_is_not_signed_in_says_so() {
 
 #[tokio::test]
 async fn an_acp_agent_that_will_not_start_is_not_announced() {
-    use nebo_link::contract::acp::{Acp, Settings};
+    use link_core::acp::{Acp, Settings};
     let tmp = tempfile::tempdir().unwrap();
     let (hub_url, _inbox) = serve_hub().await;
     let backend = Acp::new(Settings {
@@ -2239,6 +2258,7 @@ async fn an_acp_agent_that_will_not_start_is_not_announced() {
         workdir: tmp.path().join("work"),
         log: tmp.path().join("agent.log"),
         chats_file: tmp.path().join("acp-chats.json"),
+        client: nebo_link::link::CLIENT,
     });
     let link = serve_contract(("codex", "Codex"), Arc::new(backend), &hub_url).await;
     assert_eq!(get(link, "/health").await["chat"], false);
@@ -2299,7 +2319,6 @@ async fn until_on(phone: &mut Phone, session: &str, kind: &str) -> Vec<Value> {
 /// while the bot runs.
 #[tokio::test]
 async fn one_bot_hosts_several_agents_and_keeps_them_apart() {
-    use nebo_link::contract::roster::Roster;
     use nebo_link::state::{Link, PRIMARY, Root};
     use nebo_runtimes::acp::Agent;
     let tmp = tempfile::tempdir().unwrap();
@@ -2317,7 +2336,7 @@ async fn one_bot_hosts_several_agents_and_keeps_them_apart() {
     };
     let members = link.agents.iter().filter_map(|a| nebo_link::link::acp_member(&dir, a)).collect();
     let roster = Arc::new(Roster::new(members));
-    let bot = serve_contract(("claude-code", "Claude Code"), roster.clone(), &hub_url).await;
+    let bot = serve_roster(("claude-code", "Claude Code"), roster.clone(), &hub_url).await;
 
     // The roster: three employees, the first the primary.
     let agents = get(bot, "/api/v1/agents").await["agents"].as_array().unwrap().clone();
@@ -2429,7 +2448,7 @@ async fn one_bot_hosts_several_agents_and_keeps_them_apart() {
 #[tokio::test]
 #[ignore = "needs NEBO_LINK_LIVE_ACP and a signed-in agent"]
 async fn live_acp_phone_flow() {
-    use nebo_link::contract::acp::{Acp, Settings};
+    use link_core::acp::{Acp, Settings};
     use nebo_runtimes::{Environment, Runtime, detect};
     let Ok(key) = std::env::var("NEBO_LINK_LIVE_ACP") else {
         eprintln!("NEBO_LINK_LIVE_ACP not set; nothing to do");
@@ -2451,6 +2470,7 @@ async fn live_acp_phone_flow() {
         workdir: tmp.path().join("work"),
         log: tmp.path().join("agent.log"),
         chats_file: tmp.path().join("acp-chats.json"),
+        client: nebo_link::link::CLIENT,
     });
     let link = serve_contract((agent.key(), agent.name()), Arc::new(backend), &hub_url).await;
     // A first start may fetch the adapter: probe until it answers.

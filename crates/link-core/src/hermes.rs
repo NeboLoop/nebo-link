@@ -36,15 +36,16 @@ use nebo_runtimes::hermes::runs::{
     Choice as HermesChoice, Client, Event, HistoryMessage, MessageQuery, NewRun, NewSession,
     RunState, SessionQuery,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Permission, Role,
-    ToolCall, ToolResult, Turn, TurnEvent, Usage,
+use crate::backend::{
+    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, PermissionOption,
+    Role, StopReason, ToolCall, ToolCallUpdate, ToolResult, Turn, TurnEvent, Usage, Words,
 };
+use crate::model::ToolCallStatus;
 
-/// The default profile's id on the contract's backend side.
+/// The default profile's id on the host's backend side.
 pub const DEFAULT_PROFILE: &str = "default";
 
 /// The first Hermes version whose `/v1/runs` loads the session's transcript
@@ -136,12 +137,14 @@ impl Backend for Hermes {
                 name: "Hermes".to_owned(),
                 description: "The default Hermes profile".to_owned(),
                 is_default: true,
+                ..adapted()
             }];
             agents.extend(self.profiles.iter().map(|name| Agent {
                 id: name.clone(),
                 name: name.clone(),
                 description: format!("The Hermes profile {name}"),
                 is_default: false,
+                ..adapted()
             }));
             Ok(agents)
         }
@@ -271,7 +274,7 @@ impl Backend for Hermes {
     }
 }
 
-/// Forwards the contract's controls to the run.
+/// Forwards the host's controls to the run.
 async fn steer(client: Client, run_id: Arc<str>, mut control: mpsc::Receiver<Control>) {
     while let Some(control) = control.recv().await {
         let result = match control {
@@ -293,7 +296,7 @@ async fn steer(client: Client, run_id: Arc<str>, mut control: mpsc::Receiver<Con
     }
 }
 
-/// Turns the run's events into the contract's, ending with one terminal
+/// Turns the run's events into the host's, ending with one terminal
 /// event. A stream that breaks before the run ends is replaced by polling
 /// the run's status for its outcome (0.19.0 keeps no replay).
 async fn relay(
@@ -304,6 +307,7 @@ async fn relay(
 ) {
     let mut open_tools: Vec<(String, String)> = Vec::new();
     let mut tool_seq = 0u32;
+    let mut approvals = 0u32;
     loop {
         let envelope = match stream.next().await {
             Some(Ok(envelope)) => envelope,
@@ -368,24 +372,37 @@ async fn relay(
                 } else {
                     request.choices.clone()
                 };
-                TurnEvent::Ask(Ask {
+                approvals += 1;
+                TurnEvent::Ask(Box::new(Ask {
                     request_id: request.request_id.clone(),
-                    prompt: match description.trim() {
-                        "" => format!("Hermes asks to run:\n{command}"),
-                        description => format!("Hermes asks to run:\n{command}\n\n{description}"),
+                    tool_call: ToolCallUpdate {
+                        tool_call_id: request
+                            .request_id
+                            .clone()
+                            .unwrap_or_else(|| format!("{run_id}-approval-{approvals}")),
+                        title: Some(command.clone()),
+                        kind: Some("execute".to_owned()),
+                        status: Some(ToolCallStatus::Pending),
+                        raw_input: Some(json!({ "command": command })),
+                        content: Some(description.trim())
+                            .filter(|d| !d.is_empty())
+                            .map(ToolCallUpdate::text),
+                        ..ToolCallUpdate::default()
                     },
-                    summary: format!("run {command}"),
-                    choices: choices
-                        .into_iter()
-                        .map(|c| Choice {
-                            value: c.as_str().to_owned(),
-                            label: choice_label(c).to_owned(),
-                        })
-                        .collect(),
-                })
+                    options: choices.iter().map(|&c| option(c)).collect(),
+                    words: Words {
+                        question: match description.trim() {
+                            "" => format!("Hermes asks to run:\n{command}"),
+                            description => format!("Hermes asks to run:\n{command}\n\n{description}"),
+                        },
+                        summary: format!("run {command}"),
+                        labels: choices.iter().map(|&c| choice_label(c).to_owned()).collect(),
+                    },
+                }))
             }
             Event::ApprovalResponded { request_id, .. } => TurnEvent::AskAnswered { request_id },
             Event::Completed(done) => TurnEvent::Completed {
+                stop_reason: StopReason::EndTurn,
                 usage: done.usage.map(usage),
             },
             Event::Failed(failed) => TurnEvent::Failed(
@@ -423,6 +440,7 @@ async fn outcome(client: &Client, run_id: &str) -> TurnEvent {
             Ok(status) if status.status.is_terminal() => {
                 return match status.status {
                     RunState::Completed => TurnEvent::Completed {
+                        stop_reason: StopReason::EndTurn,
                         usage: status.usage.map(usage),
                     },
                     RunState::Cancelled => TurnEvent::Cancelled,
@@ -447,6 +465,37 @@ fn usage(u: nebo_runtimes::hermes::runs::Usage) -> Usage {
     Usage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
+        ..Usage::default()
+    }
+}
+
+/// A Hermes agent's roster fields beyond its name: no folder and no modes,
+/// and the capabilities OAL's Appendix A gives an adapted runtime.
+fn adapted() -> Agent {
+    Agent {
+        id: String::new(),
+        name: String::new(),
+        description: String::new(),
+        is_default: false,
+        folder: None,
+        capabilities: json!({ "loadSession": true, "sessionCapabilities": { "list": {} } }),
+        modes: None,
+        offline_reason: None,
+    }
+}
+
+/// A Hermes choice as ACP's permission option (OAL Appendix A).
+fn option(choice: HermesChoice) -> PermissionOption {
+    let (kind, name) = match choice {
+        HermesChoice::Once => ("allow_once", "Allow once"),
+        HermesChoice::Session => ("allow_always", "Allow for this conversation"),
+        HermesChoice::Always => ("allow_always", "Always allow"),
+        HermesChoice::Deny => ("reject_once", "Deny"),
+    };
+    PermissionOption {
+        option_id: choice.as_str().to_owned(),
+        name: name.to_owned(),
+        kind: kind.to_owned(),
     }
 }
 
@@ -468,7 +517,7 @@ fn tool_input(preview: &str) -> Value {
     }
 }
 
-/// A stored Hermes message as the contract's. Tool calls are OpenAI-shaped
+/// A stored Hermes message as the host's. Tool calls are OpenAI-shaped
 /// (`{id, function: {name, arguments}}`, `hermes_state.py` `add_message`).
 fn message(m: &nebo_runtimes::hermes::runs::Message, index: usize) -> Option<Message> {
     let role = match m.role.as_str() {

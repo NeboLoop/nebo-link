@@ -34,12 +34,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use link_core::host::Host;
+use link_core::phone::Contract;
 use nebo_comm::{CommError, CommPlugin, NeboAIPlugin, lease};
 use nebo_runtimes::{Installation, Runtime, acp};
 use tokio::sync::watch;
 
-use crate::contract::Contract;
-use crate::contract::roster::Roster;
 use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 use crate::install::{self, runtime_key, runtime_name};
@@ -73,7 +73,7 @@ struct Service {
     tunnel: Arc<AtomicBool>,
     error: Mutex<Option<String>>,
     contract: Arc<Contract>,
-    roster: Arc<Roster>,
+    host: Arc<Host>,
     /// Why the chat contract is not announced, when it is not.
     chat_error: Mutex<Option<String>>,
     /// What the current connection's CONNECT said about `chat`.
@@ -127,12 +127,12 @@ impl Service {
         if link == before {
             return false;
         }
-        let members = link::reconcile(&self.dir, &before, &link, &self.roster.members());
+        let members = link::reconcile(&self.dir, &before, &link, &self.host.roster().members());
         tracing::info!(
             agents = ?link.agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
             "the link's agents changed"
         );
-        self.roster.set(members);
+        self.host.set_members(members);
         let announce_changed = link.runtime() != before.runtime();
         *self.link.lock().expect("link lock") = link;
         announce_changed
@@ -262,7 +262,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         tokio::spawn(crate::janus::serve(listener, link::janus(&link, settings, token_rx.clone())));
     }
 
-    let (contract, roster) = link::chat(&dir, &link, &installs, token_rx.clone()).await;
+    let (contract, host) = link::chat(&dir, &link, &installs, token_rx.clone()).await;
     let supervisors: Vec<Arc<Supervisor>> = installs
         .iter()
         .filter_map(|(id, install)| {
@@ -282,7 +282,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         tunnel: tunnel.clone(),
         error: Mutex::new(None),
         contract: contract.clone(),
-        roster,
+        host,
         chat_error: Mutex::new(None),
         announced: AtomicBool::new(false),
         supervisors: supervisors.clone(),

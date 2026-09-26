@@ -32,13 +32,14 @@ use nebo_runtimes::openclaw::gateway::{
     ChatSend, ChatState, Connect, Decision, Event, Events, FileDeviceStore, Gateway, HistoryQuery,
     SessionMessage, SessionsQuery, new_idempotency_key,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Permission, Role,
-    ToolCall, ToolResult, Turn, TurnEvent, Usage,
+use crate::backend::{
+    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, PermissionOption,
+    Role, StopReason, ToolCall, ToolCallUpdate, ToolResult, Turn, TurnEvent, Usage, Words,
 };
+use crate::model::ToolCallStatus;
 
 /// The scopes a turn needs: read the transcript rows, send, and answer
 /// approvals (`connect-admission.ts:138-163`).
@@ -98,7 +99,10 @@ impl Sink {
     async fn complete(self) {
         let _ = self
             .events
-            .send(TurnEvent::Completed { usage: self.usage })
+            .send(TurnEvent::Completed {
+                stop_reason: StopReason::EndTurn,
+                usage: self.usage,
+            })
             .await;
     }
 }
@@ -196,41 +200,68 @@ impl Router {
         let Some(sink) = self.sink(session_key, None) else {
             return;
         };
-        let (prompt, summary) = match &requested.request {
+        let (prompt, summary, call) = match &requested.request {
             ApprovalRequest::Exec(exec) => {
                 let command = exec.command.clone().unwrap_or_default();
-                let prompt = match exec.warning_text.as_deref().map(str::trim) {
-                    Some(warning) if !warning.is_empty() => {
-                        format!("OpenClaw asks to run:\n{command}\n\n{warning}")
-                    }
-                    _ => format!("OpenClaw asks to run:\n{command}"),
+                let warning = exec.warning_text.as_deref().map(str::trim).filter(|w| !w.is_empty());
+                let prompt = match warning {
+                    Some(warning) => format!("OpenClaw asks to run:\n{command}\n\n{warning}"),
+                    None => format!("OpenClaw asks to run:\n{command}"),
                 };
-                (prompt, format!("run {command}"))
+                let call = ToolCallUpdate {
+                    title: Some(command.clone()),
+                    kind: Some("execute".to_owned()),
+                    raw_input: Some(json!({ "command": command })),
+                    content: warning.map(ToolCallUpdate::text),
+                    ..ToolCallUpdate::default()
+                };
+                (prompt, format!("run {command}"), call)
             }
             ApprovalRequest::Plugin(plugin) => (
                 format!("OpenClaw asks: {}\n\n{}", plugin.title, plugin.description),
                 plugin.title.clone(),
+                ToolCallUpdate {
+                    title: Some(plugin.title.clone()),
+                    kind: Some("other".to_owned()),
+                    content: Some(ToolCallUpdate::text(&plugin.description)),
+                    ..ToolCallUpdate::default()
+                },
             ),
         };
         self.approvals.lock().expect("approvals lock").insert(
             requested.id.clone(),
             (session_key.to_owned(), requested.kind()),
         );
-        let choices = requested
-            .allowed_decisions()
-            .into_iter()
-            .map(|decision| Choice {
-                value: decision_value(decision).to_owned(),
-                label: decision_label(decision).to_owned(),
+        let decisions = requested.allowed_decisions();
+        let options = decisions
+            .iter()
+            .map(|&decision| PermissionOption {
+                option_id: decision_value(decision).to_owned(),
+                name: decision_label(decision).to_owned(),
+                kind: match decision {
+                    Decision::AllowOnce => "allow_once",
+                    Decision::AllowAlways => "allow_always",
+                    Decision::Deny => "reject_once",
+                }
+                .to_owned(),
             })
             .collect();
+        let labels = decisions.iter().map(|&d| decision_label(d).to_owned()).collect();
         let _ = sink
-            .send(TurnEvent::Ask(Ask {
+            .send(TurnEvent::Ask(Box::new(Ask {
+                tool_call: ToolCallUpdate {
+                    tool_call_id: requested.id.clone(),
+                    status: Some(ToolCallStatus::Pending),
+                    ..call
+                },
                 request_id: Some(requested.id),
-                prompt,
-                summary,
-                choices,
-            }))
+                options,
+                words: Words {
+                    question: prompt,
+                    summary,
+                    labels,
+                },
+            })))
             .await;
     }
 
@@ -318,10 +349,11 @@ impl Router {
                 return;
             }
             if let Some(usage) = row.usage().and_then(usage_of) {
-                sink.usage = Some(match sink.usage {
+                sink.usage = Some(match sink.usage.take() {
                     Some(sum) => Usage {
                         input_tokens: sum.input_tokens + usage.input_tokens,
                         output_tokens: sum.output_tokens + usage.output_tokens,
+                        ..Usage::default()
                     },
                     None => usage,
                 });
@@ -606,7 +638,7 @@ impl Backend for Openclaw {
     }
 }
 
-/// Forwards the contract's controls to the gateway.
+/// Forwards the host's controls to the gateway.
 async fn steer(
     gateway: Gateway,
     router: Arc<Router>,
@@ -681,6 +713,7 @@ fn usage_of(usage: &Value) -> Option<Usage> {
     (input.is_some() || output.is_some()).then(|| Usage {
         input_tokens: input.unwrap_or_default(),
         output_tokens: output.unwrap_or_default(),
+        ..Usage::default()
     })
 }
 
@@ -809,6 +842,11 @@ fn roster_entry(agent: AgentSummary, default_id: &str) -> Agent {
         description: theme.unwrap_or_default(),
         id: agent.id,
         name,
+        folder: None,
+        // What OAL's Appendix A gives an OpenClaw agent.
+        capabilities: json!({ "loadSession": true, "sessionCapabilities": { "list": {} } }),
+        modes: None,
+        offline_reason: None,
     }
 }
 
@@ -878,7 +916,8 @@ mod tests {
             usage_of(&json!({"input": 388, "output": 1, "totalTokens": 17321})),
             Some(Usage {
                 input_tokens: 388,
-                output_tokens: 1
+                output_tokens: 1,
+                ..Usage::default()
             })
         );
         assert_eq!(usage_of(&json!({})), None);

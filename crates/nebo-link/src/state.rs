@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 use nebo_runtimes::Runtime;
 use serde::{Deserialize, Serialize};
 
-pub use crate::contract::PRIMARY;
+pub use link_core::PRIMARY;
+pub use link_core::acp::AcpLink;
+
 use crate::endpoints::Endpoints;
 use crate::error::{Error, Result};
 
@@ -46,8 +48,8 @@ impl Root {
         if let Some(home) = home {
             return Ok(Self(home));
         }
-        dirs::data_dir()
-            .map(|dir| Self(dir.join("nebo-link")))
+        link_core::machine::default_daemon_home()
+            .map(Self)
             .ok_or_else(|| Error::Message("this system has no user data directory".into()))
     }
 
@@ -134,7 +136,7 @@ impl BotDir {
         &self.0
     }
     pub fn link_file(&self) -> PathBuf {
-        self.0.join("link.json")
+        self.0.join(link_core::machine::LINK_FILE)
     }
     pub fn offsets_file(&self) -> PathBuf {
         self.0.join("offsets.json")
@@ -372,28 +374,6 @@ impl Hosted {
         match &mut self.via {
             Via::Install(install) => Some(install),
             Via::Acp(_) => None,
-        }
-    }
-}
-
-/// An ACP agent's settings, fixed when it is added: a service's `PATH` is
-/// not the owner's shell's, so the command is kept with absolute paths.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AcpLink {
-    pub program: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-    /// The folder its conversations work in.
-    pub workdir: PathBuf,
-}
-
-impl AcpLink {
-    pub fn command(&self) -> nebo_runtimes::RuntimeCommand {
-        nebo_runtimes::RuntimeCommand {
-            program: self.program.clone(),
-            args: self.args.clone(),
-            env: self.env.clone(),
         }
     }
 }
