@@ -169,7 +169,9 @@ async fn the_secret_half_of_a_code_never_reaches_the_relay() {
 async fn nameplates_route_until_they_expire_and_belong_to_one_host() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path());
-    config.nameplate_ttl = Duration::from_secs(1);
+    // Long enough for two pairings on a slow CI runner, short enough to wait
+    // out below.
+    config.nameplate_ttl = Duration::from_secs(4);
     let relay = relay_with(config).await;
     let (mut tunnel, _) = host_up(&relay, &Keypair::generate(), "studio").await;
     let (laptop, _) = host_up(&relay, &Keypair::generate(), "laptop").await;
@@ -196,7 +198,7 @@ async fn nameplates_route_until_they_expire_and_belong_to_one_host() {
     assert!(next_client(&mut tunnel).await.nameplate.is_some());
 
     // Expired: refused, and free for another host.
-    tokio::time::sleep(Duration::from_millis(2100)).await;
+    tokio::time::sleep(Duration::from_millis(5100)).await;
     assert_eq!(refusal(other.pair("K7QM").await), "unknown_nameplate");
     assert_eq!(
         laptop

@@ -143,7 +143,7 @@ async fn pair(oal: &Arc<OalHost>, transport: Transport, via: &Via) -> Result<(Se
     }
     let claimed = claimed.expect("checked");
     let name = params["device"]["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or("Device").to_owned();
-    let device_id = format!("d-{}", &token()[..12].to_ascii_lowercase().replace(['-', '_'], "0"));
+    let device_id = format!("d-{}", token()[..12].to_ascii_lowercase().replace(['-', '_'], "0"));
     // The relay lets the device through from now on, before it hears it's
     // paired (by the key it proved to the relay, and by its static key).
     if let Via::Relay { client_key, .. } = via
