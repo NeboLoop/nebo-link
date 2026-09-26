@@ -20,6 +20,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="${1:-$root/target/debug}"
+# Absolute: the service starts the agent from its own working folder.
+bin="$(cd "$bin" && pwd)"
 for b in nebo-link oal-relay oal-conformance; do
   [ -x "$bin/$b" ] || { echo "no $bin/$b: build it first (cargo build -p nebo-link -p oal-relay -p oal-conformance)" >&2; exit 2; }
 done
