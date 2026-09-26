@@ -1365,7 +1365,7 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     assert_eq!(agents.len(), 2);
     assert_eq!(agents[0]["id"], "assistant");
     assert_eq!(agents[0]["name"], "Claw");
-    assert_eq!(agents[0]["description"], "OpenClaw agent on neboai/nebo-1");
+    assert_eq!(agents[0]["description"], "");
     assert_eq!(agents[1]["id"], "writer");
     assert_eq!(agents[1]["name"], "Writer");
 

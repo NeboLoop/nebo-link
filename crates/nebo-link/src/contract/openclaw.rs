@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use nebo_runtimes::openclaw::gateway::{
-    AgentStream, ApprovalKind, ApprovalRequest, ApprovalRequested, ChatEvent, ChatSend, ChatState,
-    Connect, Decision, Event, Events, FileDeviceStore, Gateway, HistoryQuery, SessionMessage,
-    SessionsQuery, new_idempotency_key,
+    AgentStream, AgentSummary, ApprovalKind, ApprovalRequest, ApprovalRequested, ChatEvent,
+    ChatSend, ChatState, Connect, Decision, Event, Events, FileDeviceStore, Gateway, HistoryQuery,
+    SessionMessage, SessionsQuery, new_idempotency_key,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -440,23 +440,7 @@ impl Backend for Openclaw {
             Ok(list
                 .agents
                 .into_iter()
-                .map(|agent| {
-                    let name = agent
-                        .identity
-                        .as_ref()
-                        .and_then(|identity| identity.name.clone())
-                        .or(agent.name.clone())
-                        .unwrap_or_else(|| agent.id.clone());
-                    Agent {
-                        is_default: agent.id == list.default_id,
-                        description: match agent.model.as_ref().and_then(|m| m.primary.as_deref()) {
-                            Some(model) => format!("OpenClaw agent on {model}"),
-                            None => "OpenClaw agent".to_owned(),
-                        },
-                        id: agent.id,
-                        name,
-                    }
-                })
+                .map(|agent| roster_entry(agent, &list.default_id))
                 .collect())
         }
         .boxed()
@@ -799,10 +783,68 @@ fn map(e: nebo_runtimes::openclaw::gateway::Error) -> Error {
     }
 }
 
+/// One `agents.list` row as the roster shows it: a human name (the
+/// identity's, else a configured name that is more than the id, else
+/// "Assistant" for the default agent, else the id) and the agent's own
+/// identity theme as its description, never its model.
+fn roster_entry(agent: AgentSummary, default_id: &str) -> Agent {
+    let is_default = agent.id == default_id;
+    let (identity_name, theme) = agent
+        .identity
+        .map_or((None, None), |identity| (identity.name, identity.theme));
+    let name = identity_name
+        .or(agent.name.filter(|name| *name != agent.id))
+        .unwrap_or_else(|| {
+            if is_default {
+                "Assistant".to_owned()
+            } else {
+                agent.id.clone()
+            }
+        });
+    Agent {
+        is_default,
+        description: theme.unwrap_or_default(),
+        id: agent.id,
+        name,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn roster_names_are_human_and_never_the_model() {
+        let row = |value: Value| roster_entry(serde_json::from_value(value).unwrap(), "main");
+
+        let main = row(json!({ "id": "main", "model": { "primary": "neboai/nebo-1" } }));
+        assert!(main.is_default);
+        assert_eq!(main.name, "Assistant");
+        assert_eq!(main.description, "");
+
+        let main = row(json!({ "id": "main", "name": "main" }));
+        assert_eq!(main.name, "Assistant");
+
+        let named = row(json!({
+            "id": "main", "name": "main",
+            "identity": { "name": "Claw", "theme": "space lobster" },
+            "model": { "primary": "neboai/nebo-1" }
+        }));
+        assert_eq!(named.name, "Claw");
+        assert_eq!(named.description, "space lobster");
+
+        let writer = row(
+            json!({ "id": "writer", "name": "Writer", "model": { "primary": "neboai/nebo-1" } }),
+        );
+        assert!(!writer.is_default);
+        assert_eq!(writer.name, "Writer");
+        assert_eq!(writer.description, "");
+
+        let ops = row(json!({ "id": "ops", "model": { "primary": "neboai/nebo-1" } }));
+        assert_eq!(ops.name, "ops");
+        assert_eq!(ops.description, "");
+    }
 
     #[test]
     fn transcript_rows_are_mapped() {
