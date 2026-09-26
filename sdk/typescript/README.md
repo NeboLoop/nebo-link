@@ -69,6 +69,8 @@ Every error is an `OALError` with a plain one-sentence `message` and a stable `c
 
 `connect({ ..., dialer, secure })` takes the two transport layers. A `Dialer` opens a `Socket` (WebSocket messages); a `SecureChannel` turns it into a `FrameChannel` (whole OAL frames). The default, `plaintext`, is OAL 0.1: one JSON text message per frame, authenticated with `host/hello`. End-to-end encryption (spec section 17, Noise IK over X25519) plugs in as another `SecureChannel`: it gets the host's and this device's static keys in `ChannelContext`, does its handshake in `open`, and sets `FrameChannel.authenticated` so the client skips `host/hello`. Nothing else in your code changes.
 
+Through a `relay`, every connection first proves this device's key to the relay ([`crates/oal-relay`](../../crates/oal-relay/README.md#protocol)): a fresh challenge from `GET /oal/challenge`, answered with an HMAC over an X25519 Diffie-Hellman between the device's key and the relay's, bound to the request. It happens beneath your `Dialer`, which receives the proven URL. A relay must be `wss://`, except one on your own machine.
+
 ## Examples
 
 - [`examples/chat.ts`](examples/chat.ts): a terminal chat. `pnpm example:chat --url ws://127.0.0.1:7878/oal --pair K7QM-3XRD`, then again without `--pair`.
@@ -79,11 +81,11 @@ To try either without a real host, run the conformance suite's fake host: `cargo
 ## Development
 
 ```sh
-cargo build -p oal-conformance      # the fake host the tests run against
+cargo build -p oal-conformance -p oal-relay   # the fake host the tests run against, and the relay
 pnpm install
 pnpm build && pnpm check && pnpm test
 ```
 
-The tests start `oal-conformance client` as a subprocess and fail on any frame it reports as breaking the spec. Set `OAL_CONFORMANCE` to use a binary somewhere else.
+The tests start `oal-conformance client` as a subprocess and fail on any frame it reports as breaking the spec; the relay test puts it behind `oal-relay serve` with `oal-relay host --forward`, then pairs and prompts through the relay. Set `OAL_CONFORMANCE` and `OAL_RELAY` to use binaries somewhere else.
 
 License: Apache-2.0.

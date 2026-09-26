@@ -44,17 +44,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
 
-  # The client SDKs (sdk/), tested against the conformance suite's fake host.
+  # The client SDKs (sdk/), tested against the conformance suite's fake host,
+  # directly and through the relay.
   sdk:
     name: SDKs (TypeScript, Python)
     runs-on: ubuntu-latest
     env:
       OAL_CONFORMANCE: ${{ github.workspace }}/target/debug/oal-conformance
+      OAL_RELAY: ${{ github.workspace }}/target/debug/oal-relay
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p oal-conformance --locked
+      - run: cargo build -p oal-conformance -p oal-relay --locked
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: sdk/typescript/package.json

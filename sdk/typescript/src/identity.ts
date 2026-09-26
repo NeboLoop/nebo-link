@@ -3,6 +3,7 @@
 import { plaintext, webSocketDialer, type Dialer, type SecureChannel } from './channel.js';
 import { exchange } from './connection.js';
 import { OALError } from './errors.js';
+import { base64url, relayDialer } from './relay.js';
 import { PROTOCOL, type ClientInfo } from './types.js';
 
 /**
@@ -55,7 +56,8 @@ export async function pair(options: PairOptions): Promise<Identity> {
   const { code, deviceName, client = DEFAULT_CLIENT, secure = plaintext, dialer = webSocketDialer } = options;
   const url = options.relay ? relayUrl(options.relay, `/oal/pair/${nameplate(code)}`) : options.url!;
   const keys = await generateKeyPair();
-  const socket = await dialer(url, ['oal']);
+  // Through a relay, the connection first proves the new device key.
+  const socket = await (options.relay ? relayDialer(options.relay, keys, dialer) : dialer)(url, ['oal']);
   const channel = await secure.open(socket, { protocol: PROTOCOL, client, code, device: keys });
   try {
     const result = await exchange(
@@ -80,10 +82,4 @@ async function generateKeyPair(): Promise<{ publicKey: string; privateKey: strin
   const publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
   const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
   return { publicKey: base64url(publicKey), privateKey: privateKey.d! };
-}
-
-function base64url(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }

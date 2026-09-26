@@ -11,7 +11,8 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": { "@openagentlink/client": ["./src/index.ts"] }
   },
   "include": ["src", "test", "examples"]
 }

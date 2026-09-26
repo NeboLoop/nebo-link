@@ -15,7 +15,7 @@ import {
   type Turn,
   type TurnEvent,
 } from '../src/index.js';
-import { fakeHost, type FakeHost } from './fake-host.js';
+import { fakeHost, fakeRelay, type FakeHost } from './fake-host.js';
 
 let host: FakeHost;
 let identity: Identity;
@@ -95,20 +95,6 @@ describe('pairing and the host layer', () => {
 
     const devices = await h.devices();
     expect(devices).toEqual([expect.objectContaining({ name: 'Test laptop', current: true })]);
-  });
-
-  it('pairs through a relay by the nameplate alone', async () => {
-    const other = await fakeHost('AAAA-BBBB');
-    try {
-      // The fake host plays the relay's /oal/pair/<nameplate> and refuses a
-      // pairing URL that carries more of the code than the nameplate.
-      const relay = other.url.replace(/\/oal$/, '');
-      const paired = await pair({ relay, code: 'aaaa-bbbb', deviceName: 'Relay laptop' });
-      expect(paired.host.id).toBe('h-fake');
-      expect(other.violations).toEqual([]);
-    } finally {
-      other.stop();
-    }
   });
 
   it('refuses a wrong code in plain words', async () => {
@@ -283,5 +269,53 @@ describe('resuming', () => {
     for (let next = await iterA.next(); !next.done; next = await iterA.next()) rest.push(next.value);
     expect(rest.find((e) => e.type === 'permission_resolved')).toMatchObject({ outcome: { optionId: 'allow-once' } });
     expect(rest.at(-1)).toEqual({ type: 'done', stopReason: 'end_turn' });
+  });
+});
+
+describe('through a relay', () => {
+  it('pairs by the nameplate, proves its key on every connection, and prompts', async () => {
+    const other = await fakeHost('AAAA-BBBB');
+    const relay = await fakeRelay(other).catch((error: unknown) => {
+      other.stop();
+      throw error;
+    });
+    try {
+      // The relay refuses a pairing URL with more than the nameplate, and
+      // every request without a fresh proof of the device's key.
+      const paired = await pair({ relay: relay.url, code: 'aaaa-bbbb', deviceName: 'Relay laptop' });
+      expect(paired.host.id).toBe('h-fake');
+
+      const { dialer, drop } = droppable();
+      const client = await connect({ relay: relay.url, credentials: paired, dialer });
+      clients.push(client);
+      const h = client.hosts()[0]!;
+      const session = await (await fakeAgent(h)).session();
+      const events = await drain(session.prompt('run: echo hi'), async (event) => {
+        if (event.type === 'permission') {
+          // A new connection needs a new challenge: nonces work once.
+          const back = reconnected(h);
+          drop();
+          await back;
+          await event.request.allowOnce();
+        }
+      });
+      expect(events.find((e) => e.type === 'tool_result')).toMatchObject({ output: 'hi', tool: { status: 'completed' } });
+      expect(events.at(-1)).toEqual({ type: 'done', stopReason: 'end_turn' });
+
+      const metrics = await relay.metrics();
+      expect(metrics.oal_relay_auth_failures_total).toBe(0);
+      expect(metrics.oal_relay_pairing_connections_total).toBe(1);
+      expect(metrics.oal_relay_client_connections_total).toBe(3); // pair, connect, reconnect
+      expect(other.violations).toEqual([]);
+    } finally {
+      for (const client of clients.splice(0)) client.close();
+      relay.stop();
+      other.stop();
+    }
+  });
+
+  it("refuses a relay that isn't encrypted", async () => {
+    const error = await pair({ relay: 'ws://relay.example.com', code: host.code, deviceName: 'x' }).catch((e: unknown) => e);
+    expect((error as OALError).code).toBe('invalid_params');
   });
 });

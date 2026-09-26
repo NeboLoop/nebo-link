@@ -12,7 +12,9 @@
 //! | `GET /health`, `GET /metrics` | anyone | liveness; counters without identities |
 //!
 //! Every `/oal/*` request except the challenge carries `key`, `nonce` and
-//! `proof` query parameters ([`crate::auth`]).
+//! `proof` query parameters ([`crate::auth`]). The challenge and presence
+//! answers are readable from a web page on any origin, so a browser client
+//! can reach the relay.
 
 mod admin;
 mod metrics;
@@ -31,7 +33,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper::header::{CONTENT_TYPE, HeaderValue};
+use hyper::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use serde::Serialize;
@@ -323,15 +325,15 @@ async fn route(state: Arc<State>, peer: SocketAddr, req: Request<Incoming>) -> R
             );
             resp
         }
-        (&Method::GET, ["oal", "challenge"]) => json(
+        (&Method::GET, ["oal", "challenge"]) => any_origin(json(
             StatusCode::OK,
             &serde_json::json!({
                 "nonce": state.nonces.issue(),
                 "relayKey": state.relay_key,
                 "expiresIn": nonces::NONCE_TTL,
             }),
-        ),
-        (&Method::GET, ["oal", "presence"]) => relay::presence(&state, &req),
+        )),
+        (&Method::GET, ["oal", "presence"]) => any_origin(relay::presence(&state, &req)),
         (&Method::GET, ["oal", "tunnel", id]) => {
             let id = (*id).to_owned();
             relay::tunnel(state, req, id).await
@@ -347,6 +349,15 @@ async fn route(state: Arc<State>, peer: SocketAddr, req: Request<Incoming>) -> R
         (_, ["admin", ..]) => admin::route(state, req, &segments[1..].join("/")).await,
         _ => refuse(StatusCode::NOT_FOUND, "not_found", "There's nothing here."),
     }
+}
+
+/// Lets a web page on any origin read `resp`. For the answers a browser
+/// client fetches (the challenge, presence): they carry no cookies, and what
+/// authenticates the caller rides in the query string.
+fn any_origin(mut resp: Resp) -> Resp {
+    resp.headers_mut()
+        .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    resp
 }
 
 pub(crate) fn json(status: StatusCode, body: &impl Serialize) -> Resp {
