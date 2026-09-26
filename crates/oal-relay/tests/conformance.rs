@@ -83,6 +83,9 @@ async fn every_example_passes_through_the_relay() {
             ("code".into(), json!(code)),
             ("agent".into(), json!(fake_host::AGENT)),
         ],
+        e2e: false,
+        relay: false,
+        tls_fingerprint: None,
     };
     let examples: Vec<_> = spec::EXAMPLES.iter().collect();
     let outcomes = transcript::run(&target, &examples).await;

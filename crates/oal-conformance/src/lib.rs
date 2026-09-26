@@ -11,6 +11,7 @@
 
 pub mod fake_agent;
 pub mod fake_host;
+pub mod pinned;
 pub mod schema;
 pub mod spec;
 pub mod transcript;

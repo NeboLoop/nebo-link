@@ -26,21 +26,40 @@
 //! may arrive in any order relative to each other and to agent channels,
 //! except where a step says `"ordered": true`.
 //! Every host-channel frame received is checked against `spec/schemas/`.
+//!
+//! With end-to-end encryption ([`Target::e2e`], spec 17), a `pair`
+//! connection runs the pairing handshake (CPace, then Noise) with the code
+//! before its `host/pair` goes inside it, with the device's own static key
+//! as `device.publicKey`; a `host` connection runs the Noise IK handshake
+//! where the example sends `host/hello` (the handshake replaces it), and the
+//! suite checks the handshake's answer, with `host/info`, against the
+//! example's expected `host/hello` result. Through a relay
+//! ([`Target::relay`]) every connection proves the device's key to it.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use std::io;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, ready};
+
+use futures::{Sink, Stream};
+use oal_secure::{KeyStore, PairingCode, PublicKey, Side};
+
 use crate::schema::Schemas;
 use crate::spec::Example;
 
 const WAIT: Duration = Duration::from_secs(5);
+/// The id of the `host/info` the suite asks after an encrypted handshake.
+const INFO_ID: &str = "oal-conformance-info";
 
 /// Where and how to reach the host under test.
 #[derive(Debug, Clone)]
@@ -53,6 +72,15 @@ pub struct Target {
     pub headers: Vec<(String, String)>,
     /// Values known before the run: `code`, `agent`.
     pub known: Vec<(String, Value)>,
+    /// Every connection end-to-end encrypted (spec 17).
+    pub e2e: bool,
+    /// `url` is a relay's base URL (`https://relay.example.com`): connections
+    /// go to `/oal/pair/<nameplate>` and `/oal/hosts/<hostId>`, each proving
+    /// the device's key to the relay.
+    pub relay: bool,
+    /// The host's LAN certificate fingerprint (`tlsFingerprint`): a `wss://`
+    /// connection to the host itself accepts only that certificate.
+    pub tls_fingerprint: Option<String>,
 }
 
 pub struct Outcome {
@@ -67,6 +95,17 @@ pub async fn run(target: &Target, examples: &[&'static Example]) -> Vec<Outcome>
     let schemas = Schemas::load();
     let mut kept: HashMap<String, Value> = target.known.iter().cloned().collect();
     let mut outcomes = Vec::new();
+    // This run's device key and the host it pairs with.
+    let dir = std::env::temp_dir().join(format!("oal-conformance-{}", crate::now().replace(':', "")  + &random_suffix()));
+    let store = match KeyStore::open(&dir) {
+        Ok(store) => store,
+        Err(e) => {
+            return vec![Outcome {
+                example: "pair",
+                result: Err(format!("could not make this run's device key: {e}")),
+            }];
+        }
+    };
     for example in examples {
         let mut captures = kept.clone();
         let result = Run {
@@ -74,6 +113,7 @@ pub async fn run(target: &Target, examples: &[&'static Example]) -> Vec<Outcome>
             schemas: &schemas,
             captures: &mut captures,
             conns: HashMap::new(),
+            store: &store,
         }
         .example(example)
         .await;
@@ -99,13 +139,43 @@ pub async fn run(target: &Target, examples: &[&'static Example]) -> Vec<Outcome>
             break;
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
     outcomes
+}
+
+fn random_suffix() -> String {
+    let mut bytes = [0u8; 6];
+    let _ = getrandom::getrandom(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// A connection's transport.
+enum Wire {
+    /// OAL 0.1: one JSON text message per frame.
+    Plain(Socket),
+    /// Encrypted, before its handshake: the next `host/pair` (`pairing`) or
+    /// `host/hello` runs it.
+    Opening { socket: Socket, pairing: bool },
+    /// Encrypted: frames are Noise messages.
+    Secure {
+        session: oal_secure::Session<WsTransport>,
+        closed: Arc<Mutex<Option<u16>>>,
+    },
+    /// Gone, while the step that took it runs.
+    Taken,
+}
+
+/// What a connection gave next.
+enum Received {
+    Frame(Value),
+    Closed(Option<u16>),
+    Failed(String),
+}
+
 struct Conn {
-    socket: Socket,
+    wire: Wire,
     /// Frames received and not yet matched, with their arrival number.
     buffer: VecDeque<(u64, Value)>,
     received: u64,
@@ -120,6 +190,7 @@ struct Run<'a> {
     schemas: &'a Schemas,
     captures: &'a mut HashMap<String, Value>,
     conns: HashMap<String, Conn>,
+    store: &'a KeyStore,
 }
 
 impl Run<'_> {
@@ -135,29 +206,22 @@ impl Run<'_> {
                 .map_err(|e| format!("step {} ({conn}: {note}): {e}", n + 1))?;
         }
         for (_, mut conn) in self.conns.drain() {
-            let _ = conn.socket.close(None).await;
+            conn.close().await;
         }
         Ok(())
     }
 
     async fn step(&mut self, name: &str, step: &Value) -> Result<(), String> {
         if let Some(kind) = step["connect"].as_str() {
-            let url = match (kind, &self.target.pair_url) {
-                ("pair", Some(base)) => {
-                    let code = self
-                        .captures
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    format!("{}/{}", base.trim_end_matches('/'), crate::nameplate(code))
-                }
-                _ => self.target.url.clone(),
+            let socket = self.open(kind).await?;
+            let wire = match self.target.e2e {
+                true => Wire::Opening { socket, pairing: kind == "pair" },
+                false => Wire::Plain(socket),
             };
-            let socket = connect(&url, &self.target.headers).await?;
             self.conns.insert(
                 name.to_owned(),
                 Conn {
-                    socket,
+                    wire,
                     buffer: VecDeque::new(),
                     received: 0,
                     last_matched: 0,
@@ -179,18 +243,43 @@ impl Run<'_> {
             ) {
                 conn.sent.insert(id.to_string(), method.to_owned());
             }
-            return conn
-                .socket
-                .send(Message::text(frame.to_string()))
-                .await
-                .map_err(|e| format!("send failed: {e}"));
+            return match std::mem::replace(&mut conn.wire, Wire::Taken) {
+                Wire::Opening { socket, pairing } => {
+                    let store = self.store;
+                    let schemas = self.schemas;
+                    let code = self.captures.get("code").and_then(Value::as_str).unwrap_or("").to_owned();
+                    let host_id = self.captures.get("hostId").and_then(Value::as_str).unwrap_or("").to_owned();
+                    match (pairing, frame["method"].as_str()) {
+                        (true, Some("host/pair")) => pair_encrypted(conn, schemas, store, socket, &code, frame).await,
+                        (false, Some("host/hello")) => hello_encrypted(conn, schemas, store, socket, &host_id, frame).await,
+                        _ => Err("an encrypted connection starts with host/pair (pairing) or host/hello".into()),
+                    }
+                }
+                Wire::Plain(mut socket) => {
+                    let sent = socket
+                        .send(Message::text(frame.to_string()))
+                        .await
+                        .map_err(|e| format!("send failed: {e}"));
+                    conn.wire = Wire::Plain(socket);
+                    sent
+                }
+                Wire::Secure { mut session, closed } => {
+                    let sent = session
+                        .send(frame.to_string().as_bytes())
+                        .await
+                        .map_err(|e| format!("send failed: {e}"));
+                    conn.wire = Wire::Secure { session, closed };
+                    sent
+                }
+                Wire::Taken => Err("the connection is gone".into()),
+            };
         }
         if let Some(expected) = step.get("expect") {
             let ordered = step["ordered"] == true;
             return expect(conn, self.schemas, expected, ordered, self.captures).await;
         }
         if step["close"] == true {
-            let _ = conn.socket.close(None).await;
+            conn.close().await;
             self.conns.remove(name);
             return Ok(());
         }
@@ -201,7 +290,245 @@ impl Run<'_> {
     }
 }
 
-async fn connect(url: &str, headers: &[(String, String)]) -> Result<Socket, String> {
+impl Run<'_> {
+    /// Opens a connection of `kind` (`pair` or `host`).
+    async fn open(&self, kind: &str) -> Result<Socket, String> {
+        let code = self.captures.get("code").and_then(Value::as_str).unwrap_or("");
+        if self.target.relay {
+            let key = oal_relay::Keypair::from_secret(*self.store.secret());
+            let relay = oal_relay::RelayClient::new(&self.target.url, key).map_err(|e| e.to_string())?;
+            return match kind {
+                "pair" => relay.pair(&crate::nameplate(code)).await.map(|(ws, _)| ws),
+                _ => {
+                    let host_id = self.captures.get("hostId").and_then(Value::as_str).unwrap_or("");
+                    relay.connect(host_id).await
+                }
+            }
+            .map_err(|e| format!("the relay refused the connection: {e}"));
+        }
+        let url = match (kind, &self.target.pair_url) {
+            ("pair", Some(base)) => format!("{}/{}", base.trim_end_matches('/'), crate::nameplate(code)),
+            _ => self.target.url.clone(),
+        };
+        connect(&url, &self.target.headers, self.target.tls_fingerprint.as_deref()).await
+    }
+}
+
+impl Conn {
+    async fn close(&mut self) {
+        match std::mem::replace(&mut self.wire, Wire::Taken) {
+            Wire::Plain(mut socket) | Wire::Opening { mut socket, .. } => {
+                let _ = socket.close(None).await;
+            }
+            Wire::Secure { mut session, .. } => {
+                let _ = session.close().await;
+            }
+            Wire::Taken => {}
+        }
+    }
+
+    /// The next frame, close or failure.
+    async fn next(&mut self) -> Received {
+        match &mut self.wire {
+            Wire::Plain(socket) | Wire::Opening { socket, .. } => loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        return match serde_json::from_str(&text) {
+                            Ok(frame) => Received::Frame(frame),
+                            Err(e) => Received::Failed(format!("the host sent something that isn't JSON ({e}): {text}")),
+                        };
+                    }
+                    Some(Ok(Message::Close(close))) => {
+                        return Received::Closed(close.map(|f| u16::from(f.code)));
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Received::Failed(format!("the connection failed: {e}")),
+                    None => return Received::Closed(None),
+                }
+            },
+            Wire::Secure { session, closed } => match session.recv().await {
+                Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+                    Ok(frame) => Received::Frame(frame),
+                    Err(e) => Received::Failed(format!("the host sent a frame that isn't JSON ({e})")),
+                },
+                Ok(None) => Received::Closed(*closed.lock().expect("close code")),
+                Err(e) => match *closed.lock().expect("close code") {
+                    Some(code) => Received::Closed(Some(code)),
+                    None => Received::Failed(format!("the encrypted session failed: {e}")),
+                },
+            },
+            Wire::Taken => Received::Failed("the connection is gone".into()),
+        }
+    }
+
+    /// Takes a frame the host sent: checked against the schemas and
+    /// buffered for the steps that expect it.
+    fn take(&mut self, schemas: &Schemas, frame: Value) -> Result<(), String> {
+        let answered = frame
+            .get("id")
+            .and_then(|id| self.sent.get(&id.to_string()))
+            .map(String::as_str);
+        schemas
+            .check(&frame, answered)
+            .map_err(|e| format!("the host sent {frame}, which {e}"))?;
+        self.received += 1;
+        self.buffer.push_back((self.received, frame));
+        Ok(())
+    }
+
+    /// Frames until the answer to request `id`, the others buffered.
+    async fn answer_to(&mut self, schemas: &Schemas, id: &Value) -> Result<Value, String> {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let received = tokio::time::timeout_at(deadline, self.next())
+                .await
+                .map_err(|_| format!("timed out waiting for the answer to {id}"))?;
+            match received {
+                Received::Frame(frame) if frame.get("agent").is_none() && frame.get("id") == Some(id) && frame.get("method").is_none() => {
+                    return Ok(frame);
+                }
+                Received::Frame(frame) => self.take(schemas, frame)?,
+                Received::Closed(code) => {
+                    return Err(format!("the host closed the connection ({code:?}) before answering {id}"));
+                }
+                Received::Failed(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// Pairs over an encrypted pairing connection (spec 17.5), then sends
+/// `host/pair` inside it with the device's own key.
+async fn pair_encrypted(conn: &mut Conn, schemas: &Schemas, store: &KeyStore, socket: Socket, code: &str, mut frame: Value) -> Result<(), String> {
+    let code = PairingCode::parse(code).map_err(|e| format!("the code isn't valid: {e}"))?;
+    let closed = Arc::new(Mutex::new(None));
+    let transport = WsTransport { socket, closed: closed.clone() };
+    let mut pairing = oal_secure::pair(transport, &code, store, Side::Client)
+        .await
+        .map_err(|e| format!("the pairing handshake failed ({e}), close {:?}", closed.lock().expect("close code")))?;
+    frame["params"]["device"]["publicKey"] = json_key(&store.public_key());
+    pairing
+        .send(frame.to_string().as_bytes())
+        .await
+        .map_err(|e| format!("send failed: {e}"))?;
+    let id = frame["id"].clone();
+    let answer = loop {
+        let received = tokio::time::timeout(WAIT, pairing.recv())
+            .await
+            .map_err(|_| "timed out waiting for the host/pair answer".to_owned())?;
+        match received {
+            Ok(Some(bytes)) => {
+                let answer: Value = serde_json::from_slice(&bytes).map_err(|e| format!("the host/pair answer isn't JSON: {e}"))?;
+                if answer.get("id") == Some(&id) {
+                    break answer;
+                }
+                conn.take(schemas, answer)?;
+            }
+            Ok(None) | Err(_) => {
+                return Err(format!("the host closed the pairing ({:?}) before answering host/pair", closed.lock().expect("close code")));
+            }
+        }
+    };
+    let result = &answer["result"];
+    let host = &result["info"]["host"];
+    let session = match (host["publicKey"].as_str().and_then(|k| k.parse::<PublicKey>().ok()), host["id"].as_str(), result["device"]["id"].as_str()) {
+        (Some(key), Some(host_id), Some(device_id)) => pairing
+            .finish(&key, host_id, host["name"].as_str().unwrap_or(""), device_id)
+            .map_err(|e| format!("the host named a key the handshake didn't prove: {e}"))?,
+        // A refusal: taken as it is, and the host closes.
+        _ => {
+            conn.take(schemas, answer)?;
+            return Ok(());
+        }
+    };
+    conn.wire = Wire::Secure { session, closed };
+    conn.take(schemas, answer)
+}
+
+/// Opens an encrypted session where the example sends `host/hello` (spec
+/// 17.2): the handshake carries the hello's versions and client, and its
+/// answer (with `host/info`) stands for `host/hello`'s result.
+async fn hello_encrypted(conn: &mut Conn, schemas: &Schemas, store: &KeyStore, socket: Socket, host_id: &str, frame: Value) -> Result<(), String> {
+    let host = store
+        .peers()
+        .into_iter()
+        .find(|p| p.side == Side::Host && p.id == host_id)
+        .ok_or_else(|| format!("this run hasn't paired with {host_id}"))?;
+    let closed = Arc::new(Mutex::new(None));
+    let transport = WsTransport { socket, closed: closed.clone() };
+    let hello = json!({ "protocol": frame["params"]["protocol"], "client": frame["params"]["client"] });
+    let (session, reply) = oal_secure::connect(transport, store, &host, hello.to_string().as_bytes())
+        .await
+        .map_err(|e| format!("the encrypted handshake failed ({e}), close {:?}", closed.lock().expect("close code")))?;
+    let reply: Value = serde_json::from_slice(&reply).map_err(|e| format!("the handshake's answer isn't JSON: {e}"))?;
+    let id = frame["id"].clone();
+    conn.wire = Wire::Secure { session, closed };
+    if let Some(error) = reply.get("error") {
+        return conn.take(schemas, json!({ "jsonrpc": "2.0", "id": id, "error": error }));
+    }
+    let info_id = json!(INFO_ID);
+    conn.sent.insert(info_id.to_string(), "host/info".into());
+    if let Wire::Secure { session, .. } = &mut conn.wire {
+        session
+            .send(json!({ "jsonrpc": "2.0", "id": INFO_ID, "method": "host/info", "params": {} }).to_string().as_bytes())
+            .await
+            .map_err(|e| format!("send failed: {e}"))?;
+    }
+    let info = conn.answer_to(schemas, &info_id).await?;
+    conn.take(schemas, json!({ "jsonrpc": "2.0", "id": id, "result": {
+        "protocol": reply["protocol"], "device": reply["device"], "info": info["result"],
+    } }))
+}
+
+fn json_key(key: &PublicKey) -> Value {
+    Value::String(key.to_string())
+}
+
+/// A WebSocket as `oal_secure`'s transport, noting the close code the host
+/// ended it with.
+struct WsTransport {
+    socket: Socket,
+    closed: Arc<Mutex<Option<u16>>>,
+}
+
+impl Stream for WsTransport {
+    type Item = io::Result<Vec<u8>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            return Poll::Ready(match ready!(Pin::new(&mut self.socket).poll_next(cx)) {
+                Some(Ok(Message::Binary(b))) => Some(Ok(b.to_vec())),
+                Some(Ok(Message::Text(_))) => Some(Err(io::Error::new(io::ErrorKind::InvalidData, "a text message on an encrypted connection"))),
+                Some(Ok(Message::Close(frame))) => {
+                    *self.closed.lock().expect("close code") = frame.map(|f| u16::from(f.code));
+                    None
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => Some(Err(io::Error::other(e))),
+                None => None,
+            });
+        }
+    }
+}
+
+impl Sink<Vec<u8>> for WsTransport {
+    type Error = io::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_ready(cx).map_err(io::Error::other)
+    }
+    fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> io::Result<()> {
+        Pin::new(&mut self.socket).start_send(Message::Binary(item.into())).map_err(io::Error::other)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_flush(cx).map_err(io::Error::other)
+    }
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket).poll_close(cx).map_err(io::Error::other)
+    }
+}
+
+async fn connect(url: &str, headers: &[(String, String)], fingerprint: Option<&str>) -> Result<Socket, String> {
     let mut request = url
         .into_client_request()
         .map_err(|e| format!("bad URL {url}: {e}"))?;
@@ -219,7 +546,10 @@ async fn connect(url: &str, headers: &[(String, String)]) -> Result<Socket, Stri
                 .map_err(|_| format!("bad header value for {value}"))?,
         );
     }
-    let (socket, _) = tokio_tungstenite::connect_async(request)
+    let connector = fingerprint.map(|fingerprint| {
+        tokio_tungstenite::Connector::Rustls(Arc::new(crate::pinned::config(fingerprint)))
+    });
+    let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
         .await
         .map_err(|e| format!("could not connect to {url}: {e}"))?;
     Ok(socket)
@@ -284,7 +614,7 @@ async fn expect(
                 (Some(_), false) => return Err(format!("expected {expected}, got {frame}")),
             }
         }
-        let received = tokio::time::timeout_at(deadline, conn.socket.next()).await;
+        let received = tokio::time::timeout_at(deadline, conn.next()).await;
         match received {
             Err(_) => {
                 let seen: Vec<String> = conn.buffer.iter().map(|(_, f)| f.to_string()).collect();
@@ -293,32 +623,13 @@ async fn expect(
                     seen.join(", ")
                 ));
             }
-            Ok(Some(Ok(Message::Text(text)))) => {
-                let frame: Value = serde_json::from_str(&text).map_err(|e| {
-                    format!("the host sent something that isn't JSON ({e}): {text}")
-                })?;
-                let answered = frame
-                    .get("id")
-                    .and_then(|id| conn.sent.get(&id.to_string()))
-                    .map(String::as_str);
-                schemas
-                    .check(&frame, answered)
-                    .map_err(|e| format!("the host sent {frame}, which {e}"))?;
-                conn.received += 1;
-                conn.buffer.push_back((conn.received, frame));
-            }
-            Ok(Some(Ok(Message::Close(close)))) => {
+            Ok(Received::Frame(frame)) => conn.take(schemas, frame)?,
+            Ok(Received::Closed(close)) => {
                 return Err(format!(
                     "the host closed the connection ({close:?}) while we waited for {expected}"
                 ));
             }
-            Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(e))) => return Err(format!("the connection failed: {e}")),
-            Ok(None) => {
-                return Err(format!(
-                    "the connection ended while we waited for {expected}"
-                ));
-            }
+            Ok(Received::Failed(e)) => return Err(e),
         }
     }
 }
@@ -326,26 +637,15 @@ async fn expect(
 async fn expect_close(conn: &mut Conn, code: u64) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {
-        match tokio::time::timeout_at(deadline, conn.socket.next()).await {
+        match tokio::time::timeout_at(deadline, conn.next()).await {
             Err(_) => return Err(format!("the host did not close the connection with {code}")),
-            Ok(Some(Ok(Message::Close(Some(frame)))))
-                if u64::from(u16::from(frame.code)) == code =>
-            {
-                return Ok(());
-            }
-            Ok(Some(Ok(Message::Close(other)))) => {
+            Ok(Received::Closed(Some(closed))) if u64::from(closed) == code => return Ok(()),
+            Ok(Received::Closed(other)) => {
                 return Err(format!("the host closed with {other:?}, expected {code}"));
             }
-            Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(e))) => {
-                return Err(format!(
-                    "the connection failed before closing with {code}: {e}"
-                ));
-            }
-            Ok(None) => {
-                return Err(format!(
-                    "the connection ended without a close frame; expected {code}"
-                ));
+            Ok(Received::Frame(_)) => {}
+            Ok(Received::Failed(e)) => {
+                return Err(format!("the connection failed before closing with {code}: {e}"));
             }
         }
     }

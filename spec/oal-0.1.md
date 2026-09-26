@@ -427,7 +427,7 @@ Each device and each host has an X25519 static key pair. Public keys are exchang
 - Pattern `Noise_IK_25519_ChaChaPoly_BLAKE2s`. The client is the initiator and already knows the host's static key.
 - Prologue: the UTF-8 bytes of `OAL-E2E/1 ` followed by the host id.
 - After the WebSocket upgrade, message 1 (client to host, one binary WebSocket message) is `-> e, es, s, ss`. Its payload is the JSON `{"protocol":{"min":…,"max":…},"client":{…}}`.
-- Message 2 (host to client, one binary message) is `<- e, ee, se`. Its payload is the JSON `{"protocol":"<selected>","device":{"id":…}}`.
+- Message 2 (host to client, one binary message) is `<- e, ee, se`. Its payload is the JSON `{"protocol":"<selected>","device":{"id":…,"name":…}}`: what `host/hello` answers, less `info`, which the client asks with `host/info`. If the client's range and the host's have no version in common, the payload is `{"error":{…}}`, the `version_mismatch` error of section 13, and the host then closes with 4002.
 - The host authenticates the device by its static key, which must belong to a paired device. `host/hello` is not sent. The token is not used on encrypted connections.
 - A host that requires encryption closes a connection whose first message is text, with 4001.
 - A message 1 that no static key of the host opens, or whose static key is not a paired device, closes the connection with 4001. A revoked device's key is not a paired device.
@@ -597,6 +597,7 @@ Agent channels: ACP v1, unchanged. The host serves `initialize`, `session/new`, 
 
 ## Changes
 
+- **0.1, amended 2026-09-26, second time**: message 2 of the encrypted handshake carries the device's name, or the `version_mismatch` error before a 4002 close (section 17.2). Nebo Link implements section 17 and requires it on every connection.
 - **0.1, amended 2026-09-26** (still a draft; implementation work on the client SDKs found these gaps):
   - `session/load` and `session/resume` re-send the session's most recent `host/turn` after the replay, including the `ended` notice of a turn that finished while the client was away (sections 8, 9, 12).
   - `host/turn` `ended` comes after the turn's last `session/update` and after the `session/prompt` response. This is the one ordering guarantee across channels (sections 4.2, 9).

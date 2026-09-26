@@ -41,6 +41,21 @@ enum Command {
         /// An upgrade header, `Name: value` (a relay's Authorization). Repeatable.
         #[arg(long = "header")]
         headers: Vec<String>,
+        /// Every connection end-to-end encrypted (spec 17): pairing with CPace
+        /// and Noise, sessions with Noise IK. A host that requires encryption
+        /// needs it.
+        #[arg(long)]
+        e2e: bool,
+        /// `URL` is a relay's base URL (`https://relay.example.com`): the suite
+        /// pairs through `/oal/pair/<nameplate>` and connects through
+        /// `/oal/hosts/<hostId>`, proving its device key on each connection.
+        #[arg(long, conflicts_with = "pair_url")]
+        relay: bool,
+        /// The host's LAN certificate fingerprint (`host/info`
+        /// `tlsFingerprint`): a `wss://` connection to the host accepts only
+        /// that certificate.
+        #[arg(long)]
+        tls_fingerprint: Option<String>,
         /// Run only these examples (`pair` and `agents` always run first). Repeatable.
         #[arg(long = "only")]
         only: Vec<String>,
@@ -70,6 +85,9 @@ async fn main() -> ExitCode {
             pair_url,
             headers,
             only,
+            e2e,
+            relay,
+            tls_fingerprint,
         } => {
             let mut parsed = Vec::new();
             for header in headers {
@@ -107,6 +125,9 @@ async fn main() -> ExitCode {
                     ("code".into(), Value::String(code)),
                     ("agent".into(), Value::String(agent)),
                 ],
+                e2e,
+                relay,
+                tls_fingerprint,
             };
             let outcomes = transcript::run(&target, &examples).await;
             let failed = outcomes.iter().filter(|o| o.result.is_err()).count();

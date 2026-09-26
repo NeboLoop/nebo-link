@@ -614,6 +614,14 @@ impl Host {
         })
     }
 
+    /// Starts `agent`'s runtime if it isn't running (a coding agent's
+    /// process), so what the host says about it (its capabilities, whether
+    /// it answers) is current. The error says why it can't.
+    pub async fn ready_agent(&self, agent: &str) -> Result<(), String> {
+        let (member, _) = self.locate(agent).await.map_err(|e| e.message)?;
+        member.backend.ready().await
+    }
+
     /// Whether `agent`'s runtime keeps sessions that change outside the host
     /// ([`crate::backend::Backend::shared_sessions`]).
     pub async fn shared_sessions(&self, agent: &str) -> bool {

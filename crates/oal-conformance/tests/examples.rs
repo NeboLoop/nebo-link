@@ -23,6 +23,9 @@ async fn target() -> Target {
             ("code".into(), json!("K7QM-3XRD")),
             ("agent".into(), json!(fake_host::AGENT)),
         ],
+        e2e: false,
+        relay: false,
+        tls_fingerprint: None,
     }
 }
 
