@@ -16,6 +16,7 @@
 //! an item in the owner's hub inbox (`POST /api/v1/bots/self/inbox`),
 //! resolved in all three places whichever one answers it.
 
+pub mod acp;
 pub mod backend;
 pub mod hermes;
 pub mod openclaw;

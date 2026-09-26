@@ -2,11 +2,11 @@
 //! chat contract, and unlinking. Each is one function the CLI and the
 //! running service share.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nebo_runtimes::{
-    ApiServer, Change, ChangeKind, Environment, Installation, Journal, NeboaiModels, ProxyAccess, Runtime,
+    acp, ApiServer, Change, ChangeKind, Environment, Installation, Journal, NeboaiModels, ProxyAccess, Runtime,
     RuntimeCommand, Service, detect, openclaw,
 };
 use tokio::sync::watch;
@@ -19,7 +19,7 @@ use crate::install::{self, runtime_key, runtime_name};
 use crate::janus::{self, Janus};
 use crate::proxy;
 use crate::service;
-use crate::state::{BotDir, Link, ModelsEndpoint, Removed, Root, write_json};
+use crate::state::{AcpLink, BotDir, Link, ModelsEndpoint, Removed, Root, write_json};
 use crate::supervise::{self, Supervisor};
 
 /// The bot's purpose as the hub records it.
@@ -41,18 +41,41 @@ pub struct Paired {
 
 /// Pairs the local runtime with the owner's NeboAI account using `code`,
 /// opens it to the link, and installs and starts the service.
+///
+/// An ACP agent is linked when named (`runtime`), or by its command
+/// (`acp_command`, any agent that speaks ACP); `workdir` is the folder its
+/// conversations work in, [`default_workdir`] when not given. It is started
+/// once before the code is spent, so an agent that can't run is refused
+/// while the code is still good.
 pub async fn pair(
     root: &Root,
     code: &str,
     runtime: Option<Runtime>,
+    acp_command: Option<String>,
+    workdir: Option<PathBuf>,
     name: Option<String>,
     exe: PathBuf,
 ) -> Result<Paired> {
     let linked: Vec<PathBuf> = root.links()?.into_iter().map(|l| l.home).collect();
-    let install = install::choose(detect(&Environment::current()), runtime, &linked)?;
+    let env = Environment::current();
+    let (installs, runtime) = match &acp_command {
+        Some(command) => (
+            vec![acp::custom(command, &env).map_err(Error::Message)?],
+            Some(Runtime::Acp(acp::Agent::Other)),
+        ),
+        None => (detect(&env), runtime),
+    };
+    let install = install::choose(installs, runtime, &linked)?;
+    let acp_link = match install.runtime.acp() {
+        Some(agent) => Some(acp_link(agent, &install, workdir, &env).await?),
+        None => None,
+    };
     let endpoints = Endpoints::from_env();
     let bot_id = uuid::Uuid::new_v4().to_string();
-    let name = name.unwrap_or_else(|| default_name(&host_label(), install.runtime));
+    let name = name.unwrap_or_else(|| match &acp_link {
+        Some(acp) => default_name_as(&host_label(), &acp.name),
+        None => default_name(&host_label(), install.runtime),
+    });
 
     let resp = nebo_comm::api::redeem_code(
         &endpoints.api,
@@ -83,6 +106,7 @@ pub async fn pair(
         },
         api_server_key: secret(),
         services: Vec::new(),
+        acp: acp_link,
     };
     dir.save(&link)?;
     // Linked again: what `status` said about its removal no longer applies.
@@ -92,6 +116,17 @@ pub async fn pair(
 
     let finish = async {
         Credentials::open(&dir).save(&resp.connection_token)?;
+        if link.acp.is_some() {
+            // Nothing of the agent's to change or keep running: the
+            // service starts it and keeps it up.
+            service::install(&service::Spec {
+                bot_id: bot_id.clone(),
+                exe,
+                home: root_override(root),
+                path: std::env::var("PATH").ok(),
+            })?;
+            return Ok::<_, Error>((Vec::new(), None));
+        }
         let supervisor = Supervisor::new(&dir, install.runtime, install.processes.clone());
         let running = supervisor.running().await;
         let mut journal = Journal::open(dir.journal_file())?;
@@ -157,19 +192,39 @@ pub fn apply_api_server(journal: &mut Journal, install: &Installation, link: &Li
 }
 
 /// The chat contract for `link`: Hermes' API server turned on with the
-/// link's key (journaled, restarted when that changed), or OpenClaw's
-/// gateway reached as the link's own operator socket, and a backend on it.
+/// link's key (journaled, restarted when that changed), OpenClaw's gateway
+/// reached as the link's own operator socket, or an ACP agent run by its
+/// saved command, and a backend on it. `install` is `None` for an ACP agent.
 /// `Err` says why the contract can't be served for this install, for
 /// `nebo-link status`; nothing is then announced.
 pub async fn chat(
     dir: &BotDir,
     link: &mut Link,
-    install: &Installation,
+    install: Option<&Installation>,
     token: watch::Receiver<String>,
 ) -> std::result::Result<Arc<Contract>, String> {
+    let no_install = || format!("{} was not found on this computer", runtime_name(link.runtime));
     let backend: Arc<dyn contract::backend::Backend> = match link.runtime {
-        Runtime::Hermes => Arc::new(hermes_backend(dir, link, install).await?),
+        Runtime::Acp(agent) => {
+            let acp = link
+                .acp
+                .as_ref()
+                .ok_or_else(|| format!("{} has no saved command; link it again", runtime_name(link.runtime)))?;
+            Arc::new(contract::acp::Acp::new(contract::acp::Settings {
+                agent,
+                name: acp.name.clone(),
+                command: acp.command(),
+                workdir: acp.workdir.clone(),
+                log: dir.runtime_log(runtime_key(link.runtime)),
+                chats_file: dir.acp_chats_file(),
+            }))
+        }
+        Runtime::Hermes => {
+            let install = install.ok_or_else(no_install)?;
+            Arc::new(hermes_backend(dir, link, install).await?)
+        }
         Runtime::Openclaw => {
+            let install = install.ok_or_else(no_install)?;
             let gateway = install::ui_addr(install)
                 .ok_or_else(|| "OpenClaw has no gateway to reach".to_owned())?;
             Arc::new(contract::openclaw::Openclaw::new(
@@ -253,6 +308,12 @@ pub struct ModelsChange {
 /// Points the runtime's models at NeboAI (`enabled`) or restores the
 /// provider it had before.
 pub async fn set_models(dir: &BotDir, link: &mut Link, janus: &Janus, enabled: bool) -> Result<ModelsChange> {
+    if link.runtime.acp().is_some() {
+        return Err(Error::Message(format!(
+            "{} runs on its own sign-in; NeboAI models are for OpenClaw and Hermes.",
+            runtime_name(link.runtime)
+        )));
+    }
     let install = install::find(link)?;
     let mut journal = Journal::open(dir.journal_file())?;
     let outcome = if enabled {
@@ -324,8 +385,15 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
         not_restored: None,
         not_restarted: None,
     };
-    match install::find(link) {
-        Ok(install) => {
+    // An ACP agent had nothing changed and nothing started outside the
+    // service, which is removed below.
+    let found = match link.runtime.acp() {
+        Some(_) => None,
+        None => Some(install::find(link)),
+    };
+    match found {
+        None => {}
+        Some(Ok(install)) => {
             // What the link started or installed goes first, so nothing of
             // the link's is running on the config being restored.
             unlinked.released = supervise::release(&dir, link.runtime, &link.services, &install.processes).await;
@@ -352,7 +420,7 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
                 unlinked.not_restarted = Some(e.to_string());
             }
         }
-        Err(e) => unlinked.not_restored = Some(e.to_string()),
+        Some(Err(e)) => unlinked.not_restored = Some(e.to_string()),
     }
     Credentials::open(&dir).forget()?;
     dir.remove()?;
@@ -374,10 +442,102 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
 
 /// "studio-mac · OpenClaw".
 pub fn default_name(host: &str, runtime: Runtime) -> String {
+    default_name_as(host, runtime_name(runtime))
+}
+
+/// "studio-mac · Claude Code": the machine's name and the agent's.
+fn default_name_as(host: &str, agent: &str) -> String {
     match host.trim() {
-        "" => runtime_name(runtime).to_string(),
-        host => format!("{host} · {}", runtime_name(runtime)),
+        "" => agent.to_string(),
+        host => format!("{host} · {agent}"),
     }
+}
+
+/// Where an ACP agent works when the owner names no folder:
+/// `~/NeboAI/<agent>`, created at pairing. Never the whole disk.
+pub fn default_workdir(home: &Path, agent: &str) -> PathBuf {
+    home.join("NeboAI").join(agent)
+}
+
+/// How long pairing waits for an ACP agent's first start (`npx` may be
+/// fetching its adapter).
+const ACP_FIRST_START: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The settings an ACP agent is linked with: its working folder (made if
+/// missing), its saved command, and its name, from its own `initialize`
+/// answer when it is not one Nebo Link knows. Starting it here proves it
+/// speaks ACP before the pairing code is spent.
+async fn acp_link(agent: acp::Agent, install: &Installation, workdir: Option<PathBuf>, env: &Environment) -> Result<AcpLink> {
+    let home = env
+        .home
+        .clone()
+        .ok_or_else(|| Error::Message("this user has no home folder to work in".into()))?;
+    let workdir = match workdir {
+        Some(dir) if dir.is_absolute() => dir,
+        Some(dir) => std::env::current_dir().map_err(|e| Error::Message(e.to_string()))?.join(dir),
+        None => default_workdir(&home, agent.name()),
+    };
+    if workdir.parent().is_none() {
+        return Err(Error::Message(format!(
+            "{} can't work in {}. Choose a project folder with --dir.",
+            agent.name(),
+            workdir.display()
+        )));
+    }
+    std::fs::create_dir_all(&workdir).map_err(|e| Error::io(&workdir, e))?;
+    let workdir = workdir.canonicalize().map_err(|e| Error::io(&workdir, e))?;
+    let mut probe = tokio::process::Command::new(&install.restart.program);
+    probe
+        .args(&install.restart.args)
+        .envs(install.restart.env.iter().cloned())
+        .current_dir(&workdir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let title = {
+        let mut child = probe
+            .spawn()
+            .map_err(|e| Error::Message(format!("Could not start {}: {e}", agent.name())))?;
+        let conn = acp::client::Connection::start(
+            child.stdout.take().expect("piped"),
+            child.stdin.take().expect("piped"),
+            Box::new(|_, _| {}),
+        );
+        let answered = tokio::time::timeout(
+            ACP_FIRST_START,
+            conn.request("initialize", acp::protocol::initialize_params("nebo-link", crate::update::VERSION)),
+        )
+        .await;
+        let _ = child.kill().await;
+        match answered {
+            Ok(Ok(result)) => acp::protocol::Initialized::parse(&result).title,
+            Ok(Err(e)) => {
+                return Err(Error::Message(format!(
+                    "{} did not start in ACP mode ({e}). Run `{}` yourself to see why.",
+                    agent.name(),
+                    install::shown(&install.restart)
+                )));
+            }
+            Err(_) => {
+                return Err(Error::Message(format!(
+                    "{} did not answer in ACP mode. Run `{}` yourself to see why.",
+                    agent.name(),
+                    install::shown(&install.restart)
+                )));
+            }
+        }
+    };
+    Ok(AcpLink {
+        name: match agent {
+            acp::Agent::Other => title.unwrap_or_else(|| agent.name().to_owned()),
+            known => known.name().to_owned(),
+        },
+        program: install.restart.program.clone(),
+        args: install.restart.args.clone(),
+        env: install.restart.env.clone(),
+        workdir,
+    })
 }
 
 /// This machine's name, as Nebo reports it.
@@ -431,6 +591,13 @@ mod tests {
     }
 
     #[test]
+    fn a_coding_agent_works_in_its_own_folder_under_home() {
+        let dir = default_workdir(Path::new("/Users/me"), "Claude Code");
+        assert_eq!(dir, PathBuf::from("/Users/me/NeboAI/Claude Code"));
+        assert_eq!(default_name_as("studio-mac", "Claude Code"), "studio-mac · Claude Code");
+    }
+
+    #[test]
     fn secrets_are_long_and_distinct() {
         let (a, b) = (secret(), secret());
         assert_eq!(a.len(), 64);
@@ -455,6 +622,7 @@ mod tests {
             },
             api_server_key: String::new(),
             services: vec![],
+            acp: None,
         };
         let access = proxy_access(&link);
         assert_eq!(access.base_path, "/t/b1");

@@ -109,6 +109,7 @@ impl Linked {
             },
             api_server_key: String::new(),
             services: vec![],
+            acp: None,
         };
         let dir = root.bot(&bot_id);
         dir.create().unwrap();

@@ -158,9 +158,19 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
     let (online_tx, online_rx) = watch::channel(false);
     let tunnel = Arc::new(AtomicBool::new(false));
 
-    let install = install::find(&link)?;
-    let upstream = install::ui_addr(&install)
-        .ok_or_else(|| Error::Message(format!("{} has no local UI to open", runtime_name(link.runtime))))?;
+    // An ACP agent has no install to find and no UI: its saved command runs
+    // it, and only the chat contract is served for it.
+    let install = match link.runtime.acp() {
+        Some(_) => None,
+        None => Some(install::find(&link)?),
+    };
+    let upstream = match &install {
+        Some(install) => Some(
+            install::ui_addr(install)
+                .ok_or_else(|| Error::Message(format!("{} has no local UI to open", runtime_name(link.runtime))))?,
+        ),
+        None => None,
+    };
     let access = link::proxy_access(&link);
     let target = Target {
         upstream,
@@ -185,14 +195,15 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
             ))
         })?;
 
-    let (contract, chat_error) = match link::chat(&dir, &mut link, &install, token_rx.clone()).await {
+    let (contract, chat_error) = match link::chat(&dir, &mut link, install.as_ref(), token_rx.clone()).await {
         Ok(contract) => (Some(contract), None),
         Err(why) => {
             tracing::info!(why, "the chat contract is not served for this link");
             (None, Some(why))
         }
     };
-    let supervisor = Supervisor::new(&dir, link.runtime, install.processes.clone());
+    let processes = install.as_ref().map(|i| i.processes.clone()).unwrap_or_default();
+    let supervisor = Supervisor::new(&dir, link.runtime, processes);
     tokio::spawn(supervisor.clone().run());
     let service = Arc::new(Service {
         dir: dir.clone(),
@@ -539,6 +550,7 @@ mod tests {
             },
             api_server_key: String::new(),
             services: vec![],
+            acp: None,
         };
         let config = connect_config(&link, "jwt", false);
         assert_eq!(config["runtime"], "hermes");
