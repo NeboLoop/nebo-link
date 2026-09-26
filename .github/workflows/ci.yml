@@ -44,6 +44,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
 
+  # The client SDKs (sdk/), tested against the conformance suite's fake host.
+  sdk:
+    name: SDKs (TypeScript, Python)
+    runs-on: ubuntu-latest
+    env:
+      OAL_CONFORMANCE: ${{ github.workspace }}/target/debug/oal-conformance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p oal-conformance --locked
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk/typescript/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+      - name: TypeScript
+        working-directory: sdk/typescript
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm check
+          pnpm test
+      - uses: astral-sh/setup-uv@v6
+      - name: Python
+        working-directory: sdk/python
+        run: |
+          uv sync --locked
+          uv run mypy
+          uv run pytest -W error
+
   # Guards the release workflow: its builds run on the house machines, never
   # on GitHub-hosted runners. See scripts/check-release-runners.py.
   release-runners:

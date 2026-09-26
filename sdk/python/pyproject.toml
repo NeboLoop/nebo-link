@@ -1,0 +1,43 @@
+[project]
+name = "openagentlink"
+version = "0.1.0"
+description = "Client SDK for Open Agent Link (OAL): drive Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Hermes and any ACP agent on another computer."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+keywords = ["oal", "open-agent-link", "acp", "agent-client-protocol", "agents", "claude-code", "codex"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Typing :: Typed",
+]
+dependencies = [
+  "websockets>=13",
+  "cryptography>=42",
+]
+
+[project.urls]
+Homepage = "https://openagent.link"
+Source = "https://github.com/NeboLoop/nebo-link/tree/main/sdk/python"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openagentlink"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src"]

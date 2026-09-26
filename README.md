@@ -79,7 +79,7 @@ The service is a launchd agent on macOS, a systemd user unit on Linux (a system 
 
 ## Open Agent Link
 
-Nebo Link is the reference implementation of [Open Agent Link](https://openagent.link) (OAL), an open protocol for reaching agents on any computer: ACP, made reachable, plus a thin host layer. The specification, JSON Schemas, examples and RFC process are in [`spec/`](spec/); the conformance suite is [`crates/oal-conformance`](crates/oal-conformance).
+Nebo Link is the reference implementation of [Open Agent Link](https://openagent.link) (OAL), an open protocol for reaching agents on any computer: ACP, made reachable, plus a thin host layer. The specification, JSON Schemas, examples and RFC process are in [`spec/`](spec/); the conformance suite is [`crates/oal-conformance`](crates/oal-conformance). Client SDKs for driving linked agents from your own apps: [TypeScript](sdk/typescript) (`@openagentlink/client`) and [Python](sdk/python) (`openagentlink`).
 
 ## License
 

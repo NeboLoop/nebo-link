@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OAL web client</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Open Agent Link</h1>
+
+      <form id="pair-form" class="card" hidden>
+        <p>Pair this page with a computer. Get a code there (<code>nebo-link pair</code>, or the fake host's code).</p>
+        <label>Host URL <input name="url" value="ws://127.0.0.1:7878/oal" required /></label>
+        <label>Code <input name="code" placeholder="K7QM-3XRD" required /></label>
+        <button type="submit">Pair</button>
+      </form>
+
+      <section id="chat" hidden>
+        <div class="bar">
+          <select id="agent"></select>
+          <select id="mode"></select>
+          <button id="forget" type="button" class="quiet">Unpair</button>
+        </div>
+        <div id="log" class="card log" aria-live="polite"></div>
+        <form id="prompt-form" class="bar">
+          <input id="prompt" placeholder="Ask the agent to run the tests" autocomplete="off" />
+          <button type="submit">Send</button>
+          <button id="stop" type="button" class="quiet" disabled>Stop</button>
+        </form>
+      </section>
+
+      <p id="status" class="status"></p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,80 @@
+// Pairing (spec section 6): a one-time code becomes a device identity.
+
+import { plaintext, webSocketDialer, type Dialer, type SecureChannel } from './channel.js';
+import { exchange } from './connection.js';
+import { OALError } from './errors.js';
+import { PROTOCOL, type ClientInfo } from './types.js';
+
+/**
+ * What pairing with one host produces. Keep it secret (it holds the device
+ * token and private key) and pass it to `connect` as `credentials`. It is
+ * plain JSON: store it with `JSON.stringify` and read it back with `JSON.parse`.
+ */
+export interface Identity {
+  host: { id: string; name: string; publicKey: string };
+  device: { id: string; name: string; token: string; publicKey: string; privateKey: string };
+}
+
+/** Where to reach hosts: a relay (`wss://relay.example.com`), or one host's own URL. */
+export type Endpoint = { relay: string; url?: undefined } | { url: string; relay?: undefined };
+
+export type PairOptions = Endpoint & {
+  /** The code the host shows (`K7QM-3XRD`). */
+  code: string;
+  /** What the owner will see this device called ("Alma's laptop"). */
+  deviceName: string;
+  client?: ClientInfo;
+  secure?: SecureChannel;
+  dialer?: Dialer;
+};
+
+export const DEFAULT_CLIENT: ClientInfo = { name: '@openagentlink/client', version: '0.1.0' };
+
+/** A relay path (`/oal/hosts/<id>`, `/oal/pair/<code>`) on `relay`. */
+export function relayUrl(relay: string, path: string): string {
+  const base = /^wss?:\/\//.test(relay) ? relay : `wss://${relay}`;
+  return base.replace(/\/+$/, '') + path;
+}
+
+export function checkEndpoint(options: { relay?: string; url?: string }): void {
+  if (!options.relay === !options.url) throw new OALError('invalid_params', 'Pass either relay or url.');
+}
+
+/** Pairs with a host and returns this device's identity for it. */
+export async function pair(options: PairOptions): Promise<Identity> {
+  checkEndpoint(options);
+  const { code, deviceName, client = DEFAULT_CLIENT, secure = plaintext, dialer = webSocketDialer } = options;
+  const url = options.relay ? relayUrl(options.relay, `/oal/pair/${encodeURIComponent(code.replace(/[\s-]/g, '').toUpperCase())}`) : options.url!;
+  const keys = await generateKeyPair();
+  const socket = await dialer(url, ['oal']);
+  const channel = await secure.open(socket, { protocol: PROTOCOL, client, code, device: keys });
+  try {
+    const result = await exchange(
+      channel,
+      'host/pair',
+      { protocol: PROTOCOL, client, code, device: { name: deviceName, publicKey: keys.publicKey } },
+      'the computer',
+    );
+    const host = result.info.host;
+    return {
+      host: { id: host.id, name: host.name, publicKey: host.publicKey },
+      device: { id: result.device.id, name: result.device.name, token: result.device.token, ...keys },
+    };
+  } finally {
+    channel.close(1000, '');
+  }
+}
+
+/** A new X25519 key pair, base64url without padding: the device's static key (spec 6.1, 17.1). */
+async function generateKeyPair(): Promise<{ publicKey: string; privateKey: string }> {
+  const pair = (await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits'])) as CryptoKeyPair;
+  const publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
+  return { publicKey: base64url(publicKey), privateKey: privateKey.d! };
+}
+
+function base64url(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
