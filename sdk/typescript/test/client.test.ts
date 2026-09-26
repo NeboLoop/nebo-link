@@ -35,7 +35,7 @@ function droppable(): { dialer: Dialer; drop(): void } {
 }
 
 async function open(dialer?: Dialer): Promise<{ client: Client; host: Host }> {
-  const client = await connect({ url: host.url, credentials: identity, dialer });
+  const client = await connect({ url: host.url, credentials: identity, dialer, secure: plaintext });
   clients.push(client);
   return { client, host: client.hosts()[0]! };
 }
@@ -69,7 +69,7 @@ const types = (events: TurnEvent[]) => events.map((e) => e.type);
 
 beforeEach(async () => {
   host = await fakeHost();
-  identity = await pair({ url: host.url, code: host.code, deviceName: 'Test laptop' });
+  identity = await pair({ url: host.url, code: host.code, deviceName: 'Test laptop', secure: plaintext });
 });
 
 afterEach(() => {
@@ -100,7 +100,7 @@ describe('pairing and the host layer', () => {
   it('refuses a wrong code in plain words', async () => {
     const other = await fakeHost('AAAA-BBBB');
     try {
-      const error = await pair({ url: other.url, code: 'ZZZZ-ZZZZ', deviceName: 'x' }).catch((e: unknown) => e);
+      const error = await pair({ url: other.url, code: 'ZZZZ-ZZZZ', deviceName: 'x', secure: plaintext }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(OALError);
       expect((error as OALError).code).toBe('pairing_refused');
       expect((error as OALError).message).toBe("That code didn't work. Get a new one on the computer.");
@@ -121,6 +121,21 @@ describe('pairing and the host layer', () => {
     clients.push(client);
     await fakeAgent(client.hosts()[0]!);
     expect(sent).toBe(2); // host/hello, host/agents
+  });
+
+  it('keeps nothing when the host names another key than the pairing handshake authenticated', async () => {
+    const other = await fakeHost('AAAA-BBBB');
+    try {
+      const impostor: SecureChannel = {
+        async open(socket, context) {
+          return { ...(await plaintext.open(socket, context)), peerKey: 'A'.repeat(43) };
+        },
+      };
+      const error = await pair({ url: other.url, code: other.code, deviceName: 'x', secure: impostor }).catch((e: unknown) => e);
+      expect((error as OALError).code).toBe('pairing_refused');
+    } finally {
+      other.stop();
+    }
   });
 });
 
@@ -282,11 +297,11 @@ describe('through a relay', () => {
     try {
       // The relay refuses a pairing URL with more than the nameplate, and
       // every request without a fresh proof of the device's key.
-      const paired = await pair({ relay: relay.url, code: 'aaaa-bbbb', deviceName: 'Relay laptop' });
+      const paired = await pair({ relay: relay.url, code: 'aaaa-bbbb', deviceName: 'Relay laptop', secure: plaintext });
       expect(paired.host.id).toBe('h-fake');
 
       const { dialer, drop } = droppable();
-      const client = await connect({ relay: relay.url, credentials: paired, dialer });
+      const client = await connect({ relay: relay.url, credentials: paired, dialer, secure: plaintext });
       clients.push(client);
       const h = client.hosts()[0]!;
       const session = await (await fakeAgent(h)).session();

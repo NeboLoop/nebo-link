@@ -1,7 +1,8 @@
 // Pairing (spec section 6): a one-time code becomes a device identity.
 
-import { plaintext, webSocketDialer, type Dialer, type SecureChannel } from './channel.js';
-import { exchange } from './connection.js';
+import { ChannelClosed, webSocketDialer, type Dialer, type SecureChannel } from './channel.js';
+import { closeError, exchange } from './connection.js';
+import { encrypted } from './e2e.js';
 import { OALError } from './errors.js';
 import { base64url, relayDialer } from './relay.js';
 import { PROTOCOL, type ClientInfo } from './types.js';
@@ -25,6 +26,7 @@ export type PairOptions = Endpoint & {
   /** What the owner will see this device called ("Alma's laptop"). */
   deviceName: string;
   client?: ClientInfo;
+  /** The secure-channel layer. Default: `encrypted` (end-to-end, OAL section 17). */
   secure?: SecureChannel;
   dialer?: Dialer;
 };
@@ -53,12 +55,16 @@ export function checkEndpoint(options: { relay?: string; url?: string }): void {
 /** Pairs with a host and returns this device's identity for it. */
 export async function pair(options: PairOptions): Promise<Identity> {
   checkEndpoint(options);
-  const { code, deviceName, client = DEFAULT_CLIENT, secure = plaintext, dialer = webSocketDialer } = options;
+  const { code, deviceName, client = DEFAULT_CLIENT, secure = encrypted, dialer = webSocketDialer } = options;
   const url = options.relay ? relayUrl(options.relay, `/oal/pair/${nameplate(code)}`) : options.url!;
   const keys = await generateKeyPair();
   // Through a relay, the connection first proves the new device key.
   const socket = await (options.relay ? relayDialer(options.relay, keys, dialer) : dialer)(url, ['oal']);
-  const channel = await secure.open(socket, { protocol: PROTOCOL, client, code, device: keys });
+  const channel = await secure.open(socket, { protocol: PROTOCOL, client, code, device: keys }).catch((error: unknown) => {
+    // A wrong code fails the pairing handshake, and the host closes with 4001.
+    if (error instanceof ChannelClosed) throw error.code === 4001 ? refused() : closeError(error, 'the computer');
+    throw error;
+  });
   try {
     const result = await exchange(
       channel,
@@ -67,6 +73,11 @@ export async function pair(options: PairOptions): Promise<Identity> {
       'the computer',
     );
     const host = result.info.host;
+    // The key the host names must be the one the pairing handshake authenticated.
+    if (channel.peerKey !== undefined && channel.peerKey !== host.publicKey) {
+      channel.close(4001, 'Pairing refused.');
+      throw refused();
+    }
     return {
       host: { id: host.id, name: host.name, publicKey: host.publicKey },
       device: { id: result.device.id, name: result.device.name, token: result.device.token, ...keys },
@@ -74,6 +85,10 @@ export async function pair(options: PairOptions): Promise<Identity> {
   } finally {
     channel.close(1000, '');
   }
+}
+
+function refused(): OALError {
+  return new OALError('pairing_refused', "That code didn't work. Get a new one on the computer.");
 }
 
 /** A new X25519 key pair, base64url without padding: the device's static key (spec 6.1, 17.1). */

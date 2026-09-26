@@ -8,5 +8,6 @@ export type { Identity, PairOptions, Endpoint } from './identity.js';
 export { OALError } from './errors.js';
 export type { ErrorCode } from './errors.js';
 export { plaintext, webSocketDialer, ChannelClosed } from './channel.js';
+export { encrypted } from './e2e.js';
 export type { Socket, Dialer, SecureChannel, FrameChannel, ChannelContext, CloseInfo } from './channel.js';
 export * from './types.js';
