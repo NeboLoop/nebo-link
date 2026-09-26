@@ -2247,6 +2247,176 @@ async fn an_acp_agent_that_will_not_start_is_not_announced() {
     assert_eq!(refused["error"], "Could not connect to Codex. Try again.");
 }
 
+// -- Several agents on one bot ------------------------------------------------
+
+/// A fake ACP agent hosted as `id`, with its own state (sessions) and folder
+/// under `dir`.
+fn fake_hosted(id: &str, label: &str, agent: nebo_runtimes::acp::Agent, dir: &std::path::Path) -> nebo_link::state::Hosted {
+    use nebo_link::state::{AcpLink, Hosted, Via};
+    Hosted {
+        id: id.into(),
+        label: label.into(),
+        runtime: nebo_runtimes::Runtime::Acp(agent),
+        via: Via::Acp(AcpLink {
+            program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+            args: ["fake_acp_agent_process", "--exact", "--nocapture", "--test-threads=1"]
+                .map(String::from)
+                .to_vec(),
+            env: vec![
+                ("NEBO_LINK_FAKE_ACP".into(), "normal".into()),
+                ("NEBO_LINK_FAKE_ACP_STATE".into(), dir.join(format!("{id}-state.json")).to_string_lossy().into_owned()),
+            ],
+            workdir: dir.join(format!("work-{id}")),
+        }),
+    }
+}
+
+/// The session id inside a chat frame's `session_id`.
+fn chat_of(session_id: &str) -> String {
+    session_id.rsplit(":thread:").next().unwrap().to_owned()
+}
+
+/// Events for `session` until one of `kind`, others' left out.
+async fn until_on(phone: &mut Phone, session: &str, kind: &str) -> Vec<Value> {
+    let mut events = Vec::new();
+    loop {
+        let event = phone.next().await;
+        if event["data"]["session_id"] != session {
+            continue;
+        }
+        let done = event["type"] == kind;
+        events.push(event);
+        if done {
+            return events;
+        }
+    }
+}
+
+/// One bot hosting three agents, two of one runtime in different folders:
+/// the roster lists each as its own employee; a chat reaches the agent it
+/// names and only that one; a question goes back to the agent that asked;
+/// an agent that dies takes no other with it; and agents join and leave
+/// while the bot runs.
+#[tokio::test]
+async fn one_bot_hosts_several_agents_and_keeps_them_apart() {
+    use nebo_link::contract::roster::Roster;
+    use nebo_link::state::{Link, PRIMARY, Root};
+    use nebo_runtimes::acp::Agent;
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, inbox) = serve_hub().await;
+    let dir = Root::at(tmp.path().join("state")).bot(BOT);
+    let site = fake_hosted(PRIMARY, "Claude Code", Agent::ClaudeCode, tmp.path());
+    let api = fake_hosted("claude-code-api", "Claude Code · api", Agent::ClaudeCode, tmp.path());
+    let codex = fake_hosted("codex", "Codex", Agent::Codex, tmp.path());
+    let link = Link {
+        bot_id: BOT.into(),
+        name: "Mac".into(),
+        owner_id: "owner-1".into(),
+        endpoints: nebo_link::endpoints::Endpoints::from_env(),
+        agents: vec![site.clone(), api.clone(), codex.clone()],
+    };
+    let members = link.agents.iter().filter_map(|a| nebo_link::link::acp_member(&dir, a)).collect();
+    let roster = Arc::new(Roster::new(members));
+    let bot = serve_contract(("claude-code", "Claude Code"), roster.clone(), &hub_url).await;
+
+    // The roster: three employees, the first the primary.
+    let agents = get(bot, "/api/v1/agents").await["agents"].as_array().unwrap().clone();
+    let rows: Vec<(&str, &str)> = agents.iter().map(|a| (a["id"].as_str().unwrap(), a["name"].as_str().unwrap())).collect();
+    assert_eq!(rows, [(PRIMARY, "Claude Code"), ("claude-code-api", "Claude Code · api"), ("codex", "Codex")]);
+    assert!(agents[1]["description"].as_str().unwrap().ends_with("work-claude-code-api"), "{}", agents[1]);
+
+    // A chat to each reaches that agent, in its own folder, and no other.
+    let mut phone = Phone::connect(bot).await;
+    let mut sessions = Vec::new();
+    for id in [PRIMARY, "claude-code-api", "codex"] {
+        phone.send("chat", json!({ "prompt": "hello", "agent_id": id })).await;
+        let created = loop {
+            let event = phone.next().await;
+            if event["type"] == "chat_created" && event["data"]["agent_id"] == id {
+                break event;
+            }
+        };
+        let session = created["data"]["session_id"].as_str().unwrap().to_owned();
+        let events = until_on(&mut phone, &session, "chat_complete").await;
+        assert_eq!(streamed(&events), "Hello", "{id}");
+        sessions.push(session);
+    }
+    let chats: Vec<String> = sessions.iter().map(|s| chat_of(s)).collect();
+    // Every fake numbers its sessions from s1: the chat ids still differ.
+    assert_eq!(chats, ["s1", "claude-code-api~s1", "codex~s1"]);
+    for (id, file) in [(PRIMARY, "assistant-state.json"), ("claude-code-api", "claude-code-api-state.json"), ("codex", "codex-state.json")] {
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(file)).unwrap()).unwrap();
+        assert_eq!(state["s1"][0]["user"], "hello", "{id} holds its own chat");
+        assert_eq!(state.as_object().unwrap().len(), 1, "{id} holds only its own chat");
+    }
+    let listed = get(bot, "/api/v1/agents/claude-code-api/chats").await;
+    assert_eq!(listed["chats"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["chats"][0]["id"], "claude-code-api~s1");
+    let page = get(bot, "/api/v1/chats/codex~s1/messages").await;
+    assert_eq!(page["messages"][0]["content"], "hello");
+
+    // Two agents stop for permission at once, with the same tool call id:
+    // each answer reaches the agent that asked.
+    phone.send("chat", json!({ "prompt": "tool", "agent_id": "claude-code-api", "session_id": sessions[1] })).await;
+    let api_ask = until_on(&mut phone, &sessions[1], "ask_request").await.pop().unwrap();
+    phone.send("chat", json!({ "prompt": "tool", "agent_id": "codex", "session_id": sessions[2] })).await;
+    let codex_ask = until_on(&mut phone, &sessions[2], "ask_request").await.pop().unwrap();
+    let api_request = api_ask["data"]["request_id"].as_str().unwrap().to_owned();
+    let codex_request = codex_ask["data"]["request_id"].as_str().unwrap().to_owned();
+    assert_ne!(api_request, codex_request, "one id per question");
+    phone.send("ask_response", json!({ "request_id": codex_request, "value": "Deny" })).await;
+    let events = until_on(&mut phone, &sessions[2], "chat_complete").await;
+    assert_eq!(streamed(&events), "Not run.", "Codex got its own answer");
+    phone.send("ask_response", json!({ "request_id": api_request, "value": "Allow once" })).await;
+    let events = until_on(&mut phone, &sessions[1], "chat_complete").await;
+    assert_eq!(streamed(&events), "Done.", "the api folder's Claude Code got its own answer");
+    let items = eventually(&inbox, 4).await;
+    let titles: Vec<&str> = items.iter().filter_map(|i| i["title"].as_str()).collect();
+    assert!(titles.contains(&"Claude Code · api asks to run `ls`") && titles.contains(&"Codex asks to run `ls`"), "{titles:?}");
+
+    // One agent's process dies mid-turn: the others carry on.
+    phone.send("chat", json!({ "prompt": "exit", "agent_id": PRIMARY, "session_id": sessions[0] })).await;
+    let events = until_on(&mut phone, &sessions[0], "chat_error").await;
+    assert_eq!(events.last().unwrap()["data"]["error"], "Could not connect to Claude Code. Try again.");
+    for (id, session) in [("claude-code-api", &sessions[1]), ("codex", &sessions[2])] {
+        phone.send("chat", json!({ "prompt": "hello", "agent_id": id, "session_id": session })).await;
+        let events = until_on(&mut phone, session, "chat_complete").await;
+        assert_eq!(streamed(&events), "Hello", "{id} is unaffected");
+    }
+
+    // Added and removed while the bot runs: Codex leaves (its process with
+    // it), a Gemini CLI joins; the others keep their sessions.
+    let gemini = fake_hosted("gemini", "Gemini CLI", Agent::Gemini, tmp.path());
+    let after = Link {
+        agents: vec![site.clone(), api.clone(), gemini],
+        ..link.clone()
+    };
+    roster.set(nebo_link::link::reconcile(&dir, &link, &after, &roster.members()));
+    let ids: Vec<String> = get(bot, "/api/v1/agents").await["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, [PRIMARY, "claude-code-api", "gemini"]);
+    let (status, _) = call(bot, "GET", "/api/v1/agents/codex/chats", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "Codex is gone");
+    phone.send("chat", json!({ "prompt": "hello", "agent_id": "claude-code-api", "session_id": sessions[1] })).await;
+    let events = until_on(&mut phone, &sessions[1], "chat_complete").await;
+    assert_eq!(streamed(&events), "Hello");
+    let page = get(bot, "/api/v1/chats/claude-code-api~s1/messages").await;
+    assert_eq!(page["messages"].as_array().unwrap().len(), 10, "the kept agent kept its session, every turn in it: {page}");
+    phone.send("chat", json!({ "prompt": "hello", "agent_id": "gemini" })).await;
+    let created = loop {
+        let event = phone.next().await;
+        if event["type"] == "chat_created" && event["data"]["agent_id"] == "gemini" {
+            break event;
+        }
+    };
+    let events = until_on(&mut phone, created["data"]["session_id"].as_str().unwrap(), "chat_complete").await;
+    assert_eq!(streamed(&events), "Hello", "the agent added joined");
+}
+
 /// Against a real ACP agent on this machine (`NEBO_LINK_LIVE_ACP` =
 /// `claude-code`, `codex`, `gemini` or `opencode`), found and started the
 /// way pairing does, in a fresh folder, with the fake hub catching inbox

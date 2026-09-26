@@ -23,7 +23,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use nebo_link::credentials::Credentials;
 use nebo_link::endpoints::Endpoints;
-use nebo_link::state::{Link, ModelsEndpoint, Root};
+use nebo_link::state::{Hosted, InstallLink, Link, ModelsEndpoint, PRIMARY, Root, Via};
 use nebo_runtimes::Runtime;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -70,26 +70,31 @@ fn linked_hermes(hub: &FakeHub, api_port: u16, dashboard_port: u16) -> (tempfile
     dir.create().unwrap();
     dir.save(&Link {
         bot_id: bot_id.clone(),
-        name: "test-mac · Hermes".into(),
-        runtime: Runtime::Hermes,
+        name: "test-mac".into(),
         owner_id: "owner-1".into(),
-        home: home.clone(),
-        env: vec![("HERMES_HOME".into(), home.display().to_string())],
         endpoints: Endpoints {
             api: "http://127.0.0.1:9".into(),
             comms: hub.comms.clone(),
             tunnel: hub.tunnel.clone(),
             janus: "http://127.0.0.1:9".into(),
         },
-        local_password: "pw".into(),
-        models: ModelsEndpoint {
-            port: free_port(),
-            key: "k".into(),
-            enabled: false,
-        },
-        api_server_key: KEY.into(),
-        services: vec![],
-        acp: None,
+        agents: vec![Hosted {
+            id: PRIMARY.into(),
+            label: "Hermes".into(),
+            runtime: Runtime::Hermes,
+            via: Via::Install(InstallLink {
+                home: home.clone(),
+                env: vec![("HERMES_HOME".into(), home.display().to_string())],
+                local_password: "pw".into(),
+                models: ModelsEndpoint {
+                    port: free_port(),
+                    key: "k".into(),
+                    enabled: false,
+                },
+                api_server_key: KEY.into(),
+                services: vec![],
+            }),
+        }],
     })
     .unwrap();
     Credentials::open(&dir).save("bot-token").unwrap();

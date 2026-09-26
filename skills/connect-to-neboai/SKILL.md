@@ -88,6 +88,7 @@ When it failed, say what failed and what to do next, in one or two sentences, ba
 | `Nebo Link isn't available yet.` | "Nebo Link isn't available to install yet, so I couldn't connect." |
 | `Could not verify the download` | "The download didn't pass its signature check, so nothing was installed. Try again in a few minutes." |
 | `No OpenClaw or Hermes install found for this user.` | "Nebo Link couldn't find me under this user account. It needs to run as the same user I run as." |
+| `This computer is already linked as "<name>"` | Nothing to tell yet: this computer's bot already exists and the code isn't needed. Run `nebo-link add openclaw` (or `hermes`, the runtime you are), then check `nebo-link status` as in step 4; you are one more agent of that bot. |
 | Anything else | Quote the one line that says what went wrong and offer to try again. |
 
 Don't paste the whole log to the owner. Don't retry a failed code on your own; codes are one-time.

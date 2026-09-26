@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use nebo_link::endpoints::Endpoints;
-use nebo_link::state::{BotDir, Link, ModelsEndpoint, Root};
+use nebo_link::state::{AgentDir, Hosted, InstallLink, Link, ModelsEndpoint, PRIMARY, Root, Via};
 use nebo_link::supervise::{self, ProcessState, StartedBy, Supervisor};
 use nebo_runtimes::{HealthCheck, ManagedProcess, Runtime, RuntimeCommand, ServiceCommand};
 
@@ -24,7 +24,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 
 struct Fixture {
     _tmp: tempfile::TempDir,
-    dir: BotDir,
+    dir: AgentDir,
     port: u16,
     /// Every command the fake service scripts ran, one per line.
     commands: PathBuf,
@@ -38,27 +38,34 @@ impl Fixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = Root::at(tmp.path().join("nebo-link"));
-        let dir = root.bot("bot-1");
-        dir.create().unwrap();
-        dir.save(&Link {
+        let bot = root.bot("bot-1");
+        bot.create().unwrap();
+        bot.save(&Link {
             bot_id: "bot-1".into(),
-            name: "test · Hermes".into(),
-            runtime: Runtime::Hermes,
+            name: "test".into(),
             owner_id: "owner-1".into(),
-            home: tmp.path().join("hh"),
-            env: vec![],
             endpoints: Endpoints::from_env(),
-            local_password: "pw".into(),
-            models: ModelsEndpoint {
-                port: 1,
-                key: "k".into(),
-                enabled: false,
-            },
-            api_server_key: String::new(),
-            services: vec![],
-            acp: None,
+            agents: vec![Hosted {
+                id: PRIMARY.into(),
+                label: "Hermes".into(),
+                runtime: Runtime::Hermes,
+                via: Via::Install(InstallLink {
+                    home: tmp.path().join("hh"),
+                    env: vec![],
+                    local_password: "pw".into(),
+                    models: ModelsEndpoint {
+                        port: 1,
+                        key: "k".into(),
+                        enabled: false,
+                    },
+                    api_server_key: String::new(),
+                    services: vec![],
+                }),
+            }],
         })
         .unwrap();
+        let dir = bot.agent(PRIMARY);
+        dir.create().unwrap();
         Self {
             port: free_port(),
             commands: tmp.path().join("commands"),
@@ -200,7 +207,7 @@ async fn a_process_that_is_down_is_started_and_started_again_when_it_ends() {
     .await;
     let pid = fx.started_pid().expect("the started process is recorded");
     assert!(supervise::alive(pid));
-    assert!(fx.dir.runtime_log("hermes-gateway").exists(), "its output goes to the bot directory");
+    assert!(fx.dir.log(Some("gateway")).exists(), "its output goes to the bot's logs");
 
     // It ends: started again, after the first backoff.
     let ended = Instant::now();
@@ -243,7 +250,7 @@ async fn the_owners_own_service_is_left_alone() {
     running.abort();
 
     // Unlinking removes nothing of the owner's.
-    let released = supervise::release(&fx.dir, Runtime::Hermes, &[], &[fx.process(Some(fx.service()))]).await;
+    let released = supervise::release(&fx.dir, &[], &[fx.process(Some(fx.service()))]).await;
     assert_eq!(released, supervise::Released::default());
     assert!(fx.commands().is_empty());
     assert!(fx.definition.exists());
@@ -262,15 +269,15 @@ async fn the_runtimes_service_is_installed_once_recorded_and_removed_by_unlink()
     .await;
     assert_eq!(fx.commands(), ["install"]);
     assert!(fx.definition.exists());
-    assert_eq!(fx.dir.load().unwrap().services, ["gateway"], "recorded in link.json");
+    assert_eq!(fx.dir.services(), ["gateway"], "recorded in link.json");
     assert!(fx.started_pid().is_none(), "a service, not a foreground process");
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(fx.commands(), ["install"], "installed once");
     running.abort();
 
     // The link installed it, so unlink removes it.
-    let services = fx.dir.load().unwrap().services;
-    let released = supervise::release(&fx.dir, Runtime::Hermes, &services, &[process]).await;
+    let services = fx.dir.services();
+    let released = supervise::release(&fx.dir, &services, &[process]).await;
     assert_eq!(released.uninstalled, ["gateway"]);
     assert!(released.stopped.is_empty() && released.not_uninstalled.is_empty());
     assert_eq!(fx.commands(), ["install", "uninstall"]);
@@ -282,9 +289,7 @@ async fn the_runtimes_service_is_installed_once_recorded_and_removed_by_unlink()
 async fn a_service_the_link_installed_is_started_when_down() {
     let fx = Fixture::new();
     std::fs::write(&fx.definition, "installed by the link earlier").unwrap();
-    let mut link = fx.dir.load().unwrap();
-    link.services = vec!["gateway".into()];
-    fx.dir.save(&link).unwrap();
+    fx.dir.record_service("gateway").unwrap();
     let supervisor = Supervisor::new(&fx.dir, Runtime::Hermes, vec![fx.process(Some(fx.service()))]);
     let running = tokio::spawn(supervisor.clone().run());
 
@@ -323,7 +328,7 @@ async fn what_pairing_started_is_adopted_and_stopped_by_unlink() {
     assert!(supervisor.ensure().await.is_empty());
 
     // Unlink stops it and forgets it.
-    let released = supervise::release(&fx.dir, Runtime::Hermes, &[], &[fx.process(None)]).await;
+    let released = supervise::release(&fx.dir, &[], &[fx.process(None)]).await;
     assert_eq!(released.stopped, ["gateway"]);
     assert!(!supervise::alive(pid));
     assert!(!fx.dir.processes_file().exists());
@@ -338,7 +343,7 @@ fn a_recorded_process_that_is_gone_is_forgotten() {
     )
     .unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let released = rt.block_on(supervise::release(&fx.dir, Runtime::Hermes, &[], &[fx.process(None)]));
+    let released = rt.block_on(supervise::release(&fx.dir, &[], &[fx.process(None)]));
     assert!(released.stopped.is_empty());
     assert!(!fx.dir.processes_file().exists());
 }

@@ -1,5 +1,6 @@
-//! `nebo-link`: link an OpenClaw or Hermes agent, or a coding agent that
-//! speaks ACP (Claude Code, Codex, Gemini CLI, OpenCode, ...), to NeboAI.
+//! `nebo-link`: link this computer to NeboAI as one bot hosting its agents:
+//! OpenClaw, Hermes, and coding agents that speak ACP (Claude Code, Codex,
+//! Gemini CLI, OpenCode, ...), each its own employee.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,21 +13,23 @@ use tokio::sync::watch;
 use nebo_link::credentials::Credentials;
 use nebo_link::error::{Error, Result};
 use nebo_link::install::{runtime_key, runtime_name};
-use nebo_link::state::{Root, STATUS_EVERY};
+use nebo_link::link::{Released, Wanted};
+use nebo_link::state::{Hosted, Root, STATUS_EVERY};
 use nebo_link::{link, run, service, update};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "nebo-link",
     version,
-    about = "Link an agent on this machine to NeboAI: OpenClaw, Hermes, or a coding agent (Claude Code, Codex, Gemini CLI, OpenCode, any ACP agent)."
+    about = "Link this computer to NeboAI as one bot hosting its agents: OpenClaw, Hermes, and coding agents (Claude Code, Codex, Gemini CLI, OpenCode, any ACP agent)."
 )]
 struct Cli {
-    /// The one-time code from the NeboAI app (Connect OpenClaw or Hermes).
+    /// The one-time code from the NeboAI app: pairs this computer, with its
+    /// first agent. Add more with `nebo-link add`.
     code: Option<String>,
 
-    /// Which agent to link: needed when several are installed, and always
-    /// for a coding agent.
+    /// Which agent to link first: needed when several are installed, and
+    /// always for a coding agent.
     #[arg(long, value_enum)]
     runtime: Option<RuntimeArg>,
 
@@ -39,7 +42,11 @@ struct Cli {
     #[arg(long, value_name = "FOLDER")]
     dir: Option<PathBuf>,
 
-    /// The bot's name in NeboAI (default: this machine's name and the agent).
+    /// The agent's name on the roster (default: the agent's own).
+    #[arg(long)]
+    label: Option<String>,
+
+    /// The bot's name in NeboAI (default: this computer's name).
     #[arg(long)]
     name: Option<String>,
 
@@ -58,8 +65,33 @@ enum Command {
         #[arg(long)]
         bot: String,
     },
-    /// Show what is linked and whether it is connected.
+    /// Show what is linked, the agents it hosts, and whether it is connected.
     Status,
+    /// Add an agent to this computer's bot: another coding agent in its own
+    /// folder, or an OpenClaw or Hermes install. No code, no new service.
+    Add {
+        /// Which agent (or name a command with --acp-command).
+        #[arg(value_enum, required_unless_present = "acp_command")]
+        runtime: Option<RuntimeArg>,
+        /// Any other agent that speaks ACP, by the command that starts it.
+        #[arg(long, conflicts_with = "runtime", value_name = "COMMAND")]
+        acp_command: Option<String>,
+        /// The project folder a coding agent works in (default: ~/NeboAI/<agent>).
+        #[arg(long, value_name = "FOLDER")]
+        dir: Option<PathBuf>,
+        /// Its name on the roster (default: the agent's own, with the
+        /// folder's when the bot already hosts one of it).
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        bot: Option<String>,
+    },
+    /// Remove an agent from this computer's bot, by its id (`nebo-link status`).
+    Remove {
+        agent: String,
+        #[arg(long)]
+        bot: Option<String>,
+    },
     /// Unlink: restore the agent's config, remove the service, forget the bot.
     Unlink {
         #[arg(long)]
@@ -120,12 +152,13 @@ impl Cli {
         let pairing = cli.code.is_some()
             || cli.runtime.is_some()
             || cli.name.is_some()
+            || cli.label.is_some()
             || cli.acp_command.is_some()
             || cli.dir.is_some();
         if cli.command.is_some() && pairing {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "a code, --runtime, --acp-command, --dir and --name are for pairing and can't be combined with a command",
+                "a code, --runtime, --acp-command, --dir, --label and --name are for pairing and can't be combined with a command",
             ));
         }
         Ok(cli)
@@ -150,13 +183,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
         let _log = init_logging(None);
         return match cli.code {
             Some(code) => {
-                let target = Pairing {
+                let wanted = Wanted {
                     runtime: cli.runtime.map(Into::into),
                     acp_command: cli.acp_command,
                     dir: cli.dir,
-                    name: cli.name,
+                    label: cli.label,
                 };
-                pair(&root, &code, target).await
+                pair(&root, &code, wanted, cli.name).await
             }
             None => status(&root),
         };
@@ -167,6 +200,37 @@ async fn dispatch(cli: Cli) -> Result<()> {
             run::run(&root, &bot).await
         }
         Command::Status => status(&root),
+        Command::Add {
+            runtime,
+            acp_command,
+            dir,
+            label,
+            bot,
+        } => {
+            let _log = init_logging(None);
+            let wanted = Wanted {
+                runtime: runtime.map(Into::into),
+                acp_command,
+                dir,
+                label,
+            };
+            let added = link::add(&root, bot.as_deref(), wanted).await?;
+            let agent = &added.agent;
+            println!("Added {} ({}).", agent.label, agent.id);
+            describe_added(agent, &added.started, added.restart_failed.as_deref());
+            println!("It is an employee to hire in the NeboAI app now (Hire from another app).");
+            Ok(())
+        }
+        Command::Remove { agent, bot } => {
+            let _log = init_logging(None);
+            let removal = link::remove(&root, bot.as_deref(), &agent).await?;
+            println!("Removed {} ({}).", removal.agent.label, removal.agent.id);
+            if let Some(released) = &removal.released {
+                describe_released(&removal.agent, released);
+            }
+            println!("An employee hired from it no longer answers; remove it in the NeboAI app.");
+            Ok(())
+        }
         Command::Update => {
             let _log = init_logging(None);
             self_update(&root).await
@@ -176,32 +240,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let link = root.select(bot.as_deref())?;
             let unlinked = link::unlink(&root, &link, link::By::Owner).await?;
             println!("Unlinked {} ({}).", link.name, link.bot_id);
-            let released = &unlinked.released;
-            if !released.stopped.is_empty() {
-                println!(
-                    "Stopped {}'s {}, which the link had started.",
-                    runtime_name(link.runtime),
-                    released.stopped.join(" and ")
-                );
-            }
-            if !released.uninstalled.is_empty() {
-                println!(
-                    "Removed the {} {} service the link had installed.",
-                    runtime_name(link.runtime),
-                    released.uninstalled.join(" and ")
-                );
-            }
-            for reason in &released.not_uninstalled {
-                println!("A service the link installed is still there: {reason}");
-            }
-            if let Some(reason) = unlinked.not_restored {
-                println!("Its config was not restored: {reason}");
-            }
-            if let Some(reason) = unlinked.not_restarted {
-                println!("Its config was restored, but restarting it failed: {reason}");
-            }
-            if !unlinked.conflicts.is_empty() {
-                println!("Left as you changed them: {}", unlinked.conflicts.join(", "));
+            for (agent, released) in &unlinked.installs {
+                describe_released(agent, released);
             }
             println!("To remove the bot from your account too, remove it in the NeboAI app.");
             Ok(())
@@ -213,15 +253,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Command::Models { state, bot } => {
             let _log = init_logging(None);
-            let mut link = root.select(bot.as_deref())?;
+            let link = root.select(bot.as_deref())?;
             let dir = root.bot(&link.bot_id);
             let token = Credentials::open(&dir).load()?;
             let (_token_tx, token_rx) = watch::channel(token);
-            let janus = link::janus(&link, token_rx);
-            let change = link::set_models(&dir, &mut link, &janus, state == Toggle::On).await?;
+            let change = link::set_models(&dir, token_rx, state == Toggle::On).await?;
             println!(
                 "{} {} NeboAI models.{}",
-                runtime_name(link.runtime),
+                link.name,
                 if change.enabled { "now uses" } else { "no longer uses" },
                 if change.restarted { " It was restarted to pick this up." } else { "" }
             );
@@ -233,57 +272,70 @@ async fn dispatch(cli: Cli) -> Result<()> {
     }
 }
 
-/// What the pairing options name.
-struct Pairing {
-    runtime: Option<Runtime>,
-    acp_command: Option<String>,
-    dir: Option<PathBuf>,
-    name: Option<String>,
-}
-
-async fn pair(root: &Root, code: &str, target: Pairing) -> Result<()> {
+async fn pair(root: &Root, code: &str, wanted: Wanted, name: Option<String>) -> Result<()> {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| Error::Message(format!("could not locate the nebo-link binary: {e}")))?;
-    let Pairing {
-        runtime,
-        acp_command,
-        dir,
-        name,
-    } = target;
-    let paired = link::pair(root, code, runtime, acp_command, dir, name, exe).await?;
-    let link = &paired.link;
-    println!(
-        "Linked {} at {} to NeboAI as \"{}\".",
-        runtime_name(link.runtime),
-        link.home.display(),
-        link.name
-    );
-    println!("Bot id: {}", link.bot_id);
+    let paired = link::pair(root, code, wanted, name, exe).await?;
+    let agent = &paired.added.agent;
+    println!("Linked this computer to NeboAI as \"{}\", with {}.", paired.link.name, agent.label);
+    println!("Bot id: {}", paired.link.bot_id);
     println!("nebo-link now runs in the background and starts with this computer.");
-    if !paired.started.is_empty() {
+    describe_added(agent, &paired.added.started, paired.added.restart_failed.as_deref());
+    println!("Add more agents with `nebo-link add`, e.g. `nebo-link add codex --dir ~/code/api`.");
+    println!("Open the NeboAI app to reach them. Check them any time with `nebo-link status`.");
+    Ok(())
+}
+
+/// What the owner needs to know about an agent just added.
+fn describe_added(agent: &Hosted, started: &[String], restart_failed: Option<&str>) {
+    if !started.is_empty() {
         println!(
             "It started {}'s {} and keeps {} running.",
-            runtime_name(link.runtime),
-            paired.started.join(" and "),
-            if paired.started.len() == 1 { "it" } else { "them" }
+            runtime_name(agent.runtime),
+            started.join(" and "),
+            if started.len() == 1 { "it" } else { "them" }
         );
     }
-    if let Some(acp) = &link.acp {
+    if let Some(acp) = agent.acp() {
         println!(
             "{} works in {} and runs on its own sign-in on this computer.",
-            acp.name,
+            agent.label,
             acp.workdir.display()
         );
     }
-    println!("Open the NeboAI app to reach it. Check it any time with `nebo-link status`.");
-    if let Some(problem) = &paired.restart_failed {
+    if let Some(problem) = restart_failed {
         println!(
             "Restart {} to finish: {problem}\nIf you started it yourself in a terminal, stop it and start it again.",
-            runtime_name(link.runtime)
+            runtime_name(agent.runtime)
         );
     }
-    Ok(())
+}
+
+/// What giving an install back did.
+fn describe_released(agent: &Hosted, released: &Released) {
+    let name = runtime_name(agent.runtime);
+    if !released.processes.stopped.is_empty() {
+        println!("Stopped {name}'s {}, which the link had started.", released.processes.stopped.join(" and "));
+    }
+    if !released.processes.uninstalled.is_empty() {
+        println!(
+            "Removed the {name} {} service the link had installed.",
+            released.processes.uninstalled.join(" and ")
+        );
+    }
+    for reason in &released.processes.not_uninstalled {
+        println!("A service the link installed is still there: {reason}");
+    }
+    if let Some(reason) = &released.not_restored {
+        println!("{name}'s config was not restored: {reason}");
+    }
+    if let Some(reason) = &released.not_restarted {
+        println!("{name}'s config was restored, but restarting it failed: {reason}");
+    }
+    if !released.conflicts.is_empty() {
+        println!("Left as you changed them: {}", released.conflicts.join(", "));
+    }
 }
 
 /// `nebo-link update`: replace the binary with the latest verified release,
@@ -339,10 +391,6 @@ fn status(root: &Root) -> Result<()> {
         };
         println!("{}", link.name);
         println!("  bot:     {}", link.bot_id);
-        println!("  agent:   {} ({}) at {}", runtime_name(link.runtime), runtime_key(link.runtime), link.home.display());
-        if let Some(acp) = &link.acp {
-            println!("  folder:  {}", acp.workdir.display());
-        }
         println!("  status:  {state}");
         if let Some(s) = &running {
             let chat = match (&s.chat, &s.chat_error) {
@@ -355,8 +403,24 @@ fn status(root: &Root) -> Result<()> {
                 println!("  {:<9}{}", format!("{}:", process.name), nebo_link::supervise::describe(process));
             }
         }
-        println!("  models:  {}", if link.models.enabled { "NeboAI" } else { "the agent's own" });
+        if link.agents.iter().any(|a| a.install().is_some()) {
+            println!("  models:  {}", if link::models_enabled(&link) { "NeboAI" } else { "the agent's own" });
+        }
         println!("  state:   {}", dir.path().display());
+        println!("  agents:");
+        for agent in &link.agents {
+            let place = match (agent.acp(), agent.install()) {
+                (Some(acp), _) => format!("works in {}", acp.workdir.display()),
+                (None, Some(install)) => format!("at {}", install.home.display()),
+                (None, None) => String::new(),
+            };
+            println!(
+                "    {:<14} {} ({}) {place}",
+                agent.id,
+                agent.label,
+                runtime_key(agent.runtime)
+            );
+        }
     }
     Ok(())
 }
@@ -446,6 +510,29 @@ mod tests {
         assert_eq!(cli.acp_command.as_deref(), Some("goose acp"));
         assert!(parse(&["ABCD-1234", "--runtime", "codex", "--acp-command", "goose acp"]).is_err());
         assert!(parse(&["status", "--dir", "/w"]).is_err());
+    }
+
+    #[test]
+    fn agents_are_added_and_removed_by_command() {
+        let cli = parse(&["add", "claude-code", "--dir", "/w/site", "--label", "Claude Code · site"]).unwrap();
+        let Some(Command::Add { runtime, acp_command, dir, label, bot }) = cli.command else {
+            panic!("add")
+        };
+        assert_eq!(runtime, Some(RuntimeArg::ClaudeCode));
+        assert_eq!((acp_command, bot), (None, None));
+        assert_eq!(dir, Some(PathBuf::from("/w/site")));
+        assert_eq!(label.as_deref(), Some("Claude Code · site"));
+        assert!(matches!(
+            parse(&["add", "--acp-command", "goose acp"]).unwrap().command,
+            Some(Command::Add { runtime: None, acp_command: Some(c), .. }) if c == "goose acp"
+        ));
+        assert!(parse(&["add"]).is_err(), "add names what to add");
+        assert!(parse(&["add", "codex", "--acp-command", "goose acp"]).is_err());
+        assert!(matches!(
+            parse(&["remove", "codex", "--bot", "b1"]).unwrap().command,
+            Some(Command::Remove { agent, bot: Some(b) }) if agent == "codex" && b == "b1"
+        ));
+        assert!(parse(&["remove"]).is_err(), "remove names the agent");
     }
 
     #[test]

@@ -15,7 +15,7 @@
 use std::time::{Duration, Instant};
 
 use nebo_link::endpoints::Endpoints;
-use nebo_link::state::{Link, ModelsEndpoint, Root};
+use nebo_link::state::{Hosted, InstallLink, Link, ModelsEndpoint, PRIMARY, Root, Via};
 use nebo_link::supervise::{self, ProcessState, Supervisor};
 use nebo_runtimes::{Environment, Runtime, detect};
 
@@ -44,27 +44,33 @@ async fn hermes_gateway_and_dashboard_are_started_and_stopped() {
     // The link's state beside the home, kept after the run for its logs.
     let state = std::path::Path::new(&home).with_extension("link");
     let _ = std::fs::remove_dir_all(&state);
-    let dir = Root::at(&state).bot("live");
-    dir.create().unwrap();
-    dir.save(&Link {
+    let bot = Root::at(&state).bot("live");
+    bot.create().unwrap();
+    bot.save(&Link {
         bot_id: "live".into(),
         name: "live".into(),
-        runtime: Runtime::Hermes,
         owner_id: "owner".into(),
-        home: install.home.clone(),
-        env: install.restart.env.clone(),
         endpoints: Endpoints::from_env(),
-        local_password: String::new(),
-        models: ModelsEndpoint {
-            port: 1,
-            key: String::new(),
-            enabled: false,
-        },
-        api_server_key: String::new(),
-        services: vec![],
-        acp: None,
+        agents: vec![Hosted {
+            id: PRIMARY.into(),
+            label: "Hermes".into(),
+            runtime: Runtime::Hermes,
+            via: Via::Install(InstallLink {
+                home: install.home.clone(),
+                env: install.restart.env.clone(),
+                local_password: String::new(),
+                models: ModelsEndpoint {
+                    port: 1,
+                    key: String::new(),
+                    enabled: false,
+                },
+                api_server_key: String::new(),
+                services: vec![],
+            }),
+        }],
     })
     .unwrap();
+    let dir = bot.agent(PRIMARY);
 
     let supervisor = Supervisor::new(&dir, Runtime::Hermes, install.processes.clone());
     let running = tokio::spawn(supervisor.clone().run());
@@ -85,11 +91,11 @@ async fn hermes_gateway_and_dashboard_are_started_and_stopped() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
     running.abort();
-    let link = dir.load().unwrap();
-    println!("services the link installed: {:?}", link.services);
+    let services = dir.services();
+    println!("services the link installed: {services:?}");
     println!("processes.json: {}", std::fs::read_to_string(dir.processes_file()).unwrap_or_default());
     for process in &install.processes {
-        let log = dir.runtime_log(&format!("hermes-{}", process.name));
+        let log = dir.log(Some(&process.name));
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         let tail: Vec<&str> = text.lines().rev().take(15).collect();
         println!("-- {} (last lines) --", log.display());
@@ -99,7 +105,7 @@ async fn hermes_gateway_and_dashboard_are_started_and_stopped() {
     }
 
     // Stopped whether or not both came up: nothing of the test's outlives it.
-    let released = supervise::release(&dir, Runtime::Hermes, &link.services, &install.processes).await;
+    let released = supervise::release(&dir, &services, &install.processes).await;
     println!("released: {released:?}");
     assert!(all_up, "not both up in time");
     assert!(!released.stopped.is_empty() || !released.uninstalled.is_empty());
