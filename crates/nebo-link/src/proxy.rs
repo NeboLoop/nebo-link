@@ -8,23 +8,33 @@
 //! - serves the link's own endpoints under `/_link/`;
 //! - forwards everything else to the runtime's UI with the path and headers
 //!   the runtime expects ([`nebo_runtimes::ProxyRoute`]), streaming bodies
-//!   and WebSocket upgrades unbuffered.
+//!   unbuffered;
+//! - rewrites URLs both ways ([`crate::rewrite`]) in headers, text bodies and
+//!   WebSocket text frames, so the runtime's UI works under `/t/<botId>`
+//!   whether or not the runtime knows the prefix.
 
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
+use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use nebo_runtimes::{PathMode, ProxyRoute};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use crate::endpoints::WEB_ORIGIN;
+use crate::rewrite::{Coding, Direction, RewrittenBody, Rewriter};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type Body = BoxBody<Bytes, BoxError>;
@@ -37,6 +47,14 @@ pub const FORWARDED_FOR: &str = "203.0.113.10";
 
 /// The header that proves a request came through the tunnel.
 const TUNNEL_AUTH: &str = "x-nebo-tunnel-auth";
+
+/// The largest WebSocket message relayed (a frame may be as large). OpenClaw
+/// accepts 25 MB payloads (canvas snapshots).
+const MAX_WS_MESSAGE: usize = 64 << 20;
+
+/// How long one side of a relayed WebSocket gets to finish closing after the
+/// other has.
+const WS_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// Headers that describe one connection, never forwarded as they are.
 const HOP_BY_HOP: [&str; 9] = [
@@ -87,6 +105,7 @@ pub async fn bind_loopback(addr: SocketAddr) -> std::io::Result<TcpListener> {
 /// Serves the proxy on `listener` until the task is dropped. `secret` is the
 /// tunnel's stamp (`nebo_comm::tunnel::tunnel_auth_secret()`).
 pub async fn serve<C: Control>(listener: TcpListener, target: Target, secret: String, control: Arc<C>) {
+    let rewriter = Arc::new(rewriter(&target));
     let target = Arc::new(target);
     let secret: Arc<str> = secret.into();
     loop {
@@ -95,10 +114,10 @@ pub async fn serve<C: Control>(listener: TcpListener, target: Target, secret: St
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
         };
-        let (target, secret, control) = (target.clone(), secret.clone(), control.clone());
+        let (target, rewriter, secret, control) = (target.clone(), rewriter.clone(), secret.clone(), control.clone());
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
-                handle(req, target.clone(), secret.clone(), control.clone())
+                handle(req, target.clone(), rewriter.clone(), secret.clone(), control.clone())
             });
             let _ = hyper::server::conn::http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
@@ -108,9 +127,15 @@ pub async fn serve<C: Control>(listener: TcpListener, target: Target, secret: St
     }
 }
 
+/// The URL rewrites for `target`.
+fn rewriter(target: &Target) -> Rewriter {
+    Rewriter::new(WEB_ORIGIN, &target.base_path, target.upstream.port(), target.route.path_mode)
+}
+
 async fn handle<C: Control>(
     req: Request<Incoming>,
     target: Arc<Target>,
+    rewriter: Arc<Rewriter>,
     secret: Arc<str>,
     control: Arc<C>,
 ) -> Result<Response<Body>, Infallible> {
@@ -125,7 +150,7 @@ async fn handle<C: Control>(
     if path == "/_link" || path.starts_with("/_link/") {
         return Ok(link_endpoint(req, control.as_ref()).await);
     }
-    Ok(forward(req, &target).await)
+    Ok(forward(req, &target, rewriter).await)
 }
 
 async fn link_endpoint<C: Control>(req: Request<Incoming>, control: &C) -> Response<Body> {
@@ -152,13 +177,14 @@ async fn link_endpoint<C: Control>(req: Request<Incoming>, control: &C) -> Respo
     }
 }
 
-/// Forwards one request to the runtime; a WebSocket upgrade is then spliced
-/// byte for byte in both directions.
-async fn forward(mut req: Request<Incoming>, target: &Target) -> Response<Body> {
+/// Forwards one request to the runtime, rewriting URLs in the response; a
+/// WebSocket upgrade is then relayed message by message in both directions
+/// (any other upgrade is spliced byte for byte).
+async fn forward(mut req: Request<Incoming>, target: &Target, rewriter: Arc<Rewriter>) -> Response<Body> {
     let upgrade = is_upgrade(req.headers());
     let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
     let (mut parts, body) = req.into_parts();
-    rewrite(&mut parts.uri, &mut parts.headers, target, upgrade);
+    rewrite(&mut parts.uri, &mut parts.headers, target, &rewriter, upgrade);
     let offline = || {
         text(
             StatusCode::BAD_GATEWAY,
@@ -180,22 +206,82 @@ async fn forward(mut req: Request<Incoming>, target: &Target) -> Response<Body> 
 
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
         if let Some(client_upgrade) = client_upgrade {
+            let websocket = resp
+                .headers()
+                .get(header::UPGRADE)
+                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
             let upstream_upgrade = hyper::upgrade::on(&mut resp);
             tokio::spawn(async move {
                 if let (Ok(client), Ok(upstream)) = tokio::join!(client_upgrade, upstream_upgrade) {
-                    let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(client), &mut TokioIo::new(upstream)).await;
+                    if websocket {
+                        relay(client, upstream, rewriter).await;
+                    } else {
+                        let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(client), &mut TokioIo::new(upstream))
+                            .await;
+                    }
                 }
             });
         }
-    } else {
-        strip_hop_by_hop(resp.headers_mut());
+        return resp.map(|body| body.map_err(BoxError::from).boxed());
     }
-    resp.map(|body| body.map_err(BoxError::from).boxed())
+
+    strip_hop_by_hop(resp.headers_mut());
+    rewriter.response_headers(resp.headers_mut());
+    // A partial body (206) is left alone: its ranges count the runtime's bytes.
+    let coding = Coding::of(resp.headers());
+    let rewrite_body = resp.status() != StatusCode::PARTIAL_CONTENT && crate::rewrite::is_text(resp.headers());
+    match coding.filter(|_| rewrite_body) {
+        Some(coding) => {
+            resp.headers_mut().remove(header::CONTENT_LENGTH);
+            resp.map(|body| RewrittenBody::new(body.map_err(BoxError::from).boxed(), rewriter, coding).boxed())
+        }
+        None => resp.map(|body| body.map_err(BoxError::from).boxed()),
+    }
+}
+
+/// Relays an upgraded WebSocket between the browser and the runtime,
+/// rewriting URLs in text messages; every other message passes unchanged.
+async fn relay(client: Upgraded, upstream: Upgraded, rewriter: Arc<Rewriter>) {
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_WS_MESSAGE))
+        .max_frame_size(Some(MAX_WS_MESSAGE));
+    let client = WebSocketStream::from_raw_socket(TokioIo::new(client), Role::Server, Some(config)).await;
+    let upstream = WebSocketStream::from_raw_socket(TokioIo::new(upstream), Role::Client, Some(config)).await;
+    let (client_tx, client_rx) = client.split();
+    let (upstream_tx, upstream_rx) = upstream.split();
+    let mut down = std::pin::pin!(pipe(upstream_rx, client_tx, rewriter.clone(), Direction::Outbound));
+    let mut up = std::pin::pin!(pipe(client_rx, upstream_tx, rewriter, Direction::Inbound));
+    tokio::select! {
+        () = &mut down => { let _ = tokio::time::timeout(WS_CLOSE_GRACE, up).await; }
+        () = &mut up => { let _ = tokio::time::timeout(WS_CLOSE_GRACE, down).await; }
+    }
+}
+
+/// Moves messages from one side to the other until either ends, then closes
+/// the other side.
+async fn pipe<R, W>(mut from: R, mut to: W, rewriter: Arc<Rewriter>, direction: Direction)
+where
+    R: Stream<Item = Result<Message, WsError>> + Unpin,
+    W: Sink<Message> + Unpin,
+{
+    while let Some(Ok(message)) = from.next().await {
+        let message = match message {
+            Message::Text(text) => match rewriter.rewrite(direction, text.as_str()) {
+                std::borrow::Cow::Borrowed(_) => Message::Text(text),
+                std::borrow::Cow::Owned(rewritten) => Message::text(rewritten),
+            },
+            other => other,
+        };
+        if to.send(message).await.is_err() {
+            return;
+        }
+    }
+    let _ = to.close().await;
 }
 
 /// Rewrites a request's path and headers for the runtime. Every header the
 /// runtime trusts is set by the link and never taken from the client.
-pub fn rewrite(uri: &mut Uri, headers: &mut HeaderMap, target: &Target, upgrade: bool) {
+pub fn rewrite(uri: &mut Uri, headers: &mut HeaderMap, target: &Target, rewriter: &Rewriter, upgrade: bool) {
     let path = uri.path();
     let path = match target.route.path_mode {
         PathMode::ReaddPrefix => format!("{}{}", target.base_path, path),
@@ -213,6 +299,11 @@ pub fn rewrite(uri: &mut Uri, headers: &mut HeaderMap, target: &Target, upgrade:
         headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
         headers.insert(header::UPGRADE, protocol);
     }
+    // The link reads every message and relays it uncompressed on both legs,
+    // so no WebSocket extension (permessage-deflate) is negotiated.
+    headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
+    Coding::restrict_accept(headers);
+    rewriter.request_headers(headers);
 
     let spoofable: Vec<HeaderName> = headers
         .keys()
@@ -375,7 +466,7 @@ mod tests {
         ] {
             let mut uri: Uri = inbound.parse().unwrap();
             let mut h = hostile_headers();
-            rewrite(&mut uri, &mut h, &openclaw(), false);
+            rewrite(&mut uri, &mut h, &openclaw(), &rewriter(&openclaw()), false);
             assert_eq!(uri.to_string(), outbound);
             assert_eq!(get(&h, "host"), Some("127.0.0.1:28789"));
             assert_eq!(get(&h, "origin"), Some("https://neboai.com"));
@@ -407,7 +498,7 @@ mod tests {
         ] {
             let mut uri: Uri = inbound.parse().unwrap();
             let mut h = hostile_headers();
-            rewrite(&mut uri, &mut h, &hermes(), false);
+            rewrite(&mut uri, &mut h, &hermes(), &rewriter(&hermes()), false);
             assert_eq!(uri.to_string(), outbound);
             assert_eq!(get(&h, "host"), Some("127.0.0.1:29119"));
             assert_eq!(get(&h, "origin"), None);
@@ -426,7 +517,7 @@ mod tests {
         h.insert("upgrade", HeaderValue::from_static("websocket"));
         h.insert("sec-websocket-key", HeaderValue::from_static("abc"));
         assert!(is_upgrade(&h));
-        rewrite(&mut uri, &mut h, &hermes(), true);
+        rewrite(&mut uri, &mut h, &hermes(), &rewriter(&hermes()), true);
         assert_eq!(get(&h, "connection"), Some("upgrade"));
         assert_eq!(get(&h, "upgrade"), Some("websocket"));
         assert_eq!(get(&h, "sec-websocket-key"), Some("abc"));
