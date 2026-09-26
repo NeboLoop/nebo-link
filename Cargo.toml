@@ -9,7 +9,10 @@ license = "Apache-2.0"
 repository = "https://github.com/NeboLoop/nebo-link"
 
 [workspace.dependencies]
-nebo-runtimes = { path = "crates/nebo-runtimes" }
+# Without `preserve-order`: only what rewrites a runtime's config needs it
+# (nebo-link turns it on), and it would reorder every JSON map of an app
+# that embeds link-core.
+nebo-runtimes = { path = "crates/nebo-runtimes", default-features = false }
 link-core = { path = "crates/link-core" }
 # The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
 # nebo-comm is published to crates.io; then this becomes a version.
