@@ -397,6 +397,10 @@ async fn agents_and_sessions_are_typed_from_recorded_frames() {
             "agents.list" => (Ok(payload("agents_list")), vec![]),
             "sessions.subscribe" => (Ok(payload("sessions_subscribe")), vec![]),
             "sessions.list" => (Ok(payload("sessions_subscribe")["list"].clone()), vec![]),
+            "sessions.messages.subscribe" => (
+                Ok(json!({"subscribed": true, "key": "agent:main:nebo-link-spike"})),
+                vec![],
+            ),
             other => panic!("unexpected {other}"),
         }),
     )
@@ -445,6 +449,17 @@ async fn agents_and_sessions_are_typed_from_recorded_frames() {
         .unwrap();
     assert_eq!(listed.total_count, Some(0));
     assert_eq!(seen.recv().await.unwrap().params, json!({}));
+
+    gateway
+        .sessions_messages_subscribe("agent:main:nebo-link-spike", Some("main"))
+        .await
+        .unwrap();
+    let sent = seen.recv().await.unwrap();
+    assert_eq!(sent.method, "sessions.messages.subscribe");
+    assert_eq!(
+        sent.params,
+        json!({"key": "agent:main:nebo-link-spike", "agentId": "main"})
+    );
 }
 
 #[tokio::test]
@@ -595,7 +610,8 @@ async fn chat_send_streams_the_turn_and_steers_while_a_run_is_active() {
     assert_eq!(row.session_key, SPIKE_SESSION);
     assert_eq!(row.role(), Some("assistant"));
     assert_eq!(row.usage().unwrap()["output"], 81);
-    assert_eq!(row.message["stopReason"], "stop");
+    assert_eq!(row.stop_reason(), Some("stop"));
+    assert_eq!(row.run_id.as_deref(), Some("probe-approval-1790397330775"));
 
     // A second message while the run is active is a steer.
     let ack2 = gateway

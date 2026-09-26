@@ -11,6 +11,7 @@
 //! The OpenClaw frames are the ones the 2026.9.6 gateway sent the
 //! 2026-09-26 spike (`nebo-runtimes/tests/fixtures/openclaw-gateway-frames.json`).
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -1146,8 +1147,11 @@ fn agent_event(run: &str, session: &str, stream: &str, data: Value) -> Value {
 
 /// The gateway as the 2026.9.6 spike saw it: challenge, `hello-ok` for any
 /// `connect`, then `agents.list`, `sessions.list`, `chat.history`,
-/// `chat.send` (run 1 answers with a tool call, run 2 asks for approval,
-/// run 3 streams until aborted), `chat.abort` and `approval.resolve`.
+/// `sessions.messages.subscribe`, `chat.send` (run 1 answers with a tool
+/// call, its closing assistant row trailing the final event; run 2 asks for
+/// approval; run 3 streams until aborted), `chat.abort` and
+/// `approval.resolve`. `session.message` rows reach a connection only for
+/// the sessions it subscribed to (`server-session-events.ts`).
 async fn serve_gateway() -> FakeGateway {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -1168,6 +1172,7 @@ async fn serve_gateway() -> FakeGateway {
             ))
             .await
             .unwrap();
+            let mut subscribed = HashSet::new();
             let (out, mut out_rx) = mpsc::unbounded_channel::<Value>();
             let writer = tokio::spawn(async move {
                 while let Some(frame) = out_rx.recv().await {
@@ -1219,6 +1224,10 @@ async fn serve_gateway() -> FakeGateway {
                         ],
                         "deltaCursor": "c", "hasMore": false, "sessionInfo": { "hasActiveRun": false }
                     })),
+                    "sessions.messages.subscribe" => {
+                        subscribed.insert(params["key"].as_str().unwrap().to_owned());
+                        reply(json!({ "subscribed": true, "key": params["key"] }))
+                    }
                     "chat.send" => {
                         let mut runs = counter.lock().unwrap();
                         *runs += 1;
@@ -1233,6 +1242,7 @@ async fn serve_gateway() -> FakeGateway {
                             1 => {
                                 events.push(agent_event(&run, &session, "thinking", json!({ "text": "Need the kernel.", "delta": "Need the kernel." })));
                                 events.push(agent_event(&run, &session, "tool", json!({ "phase": "start", "name": "exec", "toolCallId": "call_9ec1", "args": { "command": "uname -a" } })));
+                                events.push(oc_event("session.message", json!({ "sessionKey": session, "agentId": "main", "runId": run, "message": { "role": "assistant", "content": [{ "type": "toolCall", "id": "call_9ec1", "name": "exec", "arguments": { "command": "uname -a" } }], "usage": { "input": 600, "output": 20, "totalTokens": 16952 }, "stopReason": "toolUse", "__openclaw": { "runId": run } } })));
                                 events.push(agent_event(&run, &session, "tool", json!({ "phase": "result", "name": "exec", "toolCallId": "call_9ec1", "isError": false, "result": { "content": [{ "type": "text", "text": "Darwin" }], "details": { "durationMs": 1204 } } })));
                                 events.push(chat_event(
                                     &run,
@@ -1244,12 +1254,12 @@ async fn serve_gateway() -> FakeGateway {
                                     &session,
                                     json!({ "state": "delta", "deltaText": "Darwin." }),
                                 ));
-                                events.push(oc_event("session.message", json!({ "sessionKey": session, "agentId": "main", "message": { "role": "assistant", "content": [{ "type": "text", "text": "The output is Darwin." }], "usage": { "input": 654, "output": 81, "totalTokens": 17667 }, "stopReason": "stop" } })));
                                 events.push(chat_event(
                                     &run,
                                     &session,
                                     json!({ "state": "final", "stopReason": "stop" }),
                                 ));
+                                events.push(oc_event("session.message", json!({ "sessionKey": session, "agentId": "main", "runId": run, "message": { "role": "assistant", "content": [{ "type": "text", "text": "The output is Darwin." }], "usage": { "input": 654, "output": 81, "totalTokens": 17667 }, "stopReason": "stop", "__openclaw": { "runId": run } } })));
                             }
                             2 => {
                                 events.push(oc_event("exec.approval.requested", json!({
@@ -1296,6 +1306,11 @@ async fn serve_gateway() -> FakeGateway {
                 };
                 out.send(response).unwrap();
                 for event in events {
+                    if event["event"] == "session.message"
+                        && !subscribed.contains(event["payload"]["sessionKey"].as_str().unwrap())
+                    {
+                        continue;
+                    }
                     out.send(event).unwrap();
                 }
             }
@@ -1367,8 +1382,9 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     assert!(new_key.starts_with("agent:main:nebo-"), "{new_key}");
     assert_eq!(get(link, "/api/v1/chats/x").await["model"], "neboai/nebo-1");
 
-    // A turn on the spike's session: tool events, deltas, usage from the
-    // assistant row, completion.
+    // A turn on the spike's session: tool events, deltas, usage summed from
+    // the run's assistant rows (the closing one after the final event),
+    // completion.
     let mut phone = Phone::connect(link).await;
     let session_id = format!("agent:assistant:thread:{SESSION_KEY}");
     phone
@@ -1395,8 +1411,12 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     assert_eq!(events[1]["data"]["input"]["command"], "uname -a");
     assert_eq!(events[2]["data"]["result"], "Darwin");
     assert_eq!(events[2]["data"]["duration_ms"], 1204);
-    assert_eq!(events[5]["data"]["input_tokens"], 654);
-    assert_eq!(events[5]["data"]["output_tokens"], 81);
+    assert_eq!(events[5]["data"]["input_tokens"], 1254);
+    assert_eq!(events[5]["data"]["output_tokens"], 101);
+    assert_eq!(
+        gateway.seen("sessions.messages.subscribe")[0].params,
+        json!({ "key": SESSION_KEY, "agentId": "main" })
+    );
     let send = &gateway.seen("chat.send")[0].params;
     assert_eq!(send["sessionKey"], SESSION_KEY);
     assert_eq!(send["agentId"], "main");
