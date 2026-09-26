@@ -89,6 +89,7 @@ fn linked_hermes(hub: &FakeHub, api_port: u16, dashboard_port: u16) -> (tempfile
         },
         api_server_key: KEY.into(),
         services: vec![],
+        acp: None,
     })
     .unwrap();
     Credentials::open(&dir).save("bot-token").unwrap();

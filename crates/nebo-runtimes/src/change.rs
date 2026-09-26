@@ -165,7 +165,8 @@ impl ProxyAccess {
                 origin: Some(self.origin.clone()),
                 identity_header: Some(self.user_header.clone()),
             },
-            Runtime::Hermes => ProxyRoute {
+            // An ACP agent has no UI to forward to; the route is never used.
+            Runtime::Hermes | Runtime::Acp(_) => ProxyRoute {
                 path_mode: PathMode::StripWithForwardedPrefix,
                 origin: None,
                 identity_header: None,

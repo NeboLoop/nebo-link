@@ -13,6 +13,8 @@
 //!   openclaw-device.json
 //!                  the keypair the link's own OpenClaw gateway socket
 //!                  proves itself with (chat contract)
+//!   acp-chats.json the chats an ACP agent that can't list its sessions
+//!                  was given (chat contract)
 //!   logs/          rotating service logs, and the runtime's own output
 //!                  (`<runtime>-<process>.log`, `<runtime>.log` for its commands)
 //! ```
@@ -154,6 +156,9 @@ impl BotDir {
     pub fn device_file(&self) -> PathBuf {
         self.0.join("openclaw-device.json")
     }
+    pub fn acp_chats_file(&self) -> PathBuf {
+        self.0.join("acp-chats.json")
+    }
     pub fn logs_dir(&self) -> PathBuf {
         self.0.join("logs")
     }
@@ -226,6 +231,33 @@ pub struct Link {
     /// `unlink` removes those and never one the owner installed.
     #[serde(default)]
     pub services: Vec<String>,
+    /// How an ACP agent is run; `None` for OpenClaw and Hermes.
+    #[serde(default)]
+    pub acp: Option<AcpLink>,
+}
+
+/// An ACP agent's settings, fixed at pairing: a service's `PATH` is not the
+/// owner's shell's, so the command is kept with absolute paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpLink {
+    /// What the agent calls itself on the roster ("Claude Code").
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// The folder its conversations work in.
+    pub workdir: PathBuf,
+}
+
+impl AcpLink {
+    pub fn command(&self) -> nebo_runtimes::RuntimeCommand {
+        nebo_runtimes::RuntimeCommand {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+        }
+    }
 }
 
 impl Link {
@@ -355,6 +387,7 @@ mod tests {
             },
             api_server_key: String::new(),
             services: vec![],
+            acp: None,
         }
     }
 

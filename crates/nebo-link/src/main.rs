@@ -1,10 +1,12 @@
-//! `nebo-link`: link an OpenClaw or Hermes agent to NeboAI.
+//! `nebo-link`: link an OpenClaw or Hermes agent, or a coding agent that
+//! speaks ACP (Claude Code, Codex, Gemini CLI, OpenCode, ...), to NeboAI.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use nebo_runtimes::Runtime;
+use nebo_runtimes::acp::Agent;
 use tokio::sync::watch;
 
 use nebo_link::credentials::Credentials;
@@ -17,15 +19,25 @@ use nebo_link::{link, run, service, update};
 #[command(
     name = "nebo-link",
     version,
-    about = "Link the OpenClaw or Hermes agent on this machine to NeboAI."
+    about = "Link an agent on this machine to NeboAI: OpenClaw, Hermes, or a coding agent (Claude Code, Codex, Gemini CLI, OpenCode, any ACP agent)."
 )]
 struct Cli {
     /// The one-time code from the NeboAI app (Connect OpenClaw or Hermes).
     code: Option<String>,
 
-    /// Which agent to link when both are installed.
+    /// Which agent to link: needed when several are installed, and always
+    /// for a coding agent.
     #[arg(long, value_enum)]
     runtime: Option<RuntimeArg>,
+
+    /// Link any other agent that speaks ACP by the command that starts it
+    /// in ACP mode, e.g. "goose acp".
+    #[arg(long, conflicts_with = "runtime", value_name = "COMMAND")]
+    acp_command: Option<String>,
+
+    /// The project folder a coding agent works in (default: ~/NeboAI/<agent>).
+    #[arg(long, value_name = "FOLDER")]
+    dir: Option<PathBuf>,
 
     /// The bot's name in NeboAI (default: this machine's name and the agent).
     #[arg(long)]
@@ -75,6 +87,10 @@ enum Command {
 enum RuntimeArg {
     Openclaw,
     Hermes,
+    ClaudeCode,
+    Codex,
+    Gemini,
+    Opencode,
 }
 
 impl From<RuntimeArg> for Runtime {
@@ -82,6 +98,10 @@ impl From<RuntimeArg> for Runtime {
         match arg {
             RuntimeArg::Openclaw => Runtime::Openclaw,
             RuntimeArg::Hermes => Runtime::Hermes,
+            RuntimeArg::ClaudeCode => Runtime::Acp(Agent::ClaudeCode),
+            RuntimeArg::Codex => Runtime::Acp(Agent::Codex),
+            RuntimeArg::Gemini => Runtime::Acp(Agent::Gemini),
+            RuntimeArg::Opencode => Runtime::Acp(Agent::Opencode),
         }
     }
 }
@@ -97,10 +117,15 @@ impl Cli {
     /// subcommands are exclusive; `--home` goes with either.
     fn parse_from_args<I: IntoIterator<Item = String>>(args: I) -> std::result::Result<Self, clap::Error> {
         let cli = Self::try_parse_from(args)?;
-        if cli.command.is_some() && (cli.code.is_some() || cli.runtime.is_some() || cli.name.is_some()) {
+        let pairing = cli.code.is_some()
+            || cli.runtime.is_some()
+            || cli.name.is_some()
+            || cli.acp_command.is_some()
+            || cli.dir.is_some();
+        if cli.command.is_some() && pairing {
             return Err(Self::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
-                "a code, --runtime and --name are for pairing and can't be combined with a command",
+                "a code, --runtime, --acp-command, --dir and --name are for pairing and can't be combined with a command",
             ));
         }
         Ok(cli)
@@ -124,7 +149,15 @@ async fn dispatch(cli: Cli) -> Result<()> {
     let Some(command) = cli.command else {
         let _log = init_logging(None);
         return match cli.code {
-            Some(code) => pair(&root, &code, cli.runtime.map(Into::into), cli.name).await,
+            Some(code) => {
+                let target = Pairing {
+                    runtime: cli.runtime.map(Into::into),
+                    acp_command: cli.acp_command,
+                    dir: cli.dir,
+                    name: cli.name,
+                };
+                pair(&root, &code, target).await
+            }
             None => status(&root),
         };
     };
@@ -200,11 +233,25 @@ async fn dispatch(cli: Cli) -> Result<()> {
     }
 }
 
-async fn pair(root: &Root, code: &str, runtime: Option<Runtime>, name: Option<String>) -> Result<()> {
+/// What the pairing options name.
+struct Pairing {
+    runtime: Option<Runtime>,
+    acp_command: Option<String>,
+    dir: Option<PathBuf>,
+    name: Option<String>,
+}
+
+async fn pair(root: &Root, code: &str, target: Pairing) -> Result<()> {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| Error::Message(format!("could not locate the nebo-link binary: {e}")))?;
-    let paired = link::pair(root, code, runtime, name, exe).await?;
+    let Pairing {
+        runtime,
+        acp_command,
+        dir,
+        name,
+    } = target;
+    let paired = link::pair(root, code, runtime, acp_command, dir, name, exe).await?;
     let link = &paired.link;
     println!(
         "Linked {} at {} to NeboAI as \"{}\".",
@@ -220,6 +267,13 @@ async fn pair(root: &Root, code: &str, runtime: Option<Runtime>, name: Option<St
             runtime_name(link.runtime),
             paired.started.join(" and "),
             if paired.started.len() == 1 { "it" } else { "them" }
+        );
+    }
+    if let Some(acp) = &link.acp {
+        println!(
+            "{} works in {} and runs on its own sign-in on this computer.",
+            acp.name,
+            acp.workdir.display()
         );
     }
     println!("Open the NeboAI app to reach it. Check it any time with `nebo-link status`.");
@@ -286,6 +340,9 @@ fn status(root: &Root) -> Result<()> {
         println!("{}", link.name);
         println!("  bot:     {}", link.bot_id);
         println!("  agent:   {} ({}) at {}", runtime_name(link.runtime), runtime_key(link.runtime), link.home.display());
+        if let Some(acp) = &link.acp {
+            println!("  folder:  {}", acp.workdir.display());
+        }
         println!("  status:  {state}");
         if let Some(s) = &running {
             let chat = match (&s.chat, &s.chat_error) {
@@ -378,6 +435,17 @@ mod tests {
         assert_eq!(cli.runtime, Some(RuntimeArg::Hermes));
         assert_eq!(cli.name.as_deref(), Some("Home"));
         assert!(parse(&["ABCD-1234", "--runtime", "other"]).is_err());
+    }
+
+    #[test]
+    fn a_coding_agent_pairs_by_name_or_command() {
+        let cli = parse(&["ABCD-1234", "--runtime", "claude-code", "--dir", "/w"]).unwrap();
+        assert_eq!(Runtime::from(cli.runtime.unwrap()), Runtime::Acp(Agent::ClaudeCode));
+        assert_eq!(cli.dir, Some(PathBuf::from("/w")));
+        let cli = parse(&["ABCD-1234", "--acp-command", "goose acp"]).unwrap();
+        assert_eq!(cli.acp_command.as_deref(), Some("goose acp"));
+        assert!(parse(&["ABCD-1234", "--runtime", "codex", "--acp-command", "goose acp"]).is_err());
+        assert!(parse(&["status", "--dir", "/w"]).is_err());
     }
 
     #[test]

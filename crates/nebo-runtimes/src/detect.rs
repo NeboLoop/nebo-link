@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use crate::{Environment, Runtime, hermes, openclaw};
+use crate::{Environment, Runtime, acp, hermes, openclaw};
 
 /// One installed runtime for the current user. A machine running both
 /// OpenClaw and Hermes yields two installations.
@@ -29,7 +29,9 @@ pub struct Installation {
     /// itself). Always empty for OpenClaw.
     pub profiles: Vec<Profile>,
     /// The runtime's own command for restarting it, with the environment
-    /// overrides that selected this installation.
+    /// overrides that selected this installation. For an ACP agent, the
+    /// command that starts it speaking ACP on stdio (it is restarted by
+    /// starting it again); `home` is then the agent's program.
     pub restart: RuntimeCommand,
     /// What must be running for the link to serve this installation, the
     /// runtime itself (what `restart` restarts) first.
@@ -125,12 +127,14 @@ pub struct RuntimeCommand {
     pub env: Vec<(String, String)>,
 }
 
-/// Finds the OpenClaw and Hermes installations of the user `env` describes.
-/// Honours each runtime's own home, profile and config-path overrides.
+/// Finds the OpenClaw and Hermes installations of the user `env` describes,
+/// then the ACP agents installed for them ([`acp`]). Honours each runtime's
+/// own home, profile and config-path overrides.
 pub fn detect(env: &Environment) -> Vec<Installation> {
     [openclaw::detect(env), hermes::detect(env)]
         .into_iter()
         .flatten()
+        .chain(acp::detect(env))
         .collect()
 }
 

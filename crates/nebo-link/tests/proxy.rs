@@ -205,7 +205,7 @@ fn target(runtime: &str, upstream: SocketAddr) -> Target {
         },
     };
     Target {
-        upstream,
+        upstream: Some(upstream),
         base_path: BOT.into(),
         route,
         identity: OWNER.into(),

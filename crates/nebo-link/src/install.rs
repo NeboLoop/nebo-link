@@ -14,6 +14,7 @@ pub fn runtime_key(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Openclaw => "openclaw",
         Runtime::Hermes => "hermes",
+        Runtime::Acp(agent) => agent.key(),
     }
 }
 
@@ -22,20 +23,26 @@ pub fn runtime_name(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Openclaw => "OpenClaw",
         Runtime::Hermes => "Hermes",
+        Runtime::Acp(agent) => agent.name(),
     }
 }
 
 /// Picks the installation to link from those detected. `wanted` narrows it
 /// to one runtime; `linked` are the homes already linked to a bot, which are
-/// never linked twice.
+/// never linked twice. Without `wanted` only OpenClaw and Hermes are picked:
+/// an ACP agent (Claude Code, Codex, ...) is linked when named.
 pub fn choose(
     installs: Vec<Installation>,
     wanted: Option<Runtime>,
     linked: &[std::path::PathBuf],
 ) -> Result<Installation> {
+    let acp: Vec<Runtime> = installs.iter().map(|i| i.runtime).filter(|r| r.acp().is_some()).collect();
     let found: Vec<Installation> = installs
         .into_iter()
-        .filter(|i| wanted.is_none_or(|w| i.runtime == w))
+        .filter(|i| match wanted {
+            Some(w) => i.runtime == w,
+            None => i.runtime.acp().is_none(),
+        })
         .collect();
     let mut free: Vec<Installation> = found
         .iter()
@@ -53,6 +60,13 @@ pub fn choose(
         0 => {
             return Err(Error::Message(match wanted {
                 Some(w) => format!("No {} install found for this user.", runtime_name(w)),
+                None if !acp.is_empty() => format!(
+                    "No OpenClaw or Hermes install found for this user. To link a coding agent, name it:\n{}",
+                    acp.iter()
+                        .map(|r| format!("  --runtime {}  ({})", runtime_key(*r), runtime_name(*r)))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
                 None => "No OpenClaw or Hermes install found for this user.".into(),
             }));
         }
@@ -72,6 +86,13 @@ pub fn choose(
             )));
         }
     };
+    if install.runtime.acp().is_some() {
+        // No UI and no settings of its own to open: it only has to start.
+        return match &install.config_error {
+            Some(problem) => Err(Error::Message(problem.clone())),
+            None => Ok(install),
+        };
+    }
     if install.proxy_supported == Some(false) {
         return Err(Error::Message(format!(
             "{} {} can't be opened from NeboAI yet. Update it, then run this again.",
@@ -101,7 +122,15 @@ pub fn ui_addr(install: &Installation) -> Option<SocketAddr> {
 
 /// Finds the installation `link` names, with the environment overrides that
 /// selected it at pairing (a service does not inherit the owner's shell).
+/// An ACP agent is not looked for: its command was fixed at pairing
+/// ([`Link::acp`]).
 pub fn find(link: &Link) -> Result<Installation> {
+    if link.runtime.acp().is_some() {
+        return Err(Error::Message(format!(
+            "{} runs by the command saved when it was linked",
+            runtime_name(link.runtime)
+        )));
+    }
     let mut env = Environment::current();
     env.vars.extend(link.env.iter().cloned());
     detect(&env)
@@ -207,7 +236,7 @@ mod tests {
                 bind: "loopback".into(),
                 auth_mode: "token".into(),
             },
-            Runtime::Hermes => Service::HermesDashboard,
+            Runtime::Hermes | Runtime::Acp(_) => Service::HermesDashboard,
         };
         Installation {
             runtime,
@@ -261,6 +290,26 @@ mod tests {
         assert!(old.unwrap_err().to_string().contains("Update it"));
         // Unknown version: allowed, the UI will tell.
         assert!(choose(vec![install(Runtime::Hermes, "/h", None)], None, &[]).is_ok());
+    }
+
+    #[test]
+    fn coding_agents_are_linked_when_named() {
+        use nebo_runtimes::acp::Agent;
+        let mut claude = install(Runtime::Acp(Agent::ClaudeCode), "/bin/claude", None);
+        claude.endpoints.clear();
+        let with_openclaw = vec![install(Runtime::Openclaw, "/o", Some(true)), claude.clone()];
+        // Unnamed: OpenClaw, as before a coding agent was installed.
+        assert_eq!(choose(with_openclaw.clone(), None, &[]).unwrap().runtime, Runtime::Openclaw);
+        // Named: no UI needed.
+        let got = choose(with_openclaw, Some(Runtime::Acp(Agent::ClaudeCode)), &[]).unwrap();
+        assert_eq!(got.home, std::path::PathBuf::from("/bin/claude"));
+        // Alone and unnamed: the owner is told how to name it.
+        let err = choose(vec![claude.clone()], None, &[]).unwrap_err().to_string();
+        assert!(err.contains("--runtime claude-code  (Claude Code)"), "{err}");
+        // Installed but unable to start: the reason.
+        claude.config_error = Some("Claude Code needs Node.js".into());
+        let err = choose(vec![claude], Some(Runtime::Acp(Agent::ClaudeCode)), &[]).unwrap_err().to_string();
+        assert!(err.contains("needs Node.js"), "{err}");
     }
 
     #[cfg(unix)]

@@ -112,6 +112,10 @@ impl Journal {
     ) -> Result<Outcome, Error> {
         change.validate()?;
         match (install.runtime, change.kind()) {
+            (Runtime::Acp(agent), _) => Err(Error::InvalidChange(format!(
+                "{} has no settings the link changes",
+                agent.name()
+            ))),
             (Runtime::Openclaw, _) => self.apply_in::<Json5>(install, profile, change),
             (Runtime::Hermes, ChangeKind::ApiServer) => {
                 self.apply_in::<Dotenv>(install, profile, change)
@@ -129,6 +133,12 @@ impl Journal {
         kind: ChangeKind,
     ) -> Result<Outcome, Error> {
         match (install.runtime, kind) {
+            // Nothing is ever applied to an ACP agent.
+            (Runtime::Acp(_), _) => Ok(Outcome {
+                changed: false,
+                restart: None,
+                conflicts: Vec::new(),
+            }),
             (Runtime::Openclaw, _) => self.revert_in::<Json5>(install, profile, kind),
             (Runtime::Hermes, ChangeKind::ApiServer) => {
                 self.revert_in::<Dotenv>(install, profile, kind)
@@ -278,6 +288,10 @@ fn config_file(
     kind: ChangeKind,
 ) -> Result<PathBuf, Error> {
     match (install.runtime, kind) {
+        (Runtime::Acp(agent), _) => Err(Error::InvalidChange(format!(
+            "{} has no settings the link changes",
+            agent.name()
+        ))),
         (Runtime::Openclaw, _) => openclaw::config_file(install, profile),
         (Runtime::Hermes, ChangeKind::ApiServer) => hermes::env_file(install, profile),
         (Runtime::Hermes, _) => hermes::config_file(install, profile),
@@ -301,6 +315,7 @@ fn edits_for(
             openclaw::check_includes(&config, &edits, file)?;
             Ok(edits)
         }
+        Runtime::Acp(_) => Ok(Vec::new()),
         Runtime::Hermes => Ok(match change {
             Change::ProxyAccess(_) => Vec::new(),
             Change::NeboaiModels(models) => hermes::neboai_models(models),
@@ -326,6 +341,7 @@ fn restart_for(
             _ => true,
         },
         Runtime::Hermes => matches!(kind, ChangeKind::NeboaiModels | ChangeKind::ApiServer),
+        Runtime::Acp(_) => false,
     };
     needed.then(|| install.restart.clone())
 }

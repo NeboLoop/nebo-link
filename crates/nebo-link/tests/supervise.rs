@@ -56,6 +56,7 @@ impl Fixture {
             },
             api_server_key: String::new(),
             services: vec![],
+            acp: None,
         })
         .unwrap();
         Self {

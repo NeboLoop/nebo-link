@@ -75,8 +75,9 @@ const HOP_BY_HOP: [&str; 9] = [
 /// Where and how to forward.
 #[derive(Debug, Clone)]
 pub struct Target {
-    /// The runtime UI's loopback address.
-    pub upstream: SocketAddr,
+    /// The runtime UI's loopback address; `None` for a runtime with no UI
+    /// of its own (an ACP agent), whose only pages are the chat contract.
+    pub upstream: Option<SocketAddr>,
     /// The prefix the browser sees: `/t/<botId>`.
     pub base_path: String,
     pub route: ProxyRoute,
@@ -140,7 +141,8 @@ pub async fn serve<C: Control>(
 
 /// The URL rewrites for `target`.
 fn rewriter(target: &Target) -> Rewriter {
-    Rewriter::new(WEB_ORIGIN, &target.base_path, target.upstream.port(), target.route.path_mode)
+    let port = target.upstream.map_or(0, |addr| addr.port());
+    Rewriter::new(WEB_ORIGIN, &target.base_path, port, target.route.path_mode)
 }
 
 async fn handle<C: Control>(
@@ -167,7 +169,13 @@ async fn handle<C: Control>(
     {
         return Ok(contract.handle(req).await);
     }
-    Ok(forward(req, &target, rewriter).await)
+    match target.upstream {
+        Some(upstream) => Ok(forward(req, &target, upstream, rewriter).await),
+        None => Ok(text(
+            StatusCode::NOT_FOUND,
+            &format!("{} has no page of its own. Chat with it in the NeboAI app.", target.runtime_name),
+        )),
+    }
 }
 
 async fn link_endpoint<C: Control>(req: Request<Incoming>, control: &C) -> Response<Body> {
@@ -197,7 +205,12 @@ async fn link_endpoint<C: Control>(req: Request<Incoming>, control: &C) -> Respo
 /// Forwards one request to the runtime, rewriting URLs in the response; a
 /// WebSocket upgrade is then relayed message by message in both directions
 /// (any other upgrade is spliced byte for byte).
-async fn forward(mut req: Request<Incoming>, target: &Target, rewriter: Arc<Rewriter>) -> Response<Body> {
+async fn forward(
+    mut req: Request<Incoming>,
+    target: &Target,
+    upstream: SocketAddr,
+    rewriter: Arc<Rewriter>,
+) -> Response<Body> {
     let upgrade = is_upgrade(req.headers());
     let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
     let (mut parts, body) = req.into_parts();
@@ -209,7 +222,7 @@ async fn forward(mut req: Request<Incoming>, target: &Target, rewriter: Arc<Rewr
         )
     };
 
-    let Ok(stream) = TcpStream::connect(target.upstream).await else {
+    let Ok(stream) = TcpStream::connect(upstream).await else {
         tracing::info!(runtime = target.runtime_name, "proxy: the runtime's UI is not accepting connections");
         return offline();
     };
@@ -339,7 +352,9 @@ pub fn rewrite(uri: &mut Uri, headers: &mut HeaderMap, target: &Target, rewriter
             headers.insert(name, value);
         }
     };
-    set(headers, "host", &target.upstream.to_string());
+    if let Some(upstream) = target.upstream {
+        set(headers, "host", &upstream.to_string());
+    }
     match &target.route.origin {
         Some(origin) => set(headers, "origin", origin),
         None => {
@@ -415,7 +430,7 @@ mod tests {
 
     fn openclaw() -> Target {
         Target {
-            upstream: "127.0.0.1:28789".parse().unwrap(),
+            upstream: Some("127.0.0.1:28789".parse().unwrap()),
             base_path: BOT.into(),
             route: ProxyRoute {
                 path_mode: PathMode::ReaddPrefix,
@@ -429,7 +444,7 @@ mod tests {
 
     fn hermes() -> Target {
         Target {
-            upstream: "127.0.0.1:29119".parse().unwrap(),
+            upstream: Some("127.0.0.1:29119".parse().unwrap()),
             base_path: BOT.into(),
             route: ProxyRoute {
                 path_mode: PathMode::StripWithForwardedPrefix,

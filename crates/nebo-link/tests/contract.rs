@@ -423,7 +423,7 @@ async fn serve_contract(
         .local_addr()
         .unwrap();
     let target = Target {
-        upstream: unused,
+        upstream: Some(unused),
         base_path: format!("/t/{BOT}"),
         route: ProxyRoute {
             path_mode: PathMode::StripWithForwardedPrefix,
@@ -1725,4 +1725,502 @@ async fn live_openclaw_phone_flow() {
         .count();
     eprintln!("transcript holds {users} user messages after 3 turns");
     assert_eq!(users, 3, "one user message per turn: nothing re-sent");
+}
+
+// -- A fake ACP agent -----------------------------------------------------------
+//
+// This test binary, started again as `fake_acp_agent_process` with
+// `NEBO_LINK_FAKE_ACP` set, is the agent: a scripted JSON-RPC peer on
+// stdin/stdout in the shapes the Claude Code and Codex adapters sent on
+// 2026-09-26 (`@agentclientprotocol/claude-agent-acp` 0.81.2,
+// `@agentclientprotocol/codex-acp` 1.13.1). What a prompt does depends on
+// its text: `hello` streams two chunks; `tool` runs a command after asking
+// permission; `wait` runs until cancelled; `exit` ends the process mid-turn.
+// Sessions and their messages are kept in `NEBO_LINK_FAKE_ACP_STATE`, so a
+// restarted agent replays them on `session/load`.
+
+/// Not a test when run by the harness: the fake agent's entry point.
+#[test]
+fn fake_acp_agent_process() {
+    use std::io::{BufRead, Write};
+    let Ok(mode) = std::env::var("NEBO_LINK_FAKE_ACP") else {
+        return;
+    };
+    let state_file = std::env::var("NEBO_LINK_FAKE_ACP_STATE").unwrap();
+    let load = || -> Value {
+        std::fs::read_to_string(&state_file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| json!({}))
+    };
+    let save = |state: &Value| std::fs::write(&state_file, state.to_string()).unwrap();
+    let stdout = std::io::stdout();
+    let send = |frame: Value| {
+        let mut out = stdout.lock();
+        writeln!(out, "{frame}").unwrap();
+        out.flush().unwrap();
+    };
+    let update = |session: &str, update: Value| {
+        send(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": session, "update": update } }))
+    };
+    let text = |session: &str, kind: &str, text: &str| {
+        update(session, json!({ "sessionUpdate": kind, "content": { "type": "text", "text": text }, "messageId": "m" }))
+    };
+    // The harness has printed "test fake_acp_agent_process ... " with no
+    // newline: end that line, so every frame is a line of its own.
+    send(json!(null));
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    while let Some(Ok(line)) = lines.next() {
+        let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
+        let id = message["id"].clone();
+        let params = &message["params"];
+        let reply = |result: Value| send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        match message["method"].as_str().unwrap_or("") {
+            "initialize" => reply(json!({
+                "protocolVersion": 1,
+                "agentCapabilities": { "loadSession": true, "sessionCapabilities": { "list": {}, "resume": {} } },
+                "agentInfo": { "name": "fake-acp", "title": "Fake Agent", "version": "0" },
+                "authMethods": []
+            })),
+            "session/new" if mode == "signed-out" => send(json!({
+                "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Authentication required" }
+            })),
+            "session/new" => {
+                let mut state = load();
+                let session = format!("s{}", state.as_object().unwrap().len() + 1);
+                state[&session] = json!([]);
+                save(&state);
+                reply(json!({ "sessionId": session, "configOptions": [{ "id": "model", "category": "model",
+                    "currentValue": "m1", "options": [{ "value": "m1", "name": "Model One" }] }] }));
+            }
+            "session/list" => {
+                let state = load();
+                let sessions: Vec<Value> = state
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(|s| json!({ "sessionId": s, "cwd": params["cwd"], "title": format!("Chat {s}"), "updatedAt": "2026-09-26T14:23:13.025Z" }))
+                    .collect();
+                reply(json!({ "sessions": sessions }));
+            }
+            "session/load" => {
+                let session = params["sessionId"].as_str().unwrap().to_owned();
+                let state = load();
+                let Some(turns) = state[&session].as_array() else {
+                    send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32002, "message": "Session not found" } }));
+                    continue;
+                };
+                for turn in turns {
+                    text(&session, "user_message_chunk", turn["user"].as_str().unwrap());
+                    text(&session, "agent_message_chunk", turn["agent"].as_str().unwrap());
+                }
+                reply(json!({ "sessionId": session }));
+            }
+            "session/prompt" => {
+                let session = params["sessionId"].as_str().unwrap().to_owned();
+                let prompt = params["prompt"][0]["text"].as_str().unwrap_or("").to_owned();
+                let mut said = String::new();
+                let mut stop = "end_turn";
+                match prompt.as_str() {
+                    "exit" => std::process::exit(3),
+                    "wait" => {
+                        text(&session, "agent_thought_chunk", "Waiting");
+                        // Until the client cancels.
+                        while let Some(Ok(line)) = lines.next() {
+                            if line.contains("session/cancel") {
+                                break;
+                            }
+                        }
+                        stop = "cancelled";
+                    }
+                    "tool" => {
+                        update(&session, json!({ "sessionUpdate": "tool_call", "toolCallId": "call_1", "name": "Bash",
+                            "rawInput": {}, "status": "pending", "title": "Terminal", "kind": "execute", "content": [] }));
+                        update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_1",
+                            "rawInput": { "command": "ls" }, "title": "ls", "kind": "execute" }));
+                        send(json!({ "jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": {
+                            "sessionId": session,
+                            "toolCall": { "toolCallId": "call_1", "status": "pending", "rawInput": { "command": "ls" }, "title": "ls", "kind": "execute",
+                                "content": [{ "type": "content", "content": { "type": "text", "text": "List the files" } }] },
+                            "options": [{ "optionId": "allow-once", "name": "Yes", "kind": "allow_once" },
+                                        { "optionId": "allow-always", "name": "Yes, and don't ask again", "kind": "allow_always" },
+                                        { "optionId": "reject", "name": "No", "kind": "reject_once" }] } }));
+                        let mut outcome = Value::Null;
+                        while let Some(Ok(line)) = lines.next() {
+                            let answer: Value = serde_json::from_str(&line).unwrap();
+                            if answer["id"] == 0 && answer.get("method").is_none() {
+                                outcome = answer["result"]["outcome"].clone();
+                                break;
+                            }
+                        }
+                        if outcome["outcome"] == "cancelled" {
+                            stop = "cancelled";
+                        } else if outcome["optionId"] == "allow-once" {
+                            update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_1", "status": "completed",
+                                "rawOutput": "file.txt", "content": [{ "type": "content", "content": { "type": "text", "text": "file.txt" } }] }));
+                            said = "Done.".into();
+                        } else {
+                            update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_1", "status": "failed" }));
+                            said = "Not run.".into();
+                        }
+                    }
+                    _ => {
+                        update(&session, json!({ "sessionUpdate": "plan", "entries": [
+                            { "content": "Say hello", "priority": "high", "status": "in_progress" }] }));
+                        said = "Hello".into();
+                        text(&session, "agent_message_chunk", "Hel");
+                        text(&session, "agent_message_chunk", "lo");
+                    }
+                }
+                if !said.is_empty() && prompt == "tool" {
+                    text(&session, "agent_message_chunk", &said);
+                }
+                update(&session, json!({ "sessionUpdate": "session_info_update", "title": "A fake chat" }));
+                update(&session, json!({ "sessionUpdate": "usage_update", "used": 10, "size": 100 }));
+                if stop == "end_turn" {
+                    let mut state = load();
+                    state[&session].as_array_mut().unwrap().push(json!({ "user": prompt, "agent": said }));
+                    save(&state);
+                }
+                reply(json!({ "stopReason": stop,
+                    "usage": { "inputTokens": 3, "outputTokens": 2, "cachedReadTokens": 5, "totalTokens": 10 } }));
+            }
+            _ if message.get("method").is_some() && !id.is_null() => send(json!({
+                "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" }
+            })),
+            _ => {}
+        }
+    }
+}
+
+/// The contract in front of the fake ACP agent, as `agent` named `name`.
+async fn start_acp_link(
+    mode: &str,
+    agent: nebo_runtimes::acp::Agent,
+    name: &str,
+    dir: &std::path::Path,
+    hub: &str,
+) -> SocketAddr {
+    use nebo_link::contract::acp::{Acp, Settings};
+    let command = nebo_runtimes::RuntimeCommand {
+        program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+        args: ["fake_acp_agent_process", "--exact", "--nocapture", "--test-threads=1"]
+            .map(String::from)
+            .to_vec(),
+        env: vec![
+            ("NEBO_LINK_FAKE_ACP".into(), mode.into()),
+            ("NEBO_LINK_FAKE_ACP_STATE".into(), dir.join("agent-state.json").to_string_lossy().into_owned()),
+        ],
+    };
+    let backend = Acp::new(Settings {
+        agent,
+        name: name.into(),
+        command,
+        workdir: dir.join("work"),
+        log: dir.join("logs").join("agent.log"),
+        chats_file: dir.join("acp-chats.json"),
+    });
+    let runtime = nebo_link::install::runtime_name(nebo_runtimes::Runtime::Acp(agent));
+    let key = nebo_link::install::runtime_key(nebo_runtimes::Runtime::Acp(agent));
+    serve_contract((key, runtime), Arc::new(backend), hub).await
+}
+
+fn streamed(events: &[Value]) -> String {
+    events
+        .iter()
+        .filter(|e| e["type"] == "chat_stream")
+        .map(|e| e["data"]["content"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_phone_flow_against_an_acp_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, inbox) = serve_hub().await;
+    let link = start_acp_link("normal", nebo_runtimes::acp::Agent::Other, "Fake Agent", tmp.path(), &hub_url).await;
+
+    // The probe starts the agent; its one agent is the primary employee.
+    let health = get(link, "/health").await;
+    assert_eq!(health["runtime"], "acp");
+    assert_eq!(health["chat"], true, "{health}");
+    let roster = get(link, "/api/v1/agents").await;
+    let agents = roster["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["id"], "assistant");
+    assert_eq!(agents[0]["name"], "Fake Agent");
+    assert!(agents[0]["description"].as_str().unwrap().starts_with("Works in "));
+
+    // 1. Prompt -> streamed reply, thinking from the plan, usage.
+    let mut phone = Phone::connect(link).await;
+    phone.send("chat", json!({ "prompt": "hello", "agent_id": "assistant" })).await;
+    let created = phone.next().await;
+    assert_eq!(created["type"], "chat_created", "{created}");
+    let session_id = created["data"]["session_id"].as_str().unwrap().to_owned();
+    let chat_id = session_id.rsplit(":thread:").next().unwrap().to_owned();
+    let events = phone.until("chat_complete").await;
+    assert_eq!(kinds(&events), ["thinking", "chat_stream", "chat_stream", "usage", "chat_complete"]);
+    assert_eq!(events[0]["data"]["text"], "Plan:\n[~] Say hello");
+    assert_eq!(streamed(&events), "Hello");
+    assert_eq!(events[3]["data"]["input_tokens"], 8, "fresh + cached input");
+    assert_eq!(events[3]["data"]["output_tokens"], 2);
+    let model = get(link, &format!("/api/v1/chats/{chat_id}")).await;
+    assert_eq!(model["model"], "Model One", "{model}");
+    let chats = get(link, "/api/v1/agents/assistant/chats").await;
+    assert_eq!(chats["chats"][0]["id"], chat_id.as_str());
+    assert_eq!(chats["chats"][0]["title"], format!("Chat {chat_id}"));
+
+    // 2. A tool call that needs permission: the card, the ask, the inbox
+    //    item; the owner's answer goes back and the tool runs.
+    phone
+        .send("chat", json!({ "prompt": "tool", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    let events = phone.until("ask_request").await;
+    assert_eq!(kinds(&events), ["tool_start", "ask_request"]);
+    assert_eq!(events[0]["data"]["tool"], "ls");
+    assert_eq!(events[0]["data"]["input"], json!({ "command": "ls" }));
+    let ask = &events[1]["data"];
+    assert_eq!(ask["request_id"], "call_1");
+    assert_eq!(ask["prompt"], "ls\nList the files");
+    assert_eq!(ask["widgets"][0]["options"], json!(["Allow once", "Always allow", "Deny"]));
+    let items = eventually(&inbox, 1).await;
+    assert_eq!(items[0]["id"], "approval:call_1");
+    assert_eq!(items[0]["title"], "Fake Agent asks to run `ls`");
+    phone.send("ask_response", json!({ "request_id": "call_1", "value": "Allow once" })).await;
+    let events = phone.until("chat_complete").await;
+    assert_eq!(kinds(&events), ["tool_result", "chat_stream", "usage", "chat_complete"]);
+    assert_eq!(events[0]["data"]["tool_id"], "call_1");
+    assert_eq!(events[0]["data"]["result"], "file.txt");
+    assert_eq!(events[0]["data"]["is_error"], false);
+    assert_eq!(streamed(&events), "Done.");
+    let items = eventually(&inbox, 2).await;
+    assert_eq!(items[1], json!({ "id": "approval:call_1", "resolved": true }));
+
+    // The transcript as the phone reads it: the tool on its turn.
+    let page = get(link, &format!("/api/v1/chats/{chat_id}/messages")).await;
+    let rows = page["messages"].as_array().unwrap();
+    let roles: Vec<&str> = rows.iter().map(|r| r["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["user", "assistant", "user", "assistant", "tool", "assistant"], "{rows:?}");
+    assert_eq!(rows[0]["content"], "hello");
+    assert_eq!(rows[1]["content"], "Hello");
+    assert_eq!(rows[5]["content"], "Done.");
+
+    // 3. Cancel: `session/cancel`, and the turn ends cancelled.
+    phone
+        .send("chat", json!({ "prompt": "wait", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    let events = phone.until("thinking").await;
+    assert_eq!(kinds(&events), ["thinking"]);
+    phone.send("cancel", json!({ "session_id": session_id })).await;
+    let events = phone.until("chat_cancelled").await;
+    assert_eq!(kinds(&events), ["chat_cancelled"]);
+
+    // 4. A denied tool: the result is an error, the agent carries on.
+    phone
+        .send("chat", json!({ "prompt": "tool", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    phone.until("ask_request").await;
+    phone.send("ask_response", json!({ "request_id": "call_1", "value": "Deny" })).await;
+    let events = phone.until("chat_complete").await;
+    assert_eq!(events[0]["type"], "tool_result");
+    assert_eq!(events[0]["data"]["is_error"], true);
+    assert_eq!(streamed(&events), "Not run.");
+}
+
+#[tokio::test]
+async fn an_acp_agent_that_exits_is_started_again_and_reopens_the_chat() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, _inbox) = serve_hub().await;
+    let link = start_acp_link("normal", nebo_runtimes::acp::Agent::Other, "Fake Agent", tmp.path(), &hub_url).await;
+    let mut phone = Phone::connect(link).await;
+    phone.send("chat", json!({ "prompt": "hello", "agent_id": "assistant" })).await;
+    let session_id = phone.next().await["data"]["session_id"].as_str().unwrap().to_owned();
+    let chat_id = session_id.rsplit(":thread:").next().unwrap().to_owned();
+    phone.until("chat_complete").await;
+
+    // The process ends mid-turn: the turn fails in plain words.
+    phone
+        .send("chat", json!({ "prompt": "exit", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    let events = phone.until("chat_error").await;
+    assert_eq!(
+        events.last().unwrap()["data"]["error"],
+        "Could not connect to Fake Agent. Try again."
+    );
+
+    // The next use starts it again; the chat is reopened with
+    // `session/load`, whose replay is the transcript, and carries on.
+    phone
+        .send("chat", json!({ "prompt": "hello", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    let events = phone.until("chat_complete").await;
+    assert_eq!(streamed(&events), "Hello");
+    let page = get(link, &format!("/api/v1/chats/{chat_id}/messages")).await;
+    let contents: Vec<&str> = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(contents, ["hello", "Hello", "hello", "Hello"]);
+    assert_eq!(get(link, "/health").await["chat"], true);
+}
+
+#[tokio::test]
+async fn an_acp_agent_that_is_not_signed_in_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, _inbox) = serve_hub().await;
+    let link = start_acp_link(
+        "signed-out",
+        nebo_runtimes::acp::Agent::ClaudeCode,
+        "Claude Code",
+        tmp.path(),
+        &hub_url,
+    )
+    .await;
+    // Started and answering: chat is announced, so the owner hears why.
+    assert_eq!(get(link, "/health").await["runtime"], "claude-code");
+    let mut phone = Phone::connect(link).await;
+    phone.send("chat", json!({ "prompt": "hello", "agent_id": "assistant" })).await;
+    let error = phone.next().await;
+    assert_eq!(error["type"], "chat_error");
+    assert_eq!(
+        error["data"]["error"],
+        "Claude Code isn't signed in on this computer. Run `claude` once to sign in."
+    );
+}
+
+#[tokio::test]
+async fn an_acp_agent_that_will_not_start_is_not_announced() {
+    use nebo_link::contract::acp::{Acp, Settings};
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, _inbox) = serve_hub().await;
+    let backend = Acp::new(Settings {
+        agent: nebo_runtimes::acp::Agent::Codex,
+        name: "Codex".into(),
+        command: nebo_runtimes::RuntimeCommand {
+            program: tmp.path().join("no-such-agent").to_string_lossy().into_owned(),
+            args: vec![],
+            env: vec![],
+        },
+        workdir: tmp.path().join("work"),
+        log: tmp.path().join("agent.log"),
+        chats_file: tmp.path().join("acp-chats.json"),
+    });
+    let link = serve_contract(("codex", "Codex"), Arc::new(backend), &hub_url).await;
+    assert_eq!(get(link, "/health").await["chat"], false);
+    let (status, refused) = call(link, "GET", "/api/v1/agents/assistant/chats", "").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(refused["error"], "Could not connect to Codex. Try again.");
+}
+
+/// Against a real ACP agent on this machine (`NEBO_LINK_LIVE_ACP` =
+/// `claude-code`, `codex`, `gemini` or `opencode`), found and started the
+/// way pairing does, in a fresh folder, with the fake hub catching inbox
+/// items. Runs on the agent owner's own sign-in and costs real model calls.
+/// Turn 1: "reply with the word ok". Turn 2: a shell command that writes a
+/// file, approved from the ask card when the agent asks (Claude Code does in
+/// its default mode; Codex's sandbox may allow it without asking).
+#[tokio::test]
+#[ignore = "needs NEBO_LINK_LIVE_ACP and a signed-in agent"]
+async fn live_acp_phone_flow() {
+    use nebo_link::contract::acp::{Acp, Settings};
+    use nebo_runtimes::{Environment, Runtime, detect};
+    let Ok(key) = std::env::var("NEBO_LINK_LIVE_ACP") else {
+        eprintln!("NEBO_LINK_LIVE_ACP not set; nothing to do");
+        return;
+    };
+    let install = detect(&Environment::current())
+        .into_iter()
+        .find(|i| i.runtime.acp().is_some_and(|a| a.key() == key))
+        .unwrap_or_else(|| panic!("{key} is not installed here"));
+    assert!(install.config_error.is_none(), "{:?}", install.config_error);
+    let Runtime::Acp(agent) = install.runtime else { unreachable!() };
+    eprintln!("{} via `{} {}`", agent.name(), install.restart.program, install.restart.args.join(" "));
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, inbox) = serve_hub().await;
+    let backend = Acp::new(Settings {
+        agent,
+        name: agent.name().into(),
+        command: install.restart.clone(),
+        workdir: tmp.path().join("work"),
+        log: tmp.path().join("agent.log"),
+        chats_file: tmp.path().join("acp-chats.json"),
+    });
+    let link = serve_contract((agent.key(), agent.name()), Arc::new(backend), &hub_url).await;
+    // A first start may fetch the adapter: probe until it answers.
+    let mut ready = false;
+    for _ in 0..40 {
+        if get(link, "/health").await["chat"] == true {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    assert!(ready, "{} did not start: {}", agent.name(), std::fs::read_to_string(tmp.path().join("agent.log")).unwrap_or_default());
+
+    let mut phone = Phone::connect(link).await;
+    phone.send("chat", json!({ "prompt": "reply with the word ok", "agent_id": "assistant" })).await;
+    let created = phone.next().await;
+    eprintln!("turn 1: {created}");
+    assert_eq!(created["type"], "chat_created", "{created}");
+    let session_id = created["data"]["session_id"].as_str().unwrap().to_owned();
+    let chat_id = session_id.rsplit(":thread:").next().unwrap().to_owned();
+    let events = until_long(&mut phone, "chat_complete").await;
+    for event in &events {
+        eprintln!("turn 1: {event}");
+    }
+    let text = streamed(&events);
+    assert!(text.to_lowercase().contains("ok"), "streamed {text:?}");
+    assert!(events.iter().any(|e| e["type"] == "usage"), "usage reported");
+
+    phone
+        .send(
+            "chat",
+            json!({ "prompt": "Run the shell command `echo acp-live-ok > acp-live.txt && cat acp-live.txt` and tell me exactly what it printed.",
+                    "agent_id": "assistant", "session_id": session_id }),
+        )
+        .await;
+    let mut events = Vec::new();
+    loop {
+        let event = next_long(&mut phone).await;
+        eprintln!("turn 2: {event}");
+        let kind = event["type"].as_str().unwrap().to_owned();
+        if kind == "ask_request" {
+            let request_id = event["data"]["request_id"].clone();
+            phone.send("ask_response", json!({ "request_id": request_id, "value": "Allow once" })).await;
+        }
+        events.push(event);
+        if kind == "chat_complete" || kind == "chat_error" {
+            break;
+        }
+    }
+    assert_eq!(events.last().unwrap()["type"], "chat_complete");
+    assert!(streamed(&events).contains("acp-live-ok"), "streamed {:?}", streamed(&events));
+    assert!(events.iter().any(|e| e["type"] == "tool_start"), "the command shows as a tool card");
+    let asked = events.iter().any(|e| e["type"] == "ask_request");
+    eprintln!("asked: {asked}; inbox items: {:?}", inbox.lock().unwrap());
+    let page = get(link, &format!("/api/v1/chats/{chat_id}/messages")).await;
+    eprintln!("transcript: {}", page["messages"]);
+}
+
+async fn next_long(phone: &mut Phone) -> Value {
+    let message = tokio::time::timeout(Duration::from_secs(240), phone.ws.next())
+        .await
+        .expect("an event within 240 s")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(message.to_text().unwrap()).unwrap()
+}
+
+async fn until_long(phone: &mut Phone, kind: &str) -> Vec<Value> {
+    let mut events = Vec::new();
+    loop {
+        let event = next_long(phone).await;
+        let done = event["type"] == kind || event["type"] == "chat_error";
+        events.push(event);
+        if done {
+            return events;
+        }
+    }
 }

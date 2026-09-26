@@ -1,5 +1,5 @@
 //! Local agent runtimes Nebo Link can connect: where they live, which ports
-//! they serve, and the config changes the link makes to them (recorded so
+//! they serve (or, for an ACP agent, how it is started), and the config changes the link makes to them (recorded so
 //! every change can be undone exactly).
 //!
 //! The crate is a plain library with no I/O beyond the runtimes' own files and
@@ -28,6 +28,7 @@
 //! # Ok::<(), nebo_runtimes::Error>(())
 //! ```
 
+pub mod acp;
 mod change;
 mod detect;
 mod doc;
@@ -49,11 +50,22 @@ pub use environment::Environment;
 pub use error::Error;
 pub use journal::{AppliedChange, Journal};
 
-/// The runtimes Nebo Link supports. The string form is what the hub stores
-/// in `bots.runtime`.
+/// The runtimes Nebo Link supports: OpenClaw, Hermes, and every agent that
+/// speaks ACP ([`acp::Agent`]), driven by one adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Openclaw,
     Hermes,
+    Acp(acp::Agent),
+}
+
+impl Runtime {
+    /// The ACP agent this runtime is, if it is one.
+    pub fn acp(self) -> Option<acp::Agent> {
+        match self {
+            Runtime::Acp(agent) => Some(agent),
+            Runtime::Openclaw | Runtime::Hermes => None,
+        }
+    }
 }

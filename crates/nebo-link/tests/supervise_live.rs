@@ -62,6 +62,7 @@ async fn hermes_gateway_and_dashboard_are_started_and_stopped() {
         },
         api_server_key: String::new(),
         services: vec![],
+        acp: None,
     })
     .unwrap();
 

@@ -1,6 +1,6 @@
 # Nebo Link
 
-Link the OpenClaw or Hermes agent you already run to [NeboAI](https://neboai.com), then reach and manage it from the NeboAI phone app and the web. You don't open ports, set up a VPN or configure a tunnel.
+Link the OpenClaw or Hermes agent you already run, or your coding agent (Claude Code, Codex, Gemini CLI, OpenCode, or any agent that speaks ACP), to [NeboAI](https://neboai.com), then reach and manage it from the NeboAI phone app and the web. You don't open ports, set up a VPN or configure a tunnel.
 
 Status: early development.
 
@@ -28,6 +28,18 @@ This finds OpenClaw (`~/.openclaw`) or Hermes (`~/.hermes`), links it to your Ne
 | `nebo-link run --bot <id>` | Runs one bot's connection in the foreground; this is what the service runs. |
 
 `--bot` is needed only when more than one agent is linked.
+
+### Coding agents (ACP)
+
+Claude Code, Codex, Gemini CLI and OpenCode are linked by name, and any other agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) by the command that starts it in ACP mode:
+
+```sh
+nebo-link ABCD-1234 --runtime claude-code --dir ~/code/my-project
+nebo-link ABCD-1234 --runtime codex
+nebo-link ABCD-1234 --acp-command "goose acp"
+```
+
+`--dir` is the project folder its conversations work in (default: `~/NeboAI/<agent>`, made if missing). The link starts the agent in ACP mode (`gemini --acp`, `opencode acp`; for Claude Code and Codex their ACP adapters, `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`, run with `npx` unless installed) and keeps it running. It runs on the agent's own sign-in on this computer: NeboAI never sees those credentials, nothing in the agent's settings is changed, and an agent that isn't signed in says so in the chat ("Claude Code isn't signed in on this computer. Run `claude` once to sign in."). A coding agent has no web page of its own; it is one employee in the NeboAI app, a conversation is one of its sessions (conversations started in the terminal in that folder show too), and its permission prompts arrive as cards in the chat and items in your inbox. `nebo-link models` doesn't apply to it.
 
 Your agent can also do this for you: the [Connect to NeboAI](skills/connect-to-neboai/SKILL.md) skill teaches OpenClaw and Hermes to install Nebo Link with your code and confirm it's connected.
 
