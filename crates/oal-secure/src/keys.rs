@@ -189,6 +189,14 @@ impl KeyStore {
         PublicKey::of(&self.lock().current)
     }
 
+    /// This device's current private key. OAL uses one key per device: the
+    /// same key proves the device to a relay (`oal-relay`'s proof of
+    /// possession) as authenticates it end to end. Keep it in memory only as
+    /// long as that takes.
+    pub fn secret(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.lock().current.to_bytes())
+    }
+
     /// Every paired peer.
     pub fn peers(&self) -> Vec<Peer> {
         self.lock().peers.clone()

@@ -17,3 +17,6 @@ base64 = { workspace = true }
 getrandom = { workspace = true }
 jsonschema = { workspace = true }
 rustls = { workspace = true }
+sha2 = { workspace = true }
+oal-secure = { path = "../oal-secure" }
+oal-relay = { path = "../oal-relay", default-features = false }

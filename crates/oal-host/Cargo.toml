@@ -1,0 +1,31 @@
+[package]
+name = "oal-host"
+description = "Serve a computer's agents over Open Agent Link: the host layer over link-core, end-to-end encrypted with oal-secure, reached through a relay or on the LAN."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+link-core = { workspace = true }
+oal-secure = { path = "../oal-secure" }
+oal-relay = { path = "../oal-relay", default-features = false }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rcgen = { workspace = true }
+mdns-sd = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+oal-conformance = { path = "../oal-conformance" }
+oal-relay = { path = "../oal-relay" }
