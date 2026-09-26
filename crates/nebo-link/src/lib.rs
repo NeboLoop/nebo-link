@@ -9,6 +9,7 @@ pub mod error;
 pub mod install;
 pub mod janus;
 pub mod link;
+pub mod oal;
 pub mod offsets;
 pub mod proxy;
 pub mod rewrite;

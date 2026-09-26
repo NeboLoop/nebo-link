@@ -116,6 +116,7 @@ impl Linked {
                 runtime: Runtime::Openclaw,
                 via: Via::Install(settings.clone()),
             }],
+            oal: Default::default(),
         };
         let dir = root.bot(&bot_id);
         dir.create().unwrap();

@@ -361,6 +361,29 @@ pub struct Link {
     /// Every agent the bot hosts, the first as [`PRIMARY`]; each is its own
     /// employee on the roster.
     pub agents: Vec<Hosted>,
+    /// How the agents are reached over Open Agent Link besides NeboAI.
+    #[serde(default, skip_serializing_if = "Oal::is_off")]
+    pub oal: Oal,
+}
+
+/// Open Agent Link beside NeboAI: a relay the bot dials out to, and LAN
+/// direct. Every connection is end-to-end encrypted either way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Oal {
+    /// A relay (a self-hosted `oal-relay`): `https://relay.example.com`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    /// LAN direct: the address `/oal` listens on (`0.0.0.0:8481`). Off
+    /// unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan: Option<String>,
+}
+
+impl Oal {
+    pub fn is_off(&self) -> bool {
+        self.relay.is_none() && self.lan.is_none()
+    }
 }
 
 /// One agent a link hosts.
@@ -529,6 +552,7 @@ impl SingleAgent {
                 runtime: self.runtime,
                 via,
             }],
+            oal: Default::default(),
         }
     }
 }
@@ -583,6 +607,9 @@ pub struct Status {
     /// them.
     #[serde(default)]
     pub processes: Vec<crate::supervise::ProcessStatus>,
+    /// Open Agent Link: the relay, LAN direct and the paired devices.
+    #[serde(default)]
+    pub oal: crate::oal::Status,
 }
 
 /// 256 random bits as hex: the link's keys and passwords.
@@ -667,6 +694,7 @@ mod tests {
                     services: vec![],
                 }),
             }],
+            oal: Default::default(),
         }
     }
 

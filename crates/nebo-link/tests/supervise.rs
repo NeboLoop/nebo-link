@@ -62,6 +62,7 @@ impl Fixture {
                     services: vec![],
                 }),
             }],
+            oal: Default::default(),
         })
         .unwrap();
         let dir = bot.agent(PRIMARY);
