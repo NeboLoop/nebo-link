@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 link-core = { workspace = true }
-nebo-runtimes = { workspace = true }
+nebo-runtimes = { workspace = true, features = ["preserve-order"] }
 nebo-comm = { workspace = true }
 nebo-updater = { workspace = true }
 base64 = { workspace = true }

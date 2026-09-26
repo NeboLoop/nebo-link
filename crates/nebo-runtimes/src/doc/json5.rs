@@ -36,7 +36,9 @@ impl Tree for Value {
 
     fn remove(&mut self, key: &str) {
         if let Some(map) = self.as_object_mut() {
-            map.shift_remove(key);
+            // `retain` keeps the others in order, with or without
+            // `preserve-order`.
+            map.retain(|k, _| k != key);
         }
     }
 }
