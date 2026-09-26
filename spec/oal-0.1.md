@@ -100,7 +100,7 @@ Rules:
 
 - The schema is `schemas/frame.schema.json`.
 - Every (connection, channel) pair has its own JSON-RPC id space in each direction. The host maps ids between a client's channel and the agent process. A client never sees the ids the host uses with the agent process.
-- Frames on one channel are delivered in the order they were sent. OAL does not define an order between frames on different channels. For example, a `host/turn` notification can arrive before or after the `session/update` it relates to.
+- Frames on one channel are delivered in the order they were sent. OAL defines one order across channels: `host/turn` with `state: "ended"` comes after the turn's last `session/update` (a replayed one included) and after the `session/prompt` response (section 9). Otherwise frames on different channels have no defined order. For example, `host/turn` `running` can arrive before or after the first `session/update` of the turn.
 - A frame naming an unknown agent gets the error `unknown_agent` (section 15) if it is a request. Otherwise it is dropped.
 - Anything else malformed gets JSON-RPC `-32600` if an id can be read. Otherwise it is dropped.
 
@@ -245,7 +245,7 @@ Agent:
 | `id` | Stable id, unique on the host. Lowercase letters, digits and hyphens, at most 63 characters. It is the `agent` of the agent channel. |
 | `label` | What the owner calls the agent ("app"). |
 | `runtime` | A `runtimes[].id` from `host/info` ("claude-code", "codex", "openclaw"). |
-| `folder` | Absolute path of the folder its sessions work in, on the host. Absent for runtimes without one. |
+| `folder` | Absolute path of the folder its sessions work in, on the host. Absent for agents without one (OpenClaw and Hermes agents, for example). For such an agent the client sends `cwd: "/"` in ACP requests that require a `cwd`, and the host ignores `cwd`. |
 | `online` | True while the agent can take a prompt now, or will be started on first use. |
 | `offlineReason` | When `online` is false, one plain sentence saying why and what to do ("Claude Code isn't signed in on this computer. Run `claude` once to sign in."). |
 | `capabilities` | The agent's `acp:AgentCapabilities`, as its last `initialize` answered. For an adapted runtime, as the adapter provides them. |
@@ -267,11 +267,11 @@ The host is the only ACP client of each agent process. Toward clients it behaves
 |---|---|
 | `initialize` (client to host) | The first request on each agent channel. The host answers it itself with the agent's `acp:InitializeResponse`: `protocolVersion` per ACP negotiation, the agent's `agentCapabilities` and `agentInfo`, and `authMethods: []`. The client's `clientCapabilities` are not passed to the agent. The host initializes the agent process with `fs.readTextFile`, `fs.writeTextFile` and `terminal` false and no `elicitation`. The agent then uses its own tools on its own computer, and never sends `fs/*`, `terminal/*` or `elicitation/*`. |
 | `authenticate`, `logout` | Refused with `not_permitted` ("Sign in to Claude Code on the computer itself."). The agent runs under its owner's own sign-in on the host. |
-| `session/new` | Forwarded. `cwd` MUST be the agent's `folder` or inside it, or the host answers `not_permitted`. The host MUST NOT pass `stdio` MCP servers from a client, because they are commands that would run on the host. It MAY pass `http` and `sse` servers, and 0.1 hosts pass none. On success the caller is attached. |
-| `session/load` | If the session is open in the agent process, the host answers from its record. It sends the record to the caller as `session/update` notifications. Then, if a turn is running, it sends `host/turn` with `state: "running"`. Then it answers with the session's current `modes` and `configOptions`. Then it sends every pending permission request of the session as a new `session/request_permission` on this channel. If the session is not open, the host forwards the request to the agent (same `cwd` and MCP rules as `session/new`). It delivers the agent's replay to the caller only, and records it. The caller is attached. |
-| `session/resume` | As `session/load`, without sending the record. |
-| `session/list` | Forwarded. If `cwd` is absent, the host sets it to the agent's `folder`. |
-| `session/prompt` | If a turn is running in the session, the host refuses with `turn_in_progress`. Otherwise it assigns a turn id and sends `host/turn` `running` to every attached connection. It records each prompt content block as a `user_message_chunk` update and sends those updates to every other attached connection, unless the agent itself echoes the prompt. Then it forwards the prompt (after resolving files, section 14). The agent's updates go to every attached connection. The agent's `acp:PromptResponse` goes to the caller if it is still connected, and `host/turn` `ended` goes to every attached connection. |
+| `session/new` | Forwarded. For an agent with a `folder`, `cwd` MUST be that folder or inside it, or the host answers `not_permitted`. For an agent without one, the client sends `"/"` and the host ignores `cwd`. The host MUST NOT pass `stdio` MCP servers from a client, because they are commands that would run on the host. It MAY pass `http` and `sse` servers, and 0.1 hosts pass none. On success the caller is attached. |
+| `session/load` | If the session is open in the agent process, the host answers from its record. It sends the record to the caller as `session/update` notifications. Then it sends the session's most recent `host/turn`: `running` if a turn is running, otherwise the `ended` notice of the last turn, if the session has had one. Then it answers with the session's current `modes` and `configOptions`. Then it sends every pending permission request of the session as a new `session/request_permission` on this channel. If the session is not open, the host forwards the request to the agent (same `cwd` and MCP rules as `session/new`). It delivers the agent's replay to the caller only, and records it. The caller is attached. |
+| `session/resume` | As `session/load`, without sending the record. The most recent `host/turn` and the pending permission requests are still sent. |
+| `session/list` | Forwarded. If `cwd` is absent, the host sets it to the agent's `folder`. For an agent without a folder the host ignores `cwd`. |
+| `session/prompt` | If a turn is running in the session, the host refuses with `turn_in_progress`. Otherwise it assigns a turn id and sends `host/turn` `running` to every attached connection. It records each prompt content block as a `user_message_chunk` update and sends those updates to every other attached connection, unless the agent itself echoes the prompt. Then it forwards the prompt (after resolving files, section 14). The agent's updates go to every attached connection. The agent's `acp:PromptResponse` goes to the caller if it is still connected. Then `host/turn` `ended` goes to every attached connection (section 9 fixes this order). |
 | `session/cancel` | Accepted from any attached connection and forwarded. The host answers the agent's pending permission requests in that session with `{"outcome":"cancelled"}`, as ACP requires of a client, and resolves them (section 10). |
 | `session/set_mode`, `session/set_config_option` | Forwarded. On success the host sends the resulting `current_mode_update` or `config_option_update` to every other attached connection, and updates its record. A host MAY refuse, with `not_permitted`, a remote change to a mode that lets the agent act without asking. Owners decide that on the host. |
 | `session/close`, `session/delete` | Forwarded. Every connection is detached from the session and the record is dropped. |
@@ -297,6 +297,10 @@ A turn is one `session/prompt`. `host/turn` (notification, host to client) tells
 | `error` | On `ended`, `{code, message}` when the turn ended with an error. |
 | `usage` | On `ended`, the tokens and cost of this turn, when the agent reports them. |
 
+**Order.** A host MUST send `host/turn` with `state: "ended"` only after every `session/update` of the turn, and, on the connection that sent the prompt, after the `session/prompt` response. A client can therefore treat `ended` as final: no update of that turn follows it. This is the only ordering guarantee between the host channel and agent channels.
+
+**On attach.** `session/load` and `session/resume` re-send the session's most recent `host/turn` after the replay (section 8), including an `ended` notice for a turn that finished while the client was away.
+
 `usage` has ACP's `Usage` fields and meanings (`inputTokens`, `outputTokens`, `thoughtTokens`, `cachedReadTokens`, `cachedWriteTokens`, `totalTokens`), plus `cost: {amount, currency}`. It always covers this one turn. If an agent reports totals for the whole session, the host subtracts the previous turn's totals. ACP marks its prompt `usage` as unstable. OAL's `usage` is stable, and the host fills it from whatever the agent provides.
 
 ## 10. Permission requests
@@ -321,7 +325,7 @@ A request is answered by whichever comes first:
 Then the host:
 
 1. answers the agent with the `acp:RequestPermissionOutcome`;
-2. sends `$/cancel_request {requestId}` to every other connection that still has the request open. Those clients answer it with error `-32800`, as ACP requires;
+2. sends `$/cancel_request {requestId}` to every connection that holds a copy of the request, including the connection whose answer won. One rule for everyone keeps clients simple: a client closes its copy when it receives `$/cancel_request`, whether or not it answered. Clients answer it with error `-32800`, as ACP requires, and the host ignores those answers;
 3. sends `host/pending_update` `{change: "resolved", request, outcome, answeredBy}` to every authenticated connection. `answeredBy` is `{deviceId, name}`, or null when the answer came from the computer itself;
 4. treats any later answer as follows: a late response on an agent channel is ignored; a late `host/answer` gets `already_answered`, and an unknown id gets `unknown_request`.
 
@@ -346,9 +350,9 @@ To resume, the client:
 2. sends `initialize` on the agent channel;
 3. sends `session/load` for each session it shows.
 
-The host then sends, in this order on that channel: the session record (including the part of the running turn so far), `host/turn` `running` on the host channel if a turn is still running, the `session/load` response, and a `session/request_permission` for each pending request. The client continues from there. It receives the rest of the turn's updates and `host/turn` `ended`. The `PromptResponse` of a prompt sent on a closed connection is not delivered, because `host/turn` `ended` carries the same outcome.
+The host then sends, on the agent channel and in this order, the session record (including the part of the running turn so far), the `session/load` response, and a `session/request_permission` for each pending request. On the host channel, after the record, it sends the session's most recent `host/turn`. The most recent `host/turn` is `running` if a turn is still running. If the turn ended while the client was away, it is that turn's `ended` notice, with its `stopReason` or `error` and its `usage`. If the turn is still running, the client continues from there and receives the rest of the turn's updates and then `host/turn` `ended`. The `PromptResponse` of a prompt sent on a closed connection is not delivered, because `host/turn` `ended` carries the same outcome.
 
-Frames lost while the client was away are covered by the record. OAL 0.1 does not resend individual frames.
+Frames lost while the client was away are covered by the record. OAL 0.1 does not resend individual frames. `session/load` always sends the whole record, so a client that keeps its transcript across a reconnect receives updates it has already seen. Until a replay cursor arrives in 0.2 (section 18), clients MUST de-duplicate: the simplest way is to replace the session's transcript with the replay. A client that merges instead matches tool calls by `toolCallId` and treats a `host/turn` whose `turnId` it has already seen end as a repeat.
 
 ## 13. Versioning
 
@@ -495,7 +499,7 @@ The reference implementation is `crates/oal-secure` in nebo-link.
 - End-to-end encryption and PAKE pairing (section 17).
 - Files produced by agents: a host method that publishes a file inside the agent's folder to a URL the client can fetch.
 - Sending to a running turn (steering, or queueing a message for after the turn), instead of `turn_in_progress`.
-- Replay from a cursor (`session/load` since the last update seen), so a reconnect doesn't resend the whole record.
+- Replay from a cursor (`session/load` since the last update seen), so a reconnect doesn't resend the whole record. Until then clients de-duplicate (section 12).
 - Owner-level agent management over OAL: adding and removing agents, and setting an agent's default mode.
 - ACP `elicitation` and client-side `fs`/`terminal` over OAL.
 - A defined interface between relay and host for push notifications.
@@ -589,3 +593,13 @@ Host channel, client to host (requests): `host/hello`, `host/pair`, `host/info`,
 Host channel, host to client (notifications): `host/agent_update`, `host/turn`, `host/pending_update`.
 
 Agent channels: ACP v1, unchanged. The host serves `initialize`, `session/new`, `session/load`, `session/resume`, `session/list`, `session/prompt`, `session/cancel`, `session/set_mode`, `session/set_config_option`, `session/close` and `session/delete`, and refuses `authenticate` and `logout`. It sends `session/update`, `session/request_permission` and `$/cancel_request`.
+
+## Changes
+
+- **0.1, amended 2026-09-26** (still a draft; implementation work on the client SDKs found these gaps):
+  - `session/load` and `session/resume` re-send the session's most recent `host/turn` after the replay, including the `ended` notice of a turn that finished while the client was away (sections 8, 9, 12).
+  - `host/turn` `ended` comes after the turn's last `session/update` and after the `session/prompt` response. This is the one ordering guarantee across channels (sections 4.2, 9).
+  - Clients de-duplicate replayed updates until the replay cursor in 0.2 (sections 12, 18).
+  - `$/cancel_request` goes to every connection holding a copy of a resolved permission request, including the one whose answer won (section 10).
+  - An agent without a folder has no `folder` in `host/agents`. The client sends `cwd: "/"` and the host ignores `cwd` for that agent (sections 7.2, 8).
+- **0.1, 2026-09-26**: first draft.

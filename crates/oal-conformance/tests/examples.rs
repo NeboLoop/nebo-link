@@ -62,6 +62,11 @@ async fn reconnect() {
 }
 
 #[tokio::test]
+async fn turn_ended_while_away() {
+    passes("turn-ended-while-away").await;
+}
+
+#[tokio::test]
 async fn cancel() {
     passes("cancel").await;
 }
@@ -132,6 +137,33 @@ async fn a_wrong_answer_fails_the_example() {
         error.contains("step 5") && error.contains("timed out"),
         "{error}"
     );
+}
+
+/// A host that sends `host/turn` `ended` before the prompt's answer fails an
+/// `ordered` step. Here the example is changed to expect the two the other
+/// way round, which the fake host (correctly) never does.
+#[tokio::test]
+async fn an_out_of_order_frame_fails_an_ordered_step() {
+    let original: serde_json::Value =
+        serde_json::from_str(spec::example("cancel").unwrap().json).unwrap();
+    let mut doc = original.clone();
+    let steps = doc["steps"].as_array_mut().unwrap();
+    let n = steps.len();
+    steps.swap(n - 2, n - 1);
+    steps[n - 2].as_object_mut().unwrap().remove("ordered");
+    steps[n - 1]["ordered"] = json!(true);
+    let json: &'static str = Box::leak(doc.to_string().into_boxed_str());
+    let examples: Vec<&'static Example> = vec![
+        spec::example("pair").unwrap(),
+        spec::example("agents").unwrap(),
+        Box::leak(Box::new(Example {
+            name: "cancel-swapped",
+            json,
+        })),
+    ];
+    let outcomes = transcript::run(&target().await, &examples).await;
+    let error = outcomes[2].result.as_ref().unwrap_err();
+    assert!(error.contains("arrived before"), "{error}");
 }
 
 /// `oal-conformance agent` speaks ACP on stdio, for a host under test.

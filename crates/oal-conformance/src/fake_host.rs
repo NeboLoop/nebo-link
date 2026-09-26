@@ -197,6 +197,8 @@ struct Session {
     record: Vec<Value>,
     modes: Value,
     turn: Option<Turn>,
+    /// The `host/turn` `ended` notice of the last turn, re-sent on attach.
+    last_ended: Option<Value>,
     /// A connection whose `session/load` was forwarded to the agent.
     loading: Option<u64>,
 }
@@ -675,21 +677,19 @@ impl Host {
             index,
             json!({ "outcome": "selected", "optionId": option }),
             by,
-            None,
         );
         Ok(json!({}))
     }
 
-    /// Answers the agent, withdraws the request from every other connection
-    /// and tells everyone (section 10).
-    fn resolve(&mut self, index: usize, outcome: Value, by: Value, answered_on: Option<u64>) {
+    /// Answers the agent, withdraws the request from every connection that
+    /// holds a copy, the one whose answer won included, and tells everyone
+    /// (section 10).
+    fn resolve(&mut self, index: usize, outcome: Value, by: Value) {
         let pending = self.pending.remove(index);
         self.resolved.insert(pending.id.clone());
         let _ = self.to_agent.send(json!({ "jsonrpc": "2.0", "id": pending.agent_request, "result": { "outcome": outcome } }));
         for (conn, request) in &pending.open_on {
-            if Some(*conn) != answered_on {
-                self.acp_notify(*conn, "$/cancel_request", json!({ "requestId": request }));
-            }
+            self.acp_notify(*conn, "$/cancel_request", json!({ "requestId": request }));
         }
         self.notify_all("host/pending_update", json!({ "change": "resolved", "request": pending.describe(), "outcome": outcome, "answeredBy": by }));
     }
@@ -836,8 +836,8 @@ impl Host {
     }
 
     /// `session/load` or `session/resume` of a session open in the agent
-    /// (section 8): the record, the running turn, the answer, then the
-    /// pending permission requests.
+    /// (section 8): the record, the most recent `host/turn` (running, or the
+    /// last one ended), the answer, then the pending permission requests.
     fn attach(&mut self, conn: u64, id: &Value, sid: &str, replay: bool) {
         let session = self.sessions.get_mut(sid).expect("session");
         session.attached.insert(conn);
@@ -853,6 +853,8 @@ impl Host {
         let session = &self.sessions[sid];
         if let Some(turn) = &session.turn {
             self.notify(conn, "host/turn", self.turn_notice(sid, turn, "running"));
+        } else if let Some(ended) = &session.last_ended {
+            self.notify(conn, "host/turn", ended.clone());
         }
         self.reply(conn, Some(AGENT), id, Ok(json!({ "modes": session.modes })));
         for index in 0..self.pending.len() {
@@ -877,7 +879,7 @@ impl Host {
             outcome => outcome,
         };
         let by = self.device_ref(conn);
-        self.resolve(index, outcome, by, Some(conn));
+        self.resolve(index, outcome, by);
     }
 
     fn cancel(&mut self, conn: u64, sid: String) {
@@ -893,8 +895,7 @@ impl Host {
         );
         while let Some(index) = self.pending.iter().position(|p| p.session == sid) {
             let by = self.device_ref(conn);
-            // The canceller answers its own copies `cancelled`, as ACP says.
-            self.resolve(index, json!({ "outcome": "cancelled" }), by, Some(conn));
+            self.resolve(index, json!({ "outcome": "cancelled" }), by);
         }
     }
 
@@ -982,6 +983,8 @@ impl Host {
         let result = &msg["result"];
         let ok = msg.get("error").is_none();
         let sid = session.unwrap_or_else(|| result["sessionId"].as_str().unwrap_or("").to_owned());
+        // `host/turn` `ended` goes out after the prompt's answer (section 9).
+        let mut ended = None;
         match method.as_str() {
             "session/new" if ok => {
                 let session = Session {
@@ -989,7 +992,7 @@ impl Host {
                     modes: result["modes"].clone(),
                     ..Session::default()
                 };
-                self.sessions.insert(sid, session);
+                self.sessions.insert(sid.clone(), session);
             }
             "session/load" | "session/resume" => match self.sessions.get_mut(&sid) {
                 Some(s) if ok => {
@@ -1003,7 +1006,7 @@ impl Host {
                         modes: result["modes"].clone(),
                         ..Session::default()
                     };
-                    self.sessions.insert(sid, session);
+                    self.sessions.insert(sid.clone(), session);
                 }
                 _ => {
                     self.sessions.remove(&sid);
@@ -1020,9 +1023,7 @@ impl Host {
                     } else {
                         notice["error"] = msg["error"].clone();
                     }
-                    for c in self.sessions[&sid].attached.clone() {
-                        self.notify(c, "host/turn", notice.clone());
-                    }
+                    ended = Some(notice);
                 }
             }
             "session/set_mode" if ok => {
@@ -1044,6 +1045,12 @@ impl Host {
         let mut answer = msg.clone();
         answer["id"] = id;
         self.send(conn, json!({ "agent": AGENT, "acp": answer }));
+        if let (Some(notice), Some(session)) = (ended, self.sessions.get_mut(&sid)) {
+            session.last_ended = Some(notice.clone());
+            for c in session.attached.clone() {
+                self.notify(c, "host/turn", notice.clone());
+            }
+        }
     }
 }
 

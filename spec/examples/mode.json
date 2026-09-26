@@ -17,6 +17,6 @@
     {"note": "...runs with no permission request.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "{{session}}", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "{{call}}", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "hi"}}]}}}}},
     {"note": "The reply.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "{{session}}", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Done."}}}}}},
     {"note": "The prompt's answer.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}}}},
-    {"note": "The turn ends.", "expect": {"jsonrpc": "2.0", "method": "host/turn", "params": {"agent": "{{agent}}", "sessionId": "{{session}}", "turnId": "{{turn}}", "state": "ended", "stopReason": "end_turn", "usage": {"inputTokens": 12, "outputTokens": 5, "totalTokens": 17}}}}
+    {"note": "The turn ends, after the prompt's answer.", "expect": {"jsonrpc": "2.0", "method": "host/turn", "params": {"agent": "{{agent}}", "sessionId": "{{session}}", "turnId": "{{turn}}", "state": "ended", "stopReason": "end_turn", "usage": {"inputTokens": 12, "outputTokens": 5, "totalTokens": 17}}}, "ordered": true}
   ]
 }

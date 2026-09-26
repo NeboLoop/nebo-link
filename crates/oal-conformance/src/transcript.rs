@@ -6,7 +6,10 @@
 //! - `{"connect": "host" | "pair"}` opens the connection (to the pair URL
 //!   for `pair`).
 //! - `{"send": frame}` sends a frame.
-//! - `{"expect": frame}` waits up to 5 s for a matching frame.
+//! - `{"expect": frame}` waits up to 5 s for a matching frame. With
+//!   `"ordered": true` the frame must also have arrived after the frame the
+//!   previous `expect` on this connection matched (the one guarantee across
+//!   channels: `host/turn` `ended` after the turn's updates and answer).
 //! - `{"close": true}` closes the connection.
 //! - `{"expectClose": code}` waits for the host to close with `code`.
 //!
@@ -20,7 +23,8 @@
 //!
 //! Order: frames on one agent channel must arrive in the order expected
 //! (notifications nobody expects are skipped); host-channel notifications
-//! may arrive in any order relative to each other and to agent channels.
+//! may arrive in any order relative to each other and to agent channels,
+//! except where a step says `"ordered": true`.
 //! Every host-channel frame received is checked against `spec/schemas/`.
 
 use std::collections::{HashMap, VecDeque};
@@ -101,7 +105,11 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct Conn {
     socket: Socket,
-    buffer: VecDeque<Value>,
+    /// Frames received and not yet matched, with their arrival number.
+    buffer: VecDeque<(u64, Value)>,
+    received: u64,
+    /// The arrival number of the frame the last `expect` matched.
+    last_matched: u64,
     /// Host-channel requests sent, by id, for checking their results.
     sent: HashMap<String, String>,
 }
@@ -143,6 +151,8 @@ impl Run<'_> {
                 Conn {
                     socket,
                     buffer: VecDeque::new(),
+                    received: 0,
+                    last_matched: 0,
                     sent: HashMap::new(),
                 },
             );
@@ -168,7 +178,8 @@ impl Run<'_> {
                 .map_err(|e| format!("send failed: {e}"));
         }
         if let Some(expected) = step.get("expect") {
-            return expect(conn, self.schemas, expected, self.captures).await;
+            let ordered = step["ordered"] == true;
+            return expect(conn, self.schemas, expected, ordered, self.captures).await;
         }
         if step["close"] == true {
             let _ = conn.socket.close(None).await;
@@ -220,6 +231,7 @@ async fn expect(
     conn: &mut Conn,
     schemas: &Schemas,
     expected: &Value,
+    ordered: bool,
     captures: &mut HashMap<String, Value>,
 ) -> Result<(), String> {
     // The expected frame's channel, with a captured agent id put in.
@@ -236,13 +248,20 @@ async fn expect(
     loop {
         let mut index = 0;
         while index < conn.buffer.len() {
-            let frame = &conn.buffer[index];
+            let (seq, frame) = &conn.buffer[index];
+            let seq = *seq;
             if channel(frame) != want_channel.as_deref() {
                 index += 1;
                 continue;
             }
             if let Some(found) = matches(expected, frame, captures) {
+                if ordered && seq < conn.last_matched {
+                    return Err(format!(
+                        "{frame} arrived before the frame the previous step matched; it must come after it"
+                    ));
+                }
                 *captures = found;
+                conn.last_matched = seq;
                 conn.buffer.remove(index);
                 return Ok(());
             }
@@ -260,7 +279,7 @@ async fn expect(
         let received = tokio::time::timeout_at(deadline, conn.socket.next()).await;
         match received {
             Err(_) => {
-                let seen: Vec<String> = conn.buffer.iter().map(Value::to_string).collect();
+                let seen: Vec<String> = conn.buffer.iter().map(|(_, f)| f.to_string()).collect();
                 return Err(format!(
                     "timed out waiting for {expected}; unmatched frames: [{}]",
                     seen.join(", ")
@@ -277,7 +296,8 @@ async fn expect(
                 schemas
                     .check(&frame, answered)
                     .map_err(|e| format!("the host sent {frame}, which {e}"))?;
-                conn.buffer.push_back(frame);
+                conn.received += 1;
+                conn.buffer.push_back((conn.received, frame));
             }
             Ok(Some(Ok(Message::Close(close)))) => {
                 return Err(format!(
