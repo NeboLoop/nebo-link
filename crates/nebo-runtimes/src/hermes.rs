@@ -1,5 +1,9 @@
 //! Hermes: `~/.hermes` (the default profile), `~/.hermes/profiles/<name>`,
-//! each with `config.yaml` and `.env`.
+//! each with `config.yaml` and `.env`; and the client of its API server
+//! ([`runs`]).
+
+pub mod runs;
+mod sse;
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -13,8 +17,8 @@ use crate::doc::yaml::Yaml;
 use crate::doc::{Edit, Format, Tree};
 use crate::environment::expand_tilde;
 use crate::{
-    Endpoint, Environment, Error, Installation, NeboaiModels, Profile, Runtime, RuntimeCommand,
-    Service,
+    ApiServer, Endpoint, Environment, Error, Installation, NeboaiModels, Profile, Runtime,
+    RuntimeCommand, Service,
 };
 
 /// `hermes_cli/web_server.py` `start_server(port=9119)`.
@@ -340,15 +344,32 @@ pub(crate) fn neboai_models(models: &NeboaiModels) -> Vec<Edit> {
     ]
 }
 
+/// The edits for [`crate::Change::ApiServer`]: `API_SERVER_KEY` in the
+/// profile's `.env` (`gateway/config_env.py` `_api_server` enables the API
+/// server on a usable key; `api_server.py` `_check_auth` compares the bearer
+/// token with it).
+pub(crate) fn api_server_key(api: &ApiServer) -> Vec<Edit> {
+    vec![Edit::set(&["API_SERVER_KEY"], json!(api.key))]
+}
+
 /// The config file of `profile` (`None` or `"default"`: the root's).
 pub(crate) fn config_file(install: &Installation, profile: Option<&str>) -> Result<PathBuf, Error> {
+    profile_home(install, profile).map(|home| home.join("config.yaml"))
+}
+
+/// The `.env` of `profile` (`None` or `"default"`: the root's).
+pub(crate) fn env_file(install: &Installation, profile: Option<&str>) -> Result<PathBuf, Error> {
+    profile_home(install, profile).map(|home| home.join(".env"))
+}
+
+fn profile_home(install: &Installation, profile: Option<&str>) -> Result<PathBuf, Error> {
     match profile {
-        None | Some("default") => Ok(install.config_path.clone()),
+        None | Some("default") => Ok(install.home.clone()),
         Some(name) => install
             .profiles
             .iter()
             .find(|profile| profile.name == name)
-            .map(|profile| profile.config_path.clone())
+            .map(|profile| profile.home.clone())
             .ok_or_else(|| Error::UnknownProfile(name.to_owned())),
     }
 }

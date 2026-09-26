@@ -13,6 +13,11 @@ thiserror = { workspace = true }
 dirs = { workspace = true }
 json5 = { workspace = true }
 yaml_serde = { workspace = true }
+# The runtime clients (`hermes::runs`).
+reqwest = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }

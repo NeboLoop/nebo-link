@@ -33,12 +33,13 @@ mod detect;
 mod doc;
 mod environment;
 mod error;
-mod hermes;
+pub mod hermes;
 mod journal;
 mod openclaw;
 
 pub use change::{
-    Change, ChangeKind, Model, NeboaiModels, Outcome, PathMode, ProxyAccess, ProxyRoute,
+    ApiServer, Change, ChangeKind, Model, NeboaiModels, Outcome, PathMode, ProxyAccess,
+    ProxyRoute,
 };
 pub use detect::{Endpoint, Installation, Profile, RuntimeCommand, Service, detect};
 pub use environment::Environment;

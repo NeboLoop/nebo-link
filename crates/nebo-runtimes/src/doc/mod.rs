@@ -8,6 +8,7 @@
 //! up to the whole document. The written file therefore always means exactly
 //! the edited tree.
 
+pub(crate) mod dotenv;
 pub(crate) mod json5;
 pub(crate) mod yaml;
 
