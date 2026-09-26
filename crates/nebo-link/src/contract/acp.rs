@@ -42,16 +42,16 @@ use nebo_runtimes::acp::client::{
     RpcError,
 };
 use nebo_runtimes::acp::protocol::{
-    self, Initialized, PermissionRequest, PlanEntry, PromptResult, ToolCall as AcpToolCall,
-    ToolStatus, Update,
+    self, Initialized, Modes, PermissionRequest, PlanEntry, PromptResult, SessionMode,
+    ToolCall as AcpToolCall, ToolStatus, Update,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Role, ToolCall,
-    ToolResult, Turn, TurnEvent, Usage,
+    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Permission, Role,
+    ToolCall, ToolResult, Turn, TurnEvent, Usage,
 };
 
 /// How long the agent gets to answer `initialize`: `npx` may be fetching the
@@ -147,6 +147,9 @@ struct Session {
     turn: Option<Sink>,
     model: Option<String>,
     title: Option<String>,
+    /// The permission modes the agent offers this session, and the one it
+    /// is in; `None` when it offers none.
+    modes: Option<Modes>,
 }
 
 impl Shared {
@@ -279,6 +282,7 @@ impl Shared {
                 let model = protocol::model(&result);
                 if let Some(session) = state.map.get_mut(chat) {
                     session.model = model.clone();
+                    session.modes = protocol::modes(&result);
                 }
                 state.model = model.or(state.model.take());
                 Ok(())
@@ -348,6 +352,7 @@ impl Shared {
                 id.clone(),
                 Session {
                     model,
+                    modes: protocol::modes(&result),
                     ..Session::default()
                 },
             );
@@ -384,9 +389,53 @@ impl Shared {
         Ok(model)
     }
 
-    async fn turn(self: Arc<Self>, chat: String, prompt: String) -> Result<Turn, Error> {
+    /// Runs `chat` in the agent's mode for `permission`, switching it with
+    /// `session/set_mode` when it is in another. A mode the agent does not
+    /// offer leaves the session as it is (its own requests still ask); a
+    /// switch it refuses fails the turn, so nothing runs looser than the
+    /// owner chose.
+    async fn apply_permission(&self, live: &Live, chat: &str, permission: Permission) -> Result<(), Error> {
+        let wanted = {
+            let state = live.state.lock().expect("sessions");
+            let Some(modes) = state.map.get(chat).and_then(|s| s.modes.as_ref()) else {
+                return Ok(());
+            };
+            match mode_for(permission, &modes.available) {
+                Some(id) if id != modes.current => id.to_owned(),
+                _ => return Ok(()),
+            }
+        };
+        live.conn
+            .request("session/set_mode", json!({ "sessionId": chat, "modeId": wanted }))
+            .await
+            .map_err(|e| {
+                Error::Failed(format!("{} could not switch to its {wanted} mode: {}", self.name(), e.message))
+            })?;
+        tracing::info!(session = %chat, mode = %wanted, ?permission, "acp: session mode set");
+        if let Some(modes) = live
+            .state
+            .lock()
+            .expect("sessions")
+            .map
+            .get_mut(chat)
+            .and_then(|s| s.modes.as_mut())
+        {
+            modes.current = wanted;
+        }
+        Ok(())
+    }
+
+    async fn turn(
+        self: Arc<Self>,
+        chat: String,
+        prompt: String,
+        permission: Option<Permission>,
+    ) -> Result<Turn, Error> {
         let live = self.live().await?;
         self.open(&live, &chat).await?;
+        if let Some(permission) = permission {
+            self.apply_permission(&live, &chat, permission).await?;
+        }
         let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<TurnEvent>();
         {
             let mut state = live.state.lock().expect("sessions");
@@ -611,6 +660,11 @@ impl Session {
             }
             Update::Title(title) => self.title = Some(title),
             Update::Model(model) => self.model = Some(model),
+            Update::Mode(mode) => {
+                if let Some(modes) = &mut self.modes {
+                    modes.current = mode;
+                }
+            }
             Update::Other => {}
         }
     }
@@ -930,13 +984,40 @@ impl Backend for Acp {
         agent: &'a str,
         chat: &'a str,
         prompt: String,
+        permission: Option<Permission>,
     ) -> BoxFuture<'a, Result<Turn, Error>> {
         Box::pin(async move {
             self.check_agent(agent)?;
             let chat = chat.to_owned();
-            self.detached(|shared| shared.turn(chat, prompt)).await
+            self.detached(|shared| shared.turn(chat, prompt, permission)).await
         })
     }
+}
+
+/// The agent's mode for a Nebo permission: by the ids Claude Code and Codex
+/// use, else by the kind any agent may say its modes are.
+///
+/// | Nebo        | Claude Code         | Codex               | kind          |
+/// |-------------|---------------------|---------------------|---------------|
+/// | Ask         | `default`           | `read-only`         | `standard`    |
+/// | Automatic   | `acceptEdits`       | `agent`             | `auto_review` |
+/// | Plan        | `plan`              | (as Ask)            | `plan`        |
+/// | Full access | `bypassPermissions` | `agent-full-access` | `full_access` |
+fn mode_for(permission: Permission, modes: &[SessionMode]) -> Option<&str> {
+    let (ids, kinds): (&[&str], &[&str]) = match permission {
+        Permission::Ask => (&["default", "read-only"], &["standard"]),
+        Permission::Automatic => (&["acceptEdits", "agent"], &["auto_review"]),
+        Permission::Plan => (&["plan", "default", "read-only"], &["plan", "standard"]),
+        Permission::FullAccess => (&["bypassPermissions", "agent-full-access"], &["full_access"]),
+    };
+    ids.iter()
+        .find_map(|id| modes.iter().find(|m| m.id == *id))
+        .or_else(|| {
+            kinds
+                .iter()
+                .find_map(|kind| modes.iter().find(|m| m.kind.as_deref() == Some(*kind)))
+        })
+        .map(|m| m.id.as_str())
 }
 
 /// One chat the link created, for agents that can't list their sessions.
@@ -1047,6 +1128,47 @@ fn unix_seconds(text: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offered(modes: &[(&str, &str)]) -> Vec<SessionMode> {
+        modes
+            .iter()
+            .map(|(id, kind)| SessionMode {
+                id: (*id).into(),
+                kind: Some((*kind).into()),
+            })
+            .collect()
+    }
+
+    /// Each Nebo permission lands on the mode the adapters advertised on
+    /// 2026-09-26 (claude-agent-acp 0.81.2, codex-acp 1.13.1), and on any
+    /// other agent's by the kind it says the mode is.
+    #[test]
+    fn permissions_map_onto_the_agents_modes() {
+        let claude = offered(&[
+            ("default", "standard"),
+            ("acceptEdits", "standard"),
+            ("plan", "plan"),
+            ("auto", "auto_review"),
+            ("bypassPermissions", "full_access"),
+        ]);
+        let codex = offered(&[("read-only", "standard"), ("agent", "auto_review"), ("agent-full-access", "full_access")]);
+        let other = offered(&[("careful", "standard"), ("yolo", "full_access"), ("review", "auto_review")]);
+        let cases = [
+            (Permission::Ask, "default", "read-only", Some("careful")),
+            (Permission::Automatic, "acceptEdits", "agent", Some("review")),
+            (Permission::Plan, "plan", "read-only", Some("careful")),
+            (Permission::FullAccess, "bypassPermissions", "agent-full-access", Some("yolo")),
+        ];
+        for (permission, on_claude, on_codex, on_other) in cases {
+            assert_eq!(mode_for(permission, &claude), Some(on_claude), "{permission:?}");
+            assert_eq!(mode_for(permission, &codex), Some(on_codex), "{permission:?}");
+            assert_eq!(mode_for(permission, &other), on_other, "{permission:?}");
+        }
+        // Claude Code without bypass offered: full access is not invented.
+        let no_bypass = offered(&[("default", "standard"), ("acceptEdits", "standard")]);
+        assert_eq!(mode_for(Permission::FullAccess, &no_bypass), None);
+        assert_eq!(mode_for(Permission::Ask, &[]), None);
+    }
 
     #[test]
     fn rfc3339_times() {

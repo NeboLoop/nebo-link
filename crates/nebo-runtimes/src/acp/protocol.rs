@@ -73,6 +73,42 @@ pub fn model(result: &Value) -> Option<String> {
     })
 }
 
+/// A permission mode the agent offers a session (`modes.availableModes`):
+/// Claude Code's `default`, `acceptEdits`, `plan`, `auto`,
+/// `bypassPermissions`; Codex's `read-only`, `agent`, `agent-full-access`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMode {
+    pub id: String,
+    /// `_meta.kind`, where the agent says what the mode is: `standard`,
+    /// `plan`, `auto_review` or `full_access`.
+    pub kind: Option<String>,
+}
+
+/// A session's modes, from a `session/new` / `session/load` /
+/// `session/resume` answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Modes {
+    pub current: String,
+    pub available: Vec<SessionMode>,
+}
+
+pub fn modes(result: &Value) -> Option<Modes> {
+    let modes = &result["modes"];
+    Some(Modes {
+        current: text(&modes["currentModeId"])?,
+        available: modes["availableModes"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| {
+                Some(SessionMode {
+                    id: text(&m["id"])?,
+                    kind: text(&m["_meta"]["kind"]),
+                })
+            })
+            .collect(),
+    })
+}
+
 /// One `session/list` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -233,7 +269,9 @@ pub enum Update {
     Plan(Vec<PlanEntry>),
     Title(String),
     Model(String),
-    /// Anything the link does not use (commands, modes, context usage).
+    /// The session's permission mode changed (`current_mode_update`).
+    Mode(String),
+    /// Anything the link does not use (commands, context usage).
     Other,
 }
 
@@ -271,6 +309,7 @@ pub fn update(params: &Value) -> Option<(String, Update)> {
         )),
         "session_info_update" => text(&update["title"]).map(Update::Title),
         "config_option_update" => model(update).map(Update::Model),
+        "current_mode_update" => text(&update["currentModeId"]).map(Update::Mode),
         _ => None,
     };
     Some((session, parsed.unwrap_or(Update::Other)))
@@ -393,6 +432,22 @@ mod tests {
         let codex_new = json!({ "sessionId": "s", "models": { "currentModelId": "gpt-x[low]",
             "availableModels": [{ "modelId": "gpt-x[low]", "name": "X (low)" }] } });
         assert_eq!(model(&codex_new).as_deref(), Some("X (low)"));
+        assert_eq!(modes(&codex_new), None, "no modes offered");
+
+        let claude_modes = json!({ "sessionId": "s", "modes": { "currentModeId": "default", "availableModes": [
+            { "id": "default", "name": "Manual", "_meta": { "kind": "standard" } },
+            { "id": "acceptEdits", "name": "Accept edits", "_meta": { "kind": "standard" } },
+            { "id": "bypassPermissions", "name": "Bypass permissions", "_meta": { "kind": "full_access" } },
+            { "id": "odd" } ] } });
+        let parsed = modes(&claude_modes).unwrap();
+        assert_eq!(parsed.current, "default");
+        assert_eq!(parsed.available.len(), 4);
+        assert_eq!(parsed.available[2].kind.as_deref(), Some("full_access"));
+        assert_eq!(parsed.available[3].kind, None);
+        assert_eq!(
+            update_of(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" })),
+            Update::Mode("plan".into())
+        );
 
         let (session, update) = update(&json!({ "sessionId": "s", "update": {
             "sessionUpdate": "tool_call", "toolCallId": "toolu_1", "name": "Bash", "rawInput": {},
