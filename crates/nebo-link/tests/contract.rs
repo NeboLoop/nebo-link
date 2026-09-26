@@ -2253,7 +2253,9 @@ async fn an_acp_agent_that_will_not_start_is_not_announced() {
 /// items. Runs on the agent owner's own sign-in and costs real model calls.
 /// Turn 1: "reply with the word ok". Turn 2: a shell command that writes a
 /// file, approved from the ask card when the agent asks (Claude Code does in
-/// its default mode; Codex's sandbox may allow it without asking).
+/// its default mode; Codex's sandbox may allow it without asking). Turn 3,
+/// in Full access: `git status` of a folder outside its own runs with no
+/// card.
 #[tokio::test]
 #[ignore = "needs NEBO_LINK_LIVE_ACP and a signed-in agent"]
 async fn live_acp_phone_flow() {
@@ -2333,6 +2335,26 @@ async fn live_acp_phone_flow() {
     assert!(events.iter().any(|e| e["type"] == "tool_start"), "the command shows as a tool card");
     let asked = events.iter().any(|e| e["type"] == "ask_request");
     eprintln!("asked: {asked}; inbox items: {:?}", inbox.lock().unwrap());
+
+    // Turn 3, in Full access: a command outside the agent's folder (this
+    // repository) runs with no card at all.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    phone
+        .send(
+            "chat",
+            json!({ "prompt": format!("Run the shell command `git -C {} status -sb` and tell me exactly the first line it printed.", repo.display()),
+                    "agent_id": "assistant", "session_id": session_id, "permission_mode": "full_access" }),
+        )
+        .await;
+    let events = until_long(&mut phone, "chat_complete").await;
+    for event in &events {
+        eprintln!("turn 3: {event}");
+    }
+    assert_eq!(events.last().unwrap()["type"], "chat_complete");
+    assert!(!events.iter().any(|e| e["type"] == "ask_request"), "Full access asks nothing");
+    assert!(events.iter().any(|e| e["type"] == "tool_result"), "the command ran");
+    assert!(streamed(&events).contains("##"), "git's status line: {:?}", streamed(&events));
+
     let page = get(link, &format!("/api/v1/chats/{chat_id}/messages")).await;
     eprintln!("transcript: {}", page["messages"]);
 }
