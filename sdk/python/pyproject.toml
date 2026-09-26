@@ -17,6 +17,7 @@ classifiers = [
 dependencies = [
   "websockets>=13",
   "cryptography>=42",
+  "rbcl>=1.1",
 ]
 
 [project.urls]
@@ -41,3 +42,4 @@ testpaths = ["tests"]
 [tool.mypy]
 strict = true
 files = ["src"]
+mypy_path = "stubs"

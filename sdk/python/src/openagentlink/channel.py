@@ -5,8 +5,8 @@ drops in without changing the client API:
 - a ``SecureChannel`` turns a ``Socket`` into a ``FrameChannel``: whole OAL frames.
 
 ``plaintext`` sends each frame as one JSON text message (OAL 0.1) and leaves
-authentication to ``host/hello``. An end-to-end channel (Noise IK, section
-17.2) does its handshake in ``open``, authenticates the device by its static
+authentication to ``host/hello``. An end-to-end channel (``encrypted``, section
+17) does its handshake in ``open``, authenticates the device by its static
 key, and reports that in ``FrameChannel.authenticated``; the client then skips
 ``host/hello``.
 """
@@ -81,6 +81,10 @@ class FrameChannel(Protocol):
 
     #: When set, the client sends no ``host/hello``.
     authenticated: Authenticated | None
+    #: The host's static key (base64url) as the channel's handshake authenticated
+    #: it; ``None`` when the channel authenticates nothing (``plaintext``).
+    #: ``pair`` checks it against the key the host names in ``host/pair``.
+    host_key: str | None
 
     async def send(self, frame: Frame) -> None: ...
 
@@ -99,6 +103,7 @@ class SecureChannel(Protocol):
 
 class _PlainFrames:
     authenticated: Authenticated | None = None
+    host_key: str | None = None
 
     def __init__(self, socket: Socket) -> None:
         self._socket = socket

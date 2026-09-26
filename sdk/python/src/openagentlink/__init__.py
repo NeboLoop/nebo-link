@@ -15,6 +15,7 @@ from .channel import (
     websocket_dialer,
 )
 from .client import Agent, Client, Host, PermissionRequest, Session, Turn, connect
+from .encrypted import encrypted
 from .errors import (
     AgentError,
     AgentUnavailable,
@@ -120,6 +121,7 @@ __all__ = [
     "UserMessage",
     "VersionMismatch",
     "connect",
+    "encrypted",
     "pair",
     "plaintext",
     "websocket_dialer",
