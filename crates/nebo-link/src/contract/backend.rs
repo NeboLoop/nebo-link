@@ -164,6 +164,35 @@ pub enum Control {
     },
 }
 
+/// How much the owner lets the employee do without asking: Nebo's
+/// permission mode for it (`types::permissions::Mode`, as Nebo names it on
+/// the `chat` frame). A runtime with modes of its own runs the turn in the
+/// one this maps to; one without ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    /// Every change asks.
+    Ask,
+    /// Acts inside its job (its folder); anything else asks.
+    Automatic,
+    /// Reads and plans; changes nothing.
+    Plan,
+    /// Nothing asks.
+    FullAccess,
+}
+
+impl Permission {
+    /// Nebo's name for the mode: `ask`, `automatic`, `plan`, `full_access`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "ask" => Some(Permission::Ask),
+            "automatic" => Some(Permission::Automatic),
+            "plan" => Some(Permission::Plan),
+            "full_access" => Some(Permission::FullAccess),
+            _ => None,
+        }
+    }
+}
+
 /// A turn in progress: its events, and the channel to steer it.
 pub struct Turn {
     pub events: mpsc::Receiver<TurnEvent>,
@@ -192,11 +221,13 @@ pub trait Backend: Send + Sync + 'static {
         chat: Option<&'a str>,
     ) -> BoxFuture<'a, Result<String, Error>>;
     /// Sends `prompt` on `chat` and starts streaming the turn. The runtime
-    /// holds the transcript; only the new message is sent.
+    /// holds the transcript; only the new message is sent. `permission` is
+    /// the owner's choice for the employee, when Nebo sent one.
     fn turn<'a>(
         &'a self,
         agent: &'a str,
         chat: &'a str,
         prompt: String,
+        permission: Option<Permission>,
     ) -> BoxFuture<'a, Result<Turn, Error>>;
 }

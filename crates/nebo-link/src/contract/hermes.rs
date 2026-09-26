@@ -40,8 +40,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Role, ToolCall,
-    ToolResult, Turn, TurnEvent, Usage,
+    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Permission, Role,
+    ToolCall, ToolResult, Turn, TurnEvent, Usage,
 };
 
 /// The default profile's id on the contract's backend side.
@@ -231,11 +231,14 @@ impl Backend for Hermes {
         .boxed()
     }
 
+    /// Hermes and OpenClaw keep their own approval settings: the
+    /// permission is not theirs to take.
     fn turn<'a>(
         &'a self,
         agent: &'a str,
         chat: &'a str,
         prompt: String,
+        _permission: Option<Permission>,
     ) -> BoxFuture<'a, Result<Turn, Error>> {
         async move {
             let client = self.client(agent)?;

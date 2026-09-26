@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::proxy::{Body, json};
-use backend::{Agent, Ask, Backend, Choice, Control, Error, Message, Role, TurnEvent};
+use backend::{Agent, Ask, Backend, Choice, Control, Error, Message, Permission, Role, TurnEvent};
 
 /// The contract's id for the runtime's default agent.
 pub const PRIMARY: &str = "assistant";
@@ -95,8 +95,9 @@ pub struct Contract {
 struct State {
     /// The turn running on each chat, by the runtime's session id.
     runs: HashMap<String, ActiveRun>,
-    /// Messages sent to a chat while a turn was running, oldest first.
-    queued: HashMap<String, VecDeque<String>>,
+    /// Messages sent to a chat while a turn was running, oldest first, each
+    /// with the permission it was sent under.
+    queued: HashMap<String, VecDeque<(String, Option<Permission>)>>,
     notices: Vec<Notice>,
     seen: HashSet<String>,
     seen_order: VecDeque<String>,
@@ -536,11 +537,14 @@ impl Contract {
         true
     }
 
-    /// A `chat` frame: `{prompt, agent_id, session_id?}`. Without a session
-    /// the chat is created first and announced with `chat_created`.
+    /// A `chat` frame: `{prompt, agent_id, session_id?, permission_mode?}`.
+    /// Without a session the chat is created first and announced with
+    /// `chat_created`. `permission_mode` is Nebo's permission mode for the
+    /// employee, which a runtime with modes of its own runs the turn in.
     async fn chat(self: Arc<Self>, data: Value) {
         let agent_id = data["agent_id"].as_str().unwrap_or(PRIMARY).to_owned();
         let prompt = data["prompt"].as_str().unwrap_or("").trim().to_owned();
+        let permission = data["permission_mode"].as_str().and_then(Permission::parse);
         let agent = match self.resolve(&agent_id).await {
             Ok(agent) => agent,
             Err(refusal) => {
@@ -594,7 +598,7 @@ impl Contract {
                     .queued
                     .entry(chat_id.clone())
                     .or_default()
-                    .push_back(prompt.clone());
+                    .push_back((prompt.clone(), permission));
                 true
             } else {
                 state.runs.insert(
@@ -618,7 +622,7 @@ impl Contract {
             );
             return;
         }
-        self.turn(agent, agent_id, chat_id, prompt).await;
+        self.turn(agent, agent_id, chat_id, prompt, permission).await;
     }
 
     /// Runs one turn on a chat whose slot in `runs` is taken, then the next
@@ -629,6 +633,7 @@ impl Contract {
         agent_id: String,
         chat_id: String,
         mut prompt: String,
+        mut permission: Option<Permission>,
     ) {
         loop {
             let turn_id = uuid::Uuid::new_v4().to_string();
@@ -641,7 +646,7 @@ impl Contract {
                 }
                 data
             };
-            match self.backend.turn(&agent.id, &chat_id, prompt).await {
+            match self.backend.turn(&agent.id, &chat_id, prompt, permission).await {
                 Ok(turn) => {
                     {
                         let mut state = self.state.lock().expect("contract state");
@@ -670,7 +675,10 @@ impl Contract {
                 next
             };
             match next {
-                Some(text) => prompt = text,
+                Some((text, next_permission)) => {
+                    prompt = text;
+                    permission = next_permission;
+                }
                 None => return,
             }
         }

@@ -1735,8 +1735,11 @@ async fn live_openclaw_phone_flow() {
 // 2026-09-26 (`@agentclientprotocol/claude-agent-acp` 0.81.2,
 // `@agentclientprotocol/codex-acp` 1.13.1). What a prompt does depends on
 // its text: `hello` streams two chunks; `tool` runs a command after asking
-// permission; `wait` runs until cancelled; `exit` ends the process mid-turn.
-// Sessions and their messages are kept in `NEBO_LINK_FAKE_ACP_STATE`, so a
+// permission; `edit` changes a file after asking; `wait` runs until
+// cancelled; `exit` ends the process mid-turn. It offers Claude Code's
+// permission modes: in `bypassPermissions` nothing asks, in `acceptEdits` an
+// edit doesn't. Sessions and their messages are kept in
+// `NEBO_LINK_FAKE_ACP_STATE` (their modes beside it, `.modes`), so a
 // restarted agent replays them on `session/load`.
 
 /// Not a test when run by the harness: the fake agent's entry point.
@@ -1754,6 +1757,28 @@ fn fake_acp_agent_process() {
             .unwrap_or_else(|| json!({}))
     };
     let save = |state: &Value| std::fs::write(&state_file, state.to_string()).unwrap();
+    let modes_file = format!("{state_file}.modes");
+    let mode_of = |session: &str| -> String {
+        std::fs::read_to_string(&modes_file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|m| m[session].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "default".to_owned())
+    };
+    let set_mode = |session: &str, mode: &str| {
+        let mut modes: Value = std::fs::read_to_string(&modes_file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| json!({}));
+        modes[session] = json!(mode);
+        std::fs::write(&modes_file, modes.to_string()).unwrap();
+    };
+    let offered = |session: &str| json!({ "currentModeId": mode_of(session), "availableModes": [
+        { "id": "default", "name": "Manual", "_meta": { "kind": "standard" } },
+        { "id": "acceptEdits", "name": "Accept edits", "_meta": { "kind": "standard" } },
+        { "id": "plan", "name": "Plan", "_meta": { "kind": "plan" } },
+        { "id": "auto", "name": "Auto", "_meta": { "kind": "auto_review" } },
+        { "id": "bypassPermissions", "name": "Bypass permissions", "_meta": { "kind": "full_access" } } ] });
     let stdout = std::io::stdout();
     let send = |frame: Value| {
         let mut out = stdout.lock();
@@ -1791,7 +1816,7 @@ fn fake_acp_agent_process() {
                 let session = format!("s{}", state.as_object().unwrap().len() + 1);
                 state[&session] = json!([]);
                 save(&state);
-                reply(json!({ "sessionId": session, "configOptions": [{ "id": "model", "category": "model",
+                reply(json!({ "sessionId": session, "modes": offered(&session), "configOptions": [{ "id": "model", "category": "model",
                     "currentValue": "m1", "options": [{ "value": "m1", "name": "Model One" }] }] }));
             }
             "session/list" => {
@@ -1815,7 +1840,14 @@ fn fake_acp_agent_process() {
                     text(&session, "user_message_chunk", turn["user"].as_str().unwrap());
                     text(&session, "agent_message_chunk", turn["agent"].as_str().unwrap());
                 }
-                reply(json!({ "sessionId": session }));
+                reply(json!({ "sessionId": session, "modes": offered(&session) }));
+            }
+            "session/set_mode" if mode == "refuses-modes" => send(json!({
+                "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": "Invalid Mode" }
+            })),
+            "session/set_mode" => {
+                set_mode(params["sessionId"].as_str().unwrap(), params["modeId"].as_str().unwrap());
+                reply(json!({}));
             }
             "session/prompt" => {
                 let session = params["sessionId"].as_str().unwrap().to_owned();
@@ -1834,14 +1866,25 @@ fn fake_acp_agent_process() {
                         }
                         stop = "cancelled";
                     }
-                    "tool" => {
+                    "tool" | "edit" if mode_of(&session) == "bypassPermissions"
+                        || (prompt == "edit" && mode_of(&session) == "acceptEdits") =>
+                    {
+                        // Allowed by the session's mode: it runs without asking.
                         update(&session, json!({ "sessionUpdate": "tool_call", "toolCallId": "call_1", "name": "Bash",
-                            "rawInput": {}, "status": "pending", "title": "Terminal", "kind": "execute", "content": [] }));
+                            "rawInput": { "command": "ls" }, "status": "in_progress", "title": "ls", "kind": "execute", "content": [] }));
+                        update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_1", "status": "completed",
+                            "rawOutput": "file.txt", "content": [{ "type": "content", "content": { "type": "text", "text": "file.txt" } }] }));
+                        said = "Done.".into();
+                    }
+                    "tool" | "edit" => {
+                        let (kind, title) = if prompt == "edit" { ("edit", "Edit notes.md") } else { ("execute", "ls") };
+                        update(&session, json!({ "sessionUpdate": "tool_call", "toolCallId": "call_1", "name": "Bash",
+                            "rawInput": {}, "status": "pending", "title": "Terminal", "kind": kind, "content": [] }));
                         update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_1",
-                            "rawInput": { "command": "ls" }, "title": "ls", "kind": "execute" }));
+                            "rawInput": { "command": "ls" }, "title": title, "kind": kind }));
                         send(json!({ "jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": {
                             "sessionId": session,
-                            "toolCall": { "toolCallId": "call_1", "status": "pending", "rawInput": { "command": "ls" }, "title": "ls", "kind": "execute",
+                            "toolCall": { "toolCallId": "call_1", "status": "pending", "rawInput": { "command": "ls" }, "title": title, "kind": kind,
                                 "content": [{ "type": "content", "content": { "type": "text", "text": "List the files" } }] },
                             "options": [{ "optionId": "allow-once", "name": "Yes", "kind": "allow_once" },
                                         { "optionId": "allow-always", "name": "Yes, and don't ask again", "kind": "allow_always" },
@@ -1873,7 +1916,7 @@ fn fake_acp_agent_process() {
                         text(&session, "agent_message_chunk", "lo");
                     }
                 }
-                if !said.is_empty() && prompt == "tool" {
+                if !said.is_empty() && (prompt == "tool" || prompt == "edit") {
                     text(&session, "agent_message_chunk", &said);
                 }
                 update(&session, json!({ "sessionUpdate": "session_info_update", "title": "A fake chat" }));
@@ -2025,6 +2068,96 @@ async fn the_phone_flow_against_an_acp_agent() {
     assert_eq!(events[0]["type"], "tool_result");
     assert_eq!(events[0]["data"]["is_error"], true);
     assert_eq!(streamed(&events), "Not run.");
+}
+
+/// The mode the fake agent's session is in now.
+fn fake_mode(dir: &std::path::Path, session: &str) -> String {
+    std::fs::read_to_string(dir.join("agent-state.json.modes"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|m| m[session].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "default".to_owned())
+}
+
+/// Nebo's permission mode for the employee rides on each `chat` frame and
+/// the session runs in the agent's matching mode: Full access runs a
+/// command with no card, Automatic accepts an edit but asks for a command,
+/// Ask asks for the edit, Plan is the agent's plan mode, and a frame
+/// without one leaves the session as it is.
+#[tokio::test]
+async fn an_acp_session_runs_in_the_employees_permission_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, _inbox) = serve_hub().await;
+    let link = start_acp_link("normal", nebo_runtimes::acp::Agent::ClaudeCode, "Claude Code", tmp.path(), &hub_url).await;
+    let mut phone = Phone::connect(link).await;
+    phone.send("chat", json!({ "prompt": "hello", "agent_id": "assistant" })).await;
+    let session_id = phone.next().await["data"]["session_id"].as_str().unwrap().to_owned();
+    let chat_id = session_id.rsplit(":thread:").next().unwrap().to_owned();
+    phone.until("chat_complete").await;
+    assert_eq!(fake_mode(tmp.path(), &chat_id), "default", "no permission sent: the agent's own");
+
+    let frame = |prompt: &'static str, permission: &'static str| {
+        json!({ "prompt": prompt, "agent_id": "assistant", "session_id": session_id, "permission_mode": permission })
+    };
+
+    // Full access: bypassPermissions, and the command runs with no card.
+    phone.send("chat", frame("tool", "full_access")).await;
+    let events = phone.until("chat_complete").await;
+    assert_eq!(kinds(&events), ["tool_start", "tool_result", "chat_stream", "usage", "chat_complete"]);
+    assert_eq!(streamed(&events), "Done.");
+    assert_eq!(fake_mode(tmp.path(), &chat_id), "bypassPermissions");
+
+    // Automatic: acceptEdits. An edit runs; a command asks.
+    phone.send("chat", frame("edit", "automatic")).await;
+    let events = phone.until("chat_complete").await;
+    assert!(!kinds(&events).contains(&"ask_request"), "{events:?}");
+    assert_eq!(fake_mode(tmp.path(), &chat_id), "acceptEdits");
+    phone.send("chat", frame("tool", "automatic")).await;
+    let events = phone.until("ask_request").await;
+    assert_eq!(kinds(&events), ["tool_start", "ask_request"]);
+    phone.send("ask_response", json!({ "request_id": "call_1", "value": "Deny" })).await;
+    phone.until("chat_complete").await;
+
+    // Ask: default. The edit asks now.
+    phone.send("chat", frame("edit", "ask")).await;
+    let events = phone.until("ask_request").await;
+    assert_eq!(events.last().unwrap()["data"]["prompt"], "Edit notes.md\nList the files");
+    assert_eq!(fake_mode(tmp.path(), &chat_id), "default");
+    phone.send("ask_response", json!({ "request_id": "call_1", "value": "Allow once" })).await;
+    phone.until("chat_complete").await;
+
+    // Plan: the agent's plan mode.
+    phone.send("chat", frame("hello", "plan")).await;
+    phone.until("chat_complete").await;
+    assert_eq!(fake_mode(tmp.path(), &chat_id), "plan");
+
+    // No permission on the frame (the phone speaking to the bot directly):
+    // the session stays as it is.
+    phone
+        .send("chat", json!({ "prompt": "hello", "agent_id": "assistant", "session_id": session_id }))
+        .await;
+    phone.until("chat_complete").await;
+    assert_eq!(fake_mode(tmp.path(), &chat_id), "plan");
+}
+
+/// An agent that refuses the mode switch doesn't run the turn in a mode
+/// the owner didn't choose: the turn fails and says so.
+#[tokio::test]
+async fn an_acp_mode_the_agent_refuses_fails_the_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (hub_url, _inbox) = serve_hub().await;
+    let link = start_acp_link("refuses-modes", nebo_runtimes::acp::Agent::ClaudeCode, "Claude Code", tmp.path(), &hub_url).await;
+    let mut phone = Phone::connect(link).await;
+    phone
+        .send("chat", json!({ "prompt": "tool", "agent_id": "assistant", "permission_mode": "full_access" }))
+        .await;
+    let created = phone.next().await;
+    assert_eq!(created["type"], "chat_created");
+    let events = phone.until("chat_error").await;
+    assert_eq!(
+        events.last().unwrap()["data"]["error"],
+        "Claude Code could not switch to its bypassPermissions mode: Invalid Mode"
+    );
 }
 
 #[tokio::test]
