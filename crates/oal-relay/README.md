@@ -89,7 +89,7 @@ let ws = relay.connect(&pairing.host_id).await?;                     // every la
 let hosts = relay.presence().await?;                                 // online? which agents?
 ```
 
-`ws` is an ordinary WebSocket to the host: send and receive OAL frames (or `oal-secure`'s binary messages) on it exactly as on a direct connection. `relay.pair` refuses a whole code before sending anything. Clients in other languages follow [the protocol](#protocol) below; it is two HTTP requests per connection.
+`ws` is an ordinary WebSocket to the host: send and receive OAL frames (or `oal-secure`'s binary messages) on it exactly as on a direct connection. `relay.pair` refuses a whole code before sending anything. Clients in other languages follow [the protocol](#protocol) below; it is two HTTP requests per connection. The TypeScript and Python SDKs (`sdk/`) do it for you, and their tests pair and prompt through this relay.
 
 ## Operate it
 
@@ -137,7 +137,7 @@ For SDK authors. Keys are X25519 public keys, 32 bytes, base64url without paddin
 
 ### Proving a key
 
-1. `GET /oal/challenge` returns `{"nonce", "relayKey", "expiresIn": 60}`. The nonce works once, for 60 seconds.
+1. `GET /oal/challenge` returns `{"nonce", "relayKey", "expiresIn": 60}`. The nonce works once, for 60 seconds. It and `GET /oal/presence` answer a web page on any origin (`Access-Control-Allow-Origin: *`), so a browser client can reach the relay.
 2. Compute
    ```text
    shared = X25519(your_secret, relayKey)

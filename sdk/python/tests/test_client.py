@@ -14,6 +14,7 @@ from openagentlink import (
     FrameChannel,
     Host,
     Identity,
+    InvalidParams,
     NotOffered,
     PairingRefused,
     PermissionAsked,
@@ -34,7 +35,7 @@ from openagentlink import (
     websocket_dialer,
 )
 
-from .conftest import FakeHost, start_fake_host, stop_fake_host
+from .conftest import FakeHost, start_fake_host, start_fake_relay, stop_fake_host, stop_fake_relay
 
 
 @pytest.fixture
@@ -128,19 +129,6 @@ async def test_identity_round_trips(identity: Identity, tmp_path: Any) -> None:
     assert oct(path.stat().st_mode & 0o777) == "0o600"
     assert Identity.load(path) == identity
     assert set(identity.to_dict()["device"]) == {"id", "name", "token", "publicKey", "privateKey"}
-
-
-async def test_pairs_through_a_relay_by_the_nameplate() -> None:
-    other = await start_fake_host("AAAA-BBBB")
-    try:
-        # The fake host plays the relay's /oal/pair/<nameplate> and refuses a
-        # pairing URL that carries more of the code than the nameplate.
-        relay = other.url.removesuffix("/oal")
-        paired = await pair(relay=relay, code="aaaa-bbbb", device_name="Relay laptop")
-        assert paired.host.id == "h-fake"
-        assert other.violations == []
-    finally:
-        await stop_fake_host(other)
 
 
 async def test_refuses_a_wrong_code() -> None:
@@ -322,3 +310,50 @@ async def test_another_client_loads_mid_turn_first_answer_wins(
     resolved = next(e for e in rest if isinstance(e, PermissionResolved))
     assert resolved.outcome == {"outcome": "selected", "optionId": "allow-once"}
     assert rest[-1] == Done("end_turn")
+
+
+async def test_through_a_relay_proves_its_key_on_every_connection() -> None:
+    other = await start_fake_host("AAAA-BBBB")
+    relay = None
+    client = None
+    try:
+        relay = await start_fake_relay(other)
+        # The relay refuses a pairing URL with more than the nameplate, and
+        # every request without a fresh proof of the device's key.
+        paired = await pair(relay=relay.url, code="aaaa-bbbb", device_name="Relay laptop")
+        assert paired.host.id == "h-fake"
+
+        dropper = Droppable()
+        client = await connect(relay=relay.url, credentials=paired, dialer=dropper)
+        host = client.hosts()[0]
+        session = await fake_session(host)
+
+        async def on(event: Any) -> None:
+            if isinstance(event, PermissionAsked):
+                # A new connection needs a new challenge: nonces work once.
+                back = asyncio.ensure_future(reconnected(host))
+                await dropper.drop()
+                await back
+                await event.request.allow_once()
+
+        events = await drain(session.prompt("run: echo hi"), on)
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.output == "hi"
+        assert events[-1] == Done("end_turn")
+
+        metrics = relay.metrics()
+        assert metrics["oal_relay_auth_failures_total"] == 0
+        assert metrics["oal_relay_pairing_connections_total"] == 1
+        assert metrics["oal_relay_client_connections_total"] == 3  # pair, connect, reconnect
+        assert other.violations == []
+    finally:
+        if client is not None:
+            await client.close()
+        if relay is not None:
+            await stop_fake_relay(relay)
+        await stop_fake_host(other)
+
+
+async def test_refuses_a_relay_that_isnt_encrypted() -> None:
+    with pytest.raises(InvalidParams):
+        await pair(relay="ws://relay.example.com", code="K7QM-3XRD", device_name="x")

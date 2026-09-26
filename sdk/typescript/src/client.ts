@@ -5,6 +5,7 @@ import { Link } from './connection.js';
 import { OALError } from './errors.js';
 import { DEFAULT_CLIENT, checkEndpoint, relayUrl, type Endpoint, type Identity } from './identity.js';
 import { Queue } from './queue.js';
+import { relayDialer } from './relay.js';
 import {
   PROTOCOL,
   type AgentInfo,
@@ -75,6 +76,7 @@ export async function connect(options: ConnectOptions): Promise<Client> {
   if (options.url && identities.length !== 1) {
     throw new OALError('invalid_params', 'A url reaches one host. Pass a relay to reach several.');
   }
+  const dialer = options.dialer ?? webSocketDialer;
   const client = new Client(
     identities.map(
       (identity) =>
@@ -82,7 +84,8 @@ export async function connect(options: ConnectOptions): Promise<Client> {
           url: options.url ?? relayUrl(options.relay!, `/oal/hosts/${encodeURIComponent(identity.host.id)}`),
           client: options.client ?? DEFAULT_CLIENT,
           secure: options.secure ?? plaintext,
-          dialer: options.dialer ?? webSocketDialer,
+          // Through a relay, every connection first proves this device's key.
+          dialer: options.relay ? relayDialer(options.relay, identity.device, dialer) : dialer,
         }),
     ),
   );

@@ -32,6 +32,7 @@ from .events import (
     to_events,
 )
 from .identity import DEFAULT_CLIENT, Identity, check_endpoint, relay_url
+from .relay import relay_dialer
 from .types import (
     PROTOCOL,
     AgentInfo,
@@ -75,7 +76,10 @@ async def connect(
             url=url if url is not None else relay_url(relay or "", "/oal/hosts/" + quote(identity.host.id)),
             client=client,
             secure=secure,
-            dialer=dialer,
+            # Through a relay, every connection first proves this device's key.
+            dialer=dialer
+            if relay is None
+            else relay_dialer(relay, {"publicKey": identity.device.public_key, "privateKey": identity.device.private_key}, dialer),
         )
         for identity in identities
     ]

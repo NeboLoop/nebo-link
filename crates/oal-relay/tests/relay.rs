@@ -250,12 +250,10 @@ async fn an_unpaired_or_impersonating_client_is_refused() {
 
     // Claiming the phone's key without its secret fails the proof.
     let base = url(&relay);
-    let challenge: serde_json::Value = reqwest::get(format!("{base}/oal/challenge"))
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let response = reqwest::get(format!("{base}/oal/challenge")).await.unwrap();
+    // Browser clients fetch the challenge from their own origin.
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    let challenge: serde_json::Value = response.json().await.unwrap();
     let (nonce, relay_key) = (
         challenge["nonce"].as_str().unwrap(),
         challenge["relayKey"].as_str().unwrap(),
@@ -516,6 +514,12 @@ async fn presence_is_for_paired_clients() {
             .unwrap()
             .is_empty()
     );
+    // A browser client reads presence, refusals included, from its own origin.
+    let refused = reqwest::get(format!("{}/oal/presence", url(&relay)))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 401);
+    assert_eq!(refused.headers()["access-control-allow-origin"], "*");
 
     tunnel.handle().close();
     for _ in 0..50 {

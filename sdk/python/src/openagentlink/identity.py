@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -16,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from .channel import ChannelContext, Dialer, SecureChannel, plaintext, websocket_dialer
 from .connection import exchange
 from .errors import InvalidParams
+from .relay import b64url, relay_dialer
 from .types import PROTOCOL, ClientInfo, VersionRange
 
 DEFAULT_CLIENT: ClientInfo = {"name": "openagentlink-python", "version": "0.1.0"}
@@ -110,6 +110,8 @@ async def pair(
     target = relay_url(relay, "/oal/pair/" + nameplate(code)) if relay else url
     assert target is not None
     public_key, private_key = _generate_key_pair()
+    if relay:
+        dialer = relay_dialer(relay, {"publicKey": public_key, "privateKey": private_key}, dialer)
     socket = await dialer(target, ["oal"])
     protocol: VersionRange = {"min": PROTOCOL["min"], "max": PROTOCOL["max"]}
     context = ChannelContext(
@@ -139,8 +141,4 @@ def _generate_key_pair() -> tuple[str, str]:
     key = X25519PrivateKey.generate()
     public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     private = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-    return _b64url(public), _b64url(private)
-
-
-def _b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+    return b64url(public), b64url(private)
