@@ -1024,6 +1024,9 @@ pub struct SessionMessage {
     /// `timestamp`, and on assistant rows `usage`, `stopReason`, `provider`,
     /// `model`.
     pub message: Value,
+    /// The run that wrote the row, when one did.
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 impl SessionMessage {
@@ -1035,6 +1038,12 @@ impl SessionMessage {
     /// `cacheRead`, `cacheWrite`, `cost`), when the gateway recorded one.
     pub fn usage(&self) -> Option<&Value> {
         self.message.get("usage")
+    }
+
+    /// The assistant row's `stopReason`: `toolUse` while the run goes on,
+    /// `stop`, `length`, `error` or `aborted` on the row that ends it.
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.message.get("stopReason").and_then(Value::as_str)
     }
 }
 

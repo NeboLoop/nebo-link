@@ -486,6 +486,24 @@ impl Gateway {
         self.call("sessions.subscribe", params).await
     }
 
+    /// `sessions.messages.subscribe`
+    /// (`server-methods/sessions-subscriptions.ts:96-246`, `operator.read`):
+    /// start receiving `session.message` for the transcript rows of one
+    /// session key. The key need not exist yet. Reconnects need a new
+    /// subscription.
+    pub async fn sessions_messages_subscribe(
+        &self,
+        session_key: &str,
+        agent_id: Option<&str>,
+    ) -> Result<(), Error> {
+        let mut params = json!({ "key": session_key });
+        if let Some(agent_id) = agent_id {
+            params["agentId"] = json!(agent_id);
+        }
+        self.request("sessions.messages.subscribe", params).await?;
+        Ok(())
+    }
+
     /// `chat.history` (`schema/logs-chat.ts:36-54`). With `cursor`, the
     /// gateway's catch-up delta; when it answers `reset` (the cursor is
     /// stale or crossed a compaction, `logs-chat.ts:168-171`) the tail

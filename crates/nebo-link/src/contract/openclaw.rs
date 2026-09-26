@@ -15,17 +15,22 @@
 //! from anywhere (the Control UI, another operator) ends the ask here too.
 //!
 //! Usage: the final `chat` event carries none (live spike, PRD Appendix
-//! C.4); the turn's tokens ride the assistant `session.message` row, kept
-//! per session until the run ends.
+//! C.4; `chat-broadcast.ts`); the tokens ride the run's assistant
+//! transcript rows, which the gateway sends only to a connection subscribed
+//! to the session (`sessions.messages.subscribe`, made before each
+//! `chat.send`, so a new socket subscribes again). The rows land on their
+//! own path and can trail the final event, so the turn completes once the
+//! row that ends the run is in, or [`USAGE_WAIT`] after the final event.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::FutureExt;
 use nebo_runtimes::openclaw::gateway::{
     AgentStream, ApprovalKind, ApprovalRequest, ApprovalRequested, ChatEvent, ChatSend, ChatState,
-    Connect, Decision, Event, Events, FileDeviceStore, Gateway, HistoryQuery, SessionsQuery,
-    new_idempotency_key,
+    Connect, Decision, Event, Events, FileDeviceStore, Gateway, HistoryQuery, SessionMessage,
+    SessionsQuery, new_idempotency_key,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -35,9 +40,12 @@ use super::backend::{
     ToolResult, Turn, TurnEvent, Usage,
 };
 
-/// The scopes a turn needs: send, and answer approvals
-/// (`connect-admission.ts:138-163`).
-const REQUIRED_SCOPES: [&str; 2] = ["operator.write", "operator.approvals"];
+/// The scopes a turn needs: read the transcript rows, send, and answer
+/// approvals (`connect-admission.ts:138-163`).
+const REQUIRED_SCOPES: [&str; 3] = ["operator.read", "operator.write", "operator.approvals"];
+
+/// How long a finished turn waits for the assistant row that ends its run.
+const USAGE_WAIT: Duration = Duration::from_secs(3);
 
 /// A linked OpenClaw install's gateway.
 pub struct Openclaw {
@@ -54,8 +62,6 @@ struct Router {
     turns: Mutex<HashMap<String, Sink>>,
     /// Pending approvals: id to (session key, kind).
     approvals: Mutex<HashMap<String, (String, ApprovalKind)>>,
-    /// The last assistant row's usage per session key.
-    usage: Mutex<HashMap<String, Usage>>,
 }
 
 struct Sink {
@@ -63,6 +69,38 @@ struct Sink {
     /// by session alone.
     run_id: Option<String>,
     events: mpsc::Sender<TurnEvent>,
+    /// The tokens of the run's assistant rows so far.
+    usage: Option<Usage>,
+    /// The row that ends the run (any `stopReason` but `toolUse`) is in.
+    answered: bool,
+    /// The final `chat` event is in; the turn completes once `answered`.
+    finished: bool,
+}
+
+impl Sink {
+    fn new(events: mpsc::Sender<TurnEvent>) -> Self {
+        Self {
+            run_id: None,
+            events,
+            usage: None,
+            answered: false,
+            finished: false,
+        }
+    }
+
+    fn is_run(&self, run_id: Option<&str>) -> bool {
+        match (&self.run_id, run_id) {
+            (Some(ours), Some(theirs)) => ours == theirs,
+            _ => true,
+        }
+    }
+
+    async fn complete(self) {
+        let _ = self
+            .events
+            .send(TurnEvent::Completed { usage: self.usage })
+            .await;
+    }
 }
 
 impl Router {
@@ -70,34 +108,29 @@ impl Router {
     fn sink(&self, session_key: &str, run_id: Option<&str>) -> Option<mpsc::Sender<TurnEvent>> {
         let turns = self.turns.lock().expect("turns lock");
         let sink = turns.get(session_key)?;
-        match (&sink.run_id, run_id) {
-            (Some(ours), Some(theirs)) if ours != theirs => None,
-            _ => Some(sink.events.clone()),
-        }
+        sink.is_run(run_id).then(|| sink.events.clone())
     }
 
     fn end(&self, session_key: &str) {
         self.turns.lock().expect("turns lock").remove(session_key);
-        self.usage.lock().expect("usage lock").remove(session_key);
     }
 
-    async fn chat(&self, chat: ChatEvent) {
+    async fn chat(self: &Arc<Self>, chat: ChatEvent) {
+        if let ChatState::Final { usage, .. } = &chat.state {
+            self.finished(
+                &chat.session_key,
+                &chat.run_id,
+                usage.as_ref().and_then(usage_of),
+            )
+            .await;
+            return;
+        }
         let Some(sink) = self.sink(&chat.session_key, Some(&chat.run_id)) else {
             return;
         };
         let (event, terminal) = match chat.state {
-            ChatState::Status { .. } => return,
+            ChatState::Status { .. } | ChatState::Final { .. } => return,
             ChatState::Delta { delta_text, .. } => (TurnEvent::Text(delta_text), false),
-            ChatState::Final { usage, .. } => {
-                let usage = usage.as_ref().and_then(usage_of).or_else(|| {
-                    self.usage
-                        .lock()
-                        .expect("usage lock")
-                        .get(&chat.session_key)
-                        .copied()
-                });
-                (TurnEvent::Completed { usage }, true)
-            }
             ChatState::Aborted { .. } => (TurnEvent::Cancelled, true),
             ChatState::Error { error_message, .. } => (
                 TurnEvent::Failed(
@@ -215,34 +248,120 @@ impl Router {
         }
     }
 
-    fn record_usage(&self, row: &nebo_runtimes::openclaw::gateway::SessionMessage) {
-        if row.role() != Some("assistant") {
-            return;
-        }
-        if let Some(usage) = row.usage().and_then(usage_of) {
-            self.usage
-                .lock()
-                .expect("usage lock")
-                .insert(row.session_key.clone(), usage);
+    /// The final `chat` event of `run_id`: the turn completes now when the
+    /// event carries the run's tokens or the row that ends the run is in,
+    /// else once that row lands, at most [`USAGE_WAIT`] from now.
+    async fn finished(self: &Arc<Self>, session_key: &str, run_id: &str, usage: Option<Usage>) {
+        let done = {
+            let mut turns = self.turns.lock().expect("turns lock");
+            let Some(sink) = turns.get_mut(session_key) else {
+                return;
+            };
+            if !sink.is_run(Some(run_id)) {
+                return;
+            }
+            sink.run_id = Some(run_id.to_owned());
+            sink.finished = true;
+            if let Some(usage) = usage {
+                sink.usage = Some(usage);
+                sink.answered = true;
+            }
+            if sink.answered {
+                turns.remove(session_key)
+            } else {
+                None
+            }
+        };
+        match done {
+            Some(sink) => sink.complete().await,
+            None => {
+                let router = self.clone();
+                let (session_key, run_id) = (session_key.to_owned(), run_id.to_owned());
+                tokio::spawn(async move {
+                    tokio::time::sleep(USAGE_WAIT).await;
+                    let late = {
+                        let mut turns = router.turns.lock().expect("turns lock");
+                        match turns.get(&session_key) {
+                            Some(sink)
+                                if sink.finished
+                                    && sink.run_id.as_deref() == Some(run_id.as_str()) =>
+                            {
+                                turns.remove(&session_key)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sink) = late {
+                        tracing::info!(
+                            run_id,
+                            "openclaw: the run's closing row did not arrive; completing with the tokens seen"
+                        );
+                        sink.complete().await;
+                    }
+                });
+            }
         }
     }
 
-    /// The socket closed: every turn on it is over.
+    /// A transcript row: an assistant row adds its tokens to the turn on
+    /// its session, and the row that ends the run completes a finished turn.
+    async fn row(&self, row: &SessionMessage) {
+        if row.role() != Some("assistant") {
+            return;
+        }
+        let done = {
+            let mut turns = self.turns.lock().expect("turns lock");
+            let Some(sink) = turns.get_mut(&row.session_key) else {
+                return;
+            };
+            if !sink.is_run(row.run_id.as_deref()) {
+                return;
+            }
+            if let Some(usage) = row.usage().and_then(usage_of) {
+                sink.usage = Some(match sink.usage {
+                    Some(sum) => Usage {
+                        input_tokens: sum.input_tokens + usage.input_tokens,
+                        output_tokens: sum.output_tokens + usage.output_tokens,
+                    },
+                    None => usage,
+                });
+            }
+            if row.stop_reason() != Some("toolUse") {
+                sink.answered = true;
+            }
+            if sink.finished && sink.answered {
+                turns.remove(&row.session_key)
+            } else {
+                None
+            }
+        };
+        if let Some(sink) = done {
+            sink.complete().await;
+        }
+    }
+
+    /// The socket closed: every turn on it is over. A turn whose final event
+    /// was in completes with the tokens seen; the rest fail.
     async fn disconnected(&self) {
-        let sinks: Vec<mpsc::Sender<TurnEvent>> = self
+        let sinks: Vec<Sink> = self
             .turns
             .lock()
             .expect("turns lock")
             .drain()
-            .map(|(_, sink)| sink.events)
+            .map(|(_, sink)| sink)
             .collect();
         self.approvals.lock().expect("approvals lock").clear();
         for sink in sinks {
-            let _ = sink
-                .send(TurnEvent::Failed(
-                    "Could not connect to OpenClaw. Try again.".to_owned(),
-                ))
-                .await;
+            if sink.finished {
+                sink.complete().await;
+            } else {
+                let _ = sink
+                    .events
+                    .send(TurnEvent::Failed(
+                        "Could not connect to OpenClaw. Try again.".to_owned(),
+                    ))
+                    .await;
+            }
         }
     }
 }
@@ -255,7 +374,7 @@ async fn route(mut events: Events, router: Arc<Router>) {
             Event::Agent(agent) => router.agent(agent).await,
             Event::ApprovalRequested(requested) => router.ask(requested).await,
             Event::ApprovalResolved { id, .. } => router.resolved(&id).await,
-            Event::SessionMessage(row) => router.record_usage(&row),
+            Event::SessionMessage(row) => router.row(&row).await,
             Event::SessionsChanged(_)
             | Event::Tick
             | Event::Shutdown { .. }
@@ -452,15 +571,17 @@ impl Backend for Openclaw {
     ) -> BoxFuture<'a, Result<Turn, Error>> {
         async move {
             let gateway = self.gateway().await?;
+            gateway
+                .sessions_messages_subscribe(chat, Some(agent))
+                .await
+                .map_err(map)?;
             let (events, events_rx) = mpsc::channel(64);
             let (control, control_rx) = mpsc::channel(8);
-            self.router.turns.lock().expect("turns lock").insert(
-                chat.to_owned(),
-                Sink {
-                    run_id: None,
-                    events,
-                },
-            );
+            self.router
+                .turns
+                .lock()
+                .expect("turns lock")
+                .insert(chat.to_owned(), Sink::new(events));
             let ack = gateway
                 .chat_send(&ChatSend {
                     session_key: chat.to_owned(),
