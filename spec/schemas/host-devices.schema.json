@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-devices.schema.json",
+  "title": "host/devices",
+  "description": "Lists the paired devices. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object"
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "pairedAt": {
+                "$ref": "defs.schema.json#/$defs/Time"
+              },
+              "lastSeenAt": {
+                "$ref": "defs.schema.json#/$defs/Time"
+              },
+              "current": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "pairedAt",
+              "current"
+            ]
+          }
+        }
+      },
+      "required": [
+        "devices"
+      ]
+    }
+  }
+}

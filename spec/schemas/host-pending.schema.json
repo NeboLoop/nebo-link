@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-pending.schema.json",
+  "title": "host/pending",
+  "description": "Lists every permission request waiting for an answer, across agents. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object"
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.schema.json#/$defs/PendingRequest"
+          }
+        }
+      },
+      "required": [
+        "requests"
+      ]
+    }
+  }
+}

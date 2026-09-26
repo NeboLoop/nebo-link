@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-pending-update.schema.json",
+  "title": "host/pending_update",
+  "description": "A permission request was added to, or resolved from, the pending list. Notification, host to client.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "enum": [
+            "added",
+            "resolved"
+          ]
+        },
+        "request": {
+          "$ref": "defs.schema.json#/$defs/PendingRequest"
+        },
+        "outcome": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/RequestPermissionOutcome"
+        },
+        "answeredBy": {
+          "anyOf": [
+            {
+              "$ref": "defs.schema.json#/$defs/DeviceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "change",
+        "request"
+      ]
+    }
+  }
+}

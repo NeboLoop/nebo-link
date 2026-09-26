@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-pair.schema.json",
+  "title": "host/pair",
+  "description": "Turns a one-time code into a device credential; an alternative first request to host/hello. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "defs.schema.json#/$defs/VersionRange"
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 8
+        },
+        "device": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "publicKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$",
+              "description": "X25519 static public key, base64url without padding."
+            }
+          },
+          "required": [
+            "name",
+            "publicKey"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "client",
+        "code",
+        "device"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "defs.schema.json#/$defs/Version"
+        },
+        "device": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "token": {
+              "type": "string",
+              "minLength": 43
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "token"
+          ]
+        },
+        "info": {
+          "$ref": "defs.schema.json#/$defs/HostInfo"
+        }
+      },
+      "required": [
+        "protocol",
+        "device",
+        "info"
+      ]
+    }
+  }
+}

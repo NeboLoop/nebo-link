@@ -77,6 +77,10 @@ Each linked bot has a directory in your data directory (`~/Library/Application S
 
 The service is a launchd agent on macOS, a systemd user unit on Linux (a system unit when run as root), and a logon task on Windows.
 
+## Open Agent Link
+
+Nebo Link is the reference implementation of [Open Agent Link](https://openagent.link) (OAL), an open protocol for reaching agents on any computer: ACP, made reachable, plus a thin host layer. The specification, JSON Schemas, examples and RFC process are in [`spec/`](spec/); the conformance suite is [`crates/oal-conformance`](crates/oal-conformance).
+
 ## License
 
-MIT
+Apache-2.0 (see `LICENSE` and `NOTICE`). The specification in `spec/` is CC-BY-4.0. Contributions are signed off under the DCO; see `CONTRIBUTING.md`.

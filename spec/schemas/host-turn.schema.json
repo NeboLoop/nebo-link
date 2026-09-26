@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-turn.schema.json",
+  "title": "host/turn",
+  "description": "A turn started, is still running (on attach), or ended. Notification, host to client.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "defs.schema.json#/$defs/AgentId"
+        },
+        "sessionId": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/SessionId"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "ended"
+          ]
+        },
+        "startedAt": {
+          "$ref": "defs.schema.json#/$defs/Time"
+        },
+        "by": {
+          "$ref": "defs.schema.json#/$defs/DeviceRef"
+        },
+        "stopReason": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/StopReason"
+        },
+        "error": {
+          "$ref": "defs.schema.json#/$defs/ErrorObject"
+        },
+        "usage": {
+          "$ref": "defs.schema.json#/$defs/Usage"
+        }
+      },
+      "required": [
+        "agent",
+        "sessionId",
+        "turnId",
+        "state",
+        "startedAt"
+      ]
+    }
+  }
+}

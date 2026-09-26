@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-answer.schema.json",
+  "title": "host/answer",
+  "description": "Answers a pending permission request with one of its options. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "optionId": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/PermissionOptionId"
+        }
+      },
+      "required": [
+        "id",
+        "optionId"
+      ]
+    },
+    "result": {
+      "type": "object"
+    }
+  }
+}

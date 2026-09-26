@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-ping.schema.json",
+  "title": "host/ping",
+  "description": "Heartbeat. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object"
+    },
+    "result": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/frame.schema.json",
+  "title": "OAL frame",
+  "description": "One WebSocket text message. Either a host-channel JSON-RPC 2.0 message (no `agent` member) or an agent-channel frame carrying one ACP JSON-RPC 2.0 message unchanged.",
+  "oneOf": [
+    {
+      "title": "Agent channel frame",
+      "type": "object",
+      "required": [
+        "agent",
+        "acp"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "$ref": "defs.schema.json#/$defs/AgentId"
+        },
+        "acp": {
+          "description": "One ACP JSON-RPC 2.0 message (request, response or notification), exactly as ACP defines it.",
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json"
+        }
+      }
+    },
+    {
+      "title": "Host channel frame",
+      "type": "object",
+      "required": [
+        "jsonrpc"
+      ],
+      "not": {
+        "required": [
+          "agent"
+        ]
+      },
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "method": {
+          "type": "string",
+          "pattern": "^host/"
+        },
+        "params": {
+          "type": "object"
+        },
+        "result": {},
+        "error": {
+          "$ref": "defs.schema.json#/$defs/ErrorObject"
+        }
+      }
+    }
+  ]
+}

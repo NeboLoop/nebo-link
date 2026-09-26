@@ -1,0 +1,14 @@
+{
+  "title": "Pair a device with a one-time code",
+  "description": "Section 6. The host (or its relay) showed the code K7QM-3XRD. The client redeems it once and gets a device id and token for every later connection.",
+  "keeps": ["deviceId", "token", "hostId", "hostName"],
+  "steps": [
+    {"note": "Open a connection for pairing. Through a relay this is wss://<relay>/oal/pair/<code>; on the LAN it is the host's own /oal.", "connect": "pair"},
+    {"note": "host/pair instead of host/hello: the code, and the device's name and X25519 public key (kept for end-to-end encryption in 0.2).", "send": {"jsonrpc": "2.0", "id": 1, "method": "host/pair", "params": {"protocol": {"min": "0.1", "max": "0.1"}, "client": {"name": "oal-conformance", "version": "0.1.0"}, "code": "{{code}}", "device": {"name": "Conformance phone", "publicKey": "hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo"}}}},
+    {"note": "The device's id and secret token, and the host's info, including its public key. The connection is now authenticated as this device.", "expect": {"jsonrpc": "2.0", "id": 1, "result": {"protocol": "0.1", "device": {"id": "{{deviceId}}", "name": "Conformance phone", "token": "{{token}}"}, "info": {"host": {"id": "{{hostId}}", "name": "{{hostName}}", "publicKey": "{{*}}"}, "protocol": {"min": "{{*}}", "max": "{{*}}"}, "acp": {"protocolVersion": 1}}}}},
+    {"note": "Heartbeat: a client sends host/ping when it has sent nothing for 20 seconds.", "send": {"jsonrpc": "2.0", "id": 2, "method": "host/ping", "params": {}}},
+    {"note": "An empty result.", "expect": {"jsonrpc": "2.0", "id": 2, "result": {}}},
+    {"note": "The paired devices. `current` marks this one.", "send": {"jsonrpc": "2.0", "id": 3, "method": "host/devices", "params": {}}},
+    {"note": "The new device is listed.", "expect": {"jsonrpc": "2.0", "id": 3, "result": {"devices": [{"id": "{{deviceId}}", "name": "Conformance phone", "current": true}]}}}
+  ]
+}

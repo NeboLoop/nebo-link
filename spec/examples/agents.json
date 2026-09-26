@@ -1,0 +1,14 @@
+{
+  "title": "List the agents on a host",
+  "description": "Section 7. Every later connection starts with host/hello. host/agents lists the host's agents; each one is an agent channel.",
+  "keeps": ["folder"],
+  "steps": [
+    {"note": "Open a connection to the host (through its relay, or on the LAN).", "connect": "host"},
+    {"note": "The first frame is host/hello: the versions this client speaks and the device credential from pairing.", "send": {"jsonrpc": "2.0", "id": 1, "method": "host/hello", "params": {"protocol": {"min": "0.1", "max": "0.1"}, "client": {"name": "oal-conformance", "version": "0.1.0"}, "auth": {"type": "device", "deviceId": "{{deviceId}}", "token": "{{token}}"}}}},
+    {"note": "The host picks 0.1 and says which device this connection is. `info` is the same object host/info returns.", "expect": {"jsonrpc": "2.0", "id": 1, "result": {"protocol": "0.1", "device": {"id": "{{deviceId}}"}, "info": {"host": {"id": "{{hostId}}"}}}}},
+    {"note": "Which agents does this computer have?", "send": {"jsonrpc": "2.0", "id": 2, "method": "host/agents", "params": {}}},
+    {"note": "Each agent: its id (the channel name), label, runtime, folder, whether it is online, and its ACP capabilities. The suite's agent is the one `--agent` names.", "expect": {"jsonrpc": "2.0", "id": 2, "result": {"agents": [{"id": "{{agent}}", "label": "{{*}}", "runtime": "{{*}}", "folder": "{{folder}}", "online": true, "capabilities": {"loadSession": true}}]}}},
+    {"note": "What is waiting for an answer across every agent (an inbox). Nothing yet.", "send": {"jsonrpc": "2.0", "id": 3, "method": "host/pending", "params": {}}},
+    {"note": "The list; a host with other agents may have items of theirs.", "expect": {"jsonrpc": "2.0", "id": 3, "result": {"requests": []}}}
+  ]
+}

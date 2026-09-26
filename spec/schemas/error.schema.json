@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/error.schema.json",
+  "title": "OAL error",
+  "description": "A JSON-RPC 2.0 error object. `message` is one plain sentence shown to people; clients branch on `code`.",
+  "type": "object",
+  "required": [
+    "code",
+    "message"
+  ],
+  "properties": {
+    "code": {
+      "type": "integer",
+      "description": "OAL codes: -33001 version_mismatch, -33002 unauthenticated, -33003 pairing_refused, -33004 unknown_agent, -33005 agent_unavailable, -33006 turn_in_progress, -33007 already_answered, -33008 unknown_request, -33009 attachment_failed, -33010 not_permitted, -33011 turn_failed. ACP and JSON-RPC codes pass through unchanged."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data": {}
+  }
+}

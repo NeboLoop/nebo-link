@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/nebo-link", "crates/nebo-runtimes"]
+members = ["crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/NeboLoop/nebo-link"
 
 [workspace.dependencies]
@@ -48,6 +48,11 @@ tokio-util = { version = "0.7", features = ["compat"] }
 base64 = "0.22"
 ed25519-dalek = "2"
 sha2 = "0.10"
+# The OAL conformance suite checks frames against spec/schemas.
+jsonschema = { version = "0.58", default-features = false }
+# Its client dials wss:// hosts and relays with ring, the provider the rest of the
+# workspace already uses.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Decoding and re-encoding compressed text bodies the proxy rewrites.
 flate2 = "1"
 brotli = "8"

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-agent-update.schema.json",
+  "title": "host/agent_update",
+  "description": "An agent was added, changed or removed. Notification, host to client.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "enum": [
+            "added",
+            "updated",
+            "removed"
+          ]
+        },
+        "agent": {
+          "$ref": "defs.schema.json#/$defs/Agent"
+        }
+      },
+      "required": [
+        "change",
+        "agent"
+      ]
+    }
+  }
+}
