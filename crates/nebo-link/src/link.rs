@@ -100,7 +100,7 @@ pub async fn pair(
         // Last, and not fatal: the link is running and connects as soon as
         // the agent comes back with its new settings.
         let restart_failed = match restart {
-            Some(command) => install::restart(&command).await.err().map(|e| e.to_string()),
+            Some(command) => install::restart(&command, install::RESTART_WAIT).await.err().map(|e| e.to_string()),
             None => None,
         };
         Ok::<_, Error>(restart_failed)
@@ -184,7 +184,7 @@ async fn hermes_backend(
     let restart = apply_api_server(&mut journal, install, link)
         .map_err(|e| format!("could not turn on the {} API server: {e}", runtime_name(link.runtime)))?;
     if let Some(command) = restart
-        && let Err(e) = install::restart(&command).await
+        && let Err(e) = install::restart(&command, install::RESTART_WAIT).await
     {
         tracing::info!(error = %e, "the runtime was not restarted onto its API server key");
     }
@@ -251,7 +251,7 @@ pub async fn set_models(dir: &BotDir, link: &mut Link, janus: &Janus, enabled: b
     };
     let restarted = match &outcome.restart {
         Some(command) => {
-            install::restart(command).await?;
+            install::restart(command, install::RESTART_WAIT).await?;
             true
         }
         None => false,
@@ -317,7 +317,7 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
                 restart = restart.or(outcome.restart);
             }
             if let Some(command) = restart
-                && let Err(e) = install::restart(&command).await
+                && let Err(e) = install::restart(&command, install::RESTART_WAIT).await
             {
                 unlinked.not_restarted = Some(e.to_string());
             }

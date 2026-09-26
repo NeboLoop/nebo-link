@@ -115,25 +115,45 @@ pub fn find(link: &Link) -> Result<Installation> {
         })
 }
 
-/// Runs the runtime's own restart command and waits for it.
-pub async fn restart(command: &RuntimeCommand) -> Result<()> {
+/// How long a runtime's restart command gets to return before the link
+/// treats it as the runtime itself running in the foreground.
+pub const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Runs the runtime's own restart command and waits up to `wait` for it.
+///
+/// A restart of a service returns at once. Without a service, `hermes
+/// gateway restart` *is* the gateway, in the foreground, and never returns;
+/// the first live run hung the link on it. A command still running after
+/// `wait` is therefore the runtime, up: it is left running in its own process
+/// group so it outlives the link, and the restart counts as done.
+pub async fn restart(command: &RuntimeCommand, wait: std::time::Duration) -> Result<()> {
     let shown = std::iter::once(command.program.as_str())
         .chain(command.args.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
-    let status = tokio::process::Command::new(&command.program)
-        .args(&command.args)
+    let mut cmd = tokio::process::Command::new(&command.program);
+    cmd.args(&command.args)
         .envs(command.env.iter().cloned())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .await
+        .kill_on_drop(false);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd
+        .spawn()
         .map_err(|e| Error::Message(format!("Could not run `{shown}`: {e}")))?;
-    if !status.success() {
-        return Err(Error::Message(format!("`{shown}` failed ({status}). Run it yourself to see why.")));
+    match tokio::time::timeout(wait, child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(Error::Message(format!(
+            "`{shown}` failed ({status}). Run it yourself to see why."
+        ))),
+        Ok(Err(e)) => Err(Error::Message(format!("Could not run `{shown}`: {e}"))),
+        Err(_) => {
+            tracing::info!(command = %shown, "still running; the runtime is up in the foreground and left running");
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -210,7 +230,22 @@ mod tests {
             args: vec![],
             env: vec![],
         };
-        restart(&command("true")).await.unwrap();
-        assert!(restart(&command("false")).await.is_err());
+        restart(&command("true"), RESTART_WAIT).await.unwrap();
+        assert!(restart(&command("false"), RESTART_WAIT).await.is_err());
+    }
+
+    /// `hermes gateway restart` without a service is the gateway itself and
+    /// never returns; the link must not hang on it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_keeps_running_is_the_runtime_up() {
+        let command = RuntimeCommand {
+            program: "sleep".into(),
+            args: vec!["30".into()],
+            env: vec![],
+        };
+        let started = std::time::Instant::now();
+        restart(&command, std::time::Duration::from_millis(300)).await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }
