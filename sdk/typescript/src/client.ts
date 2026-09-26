@@ -1,7 +1,8 @@
 // The client API: Client → Host → Agent → Session → Turn.
 
-import { plaintext, webSocketDialer, type Dialer, type SecureChannel } from './channel.js';
+import { webSocketDialer, type Dialer, type SecureChannel } from './channel.js';
 import { Link } from './connection.js';
+import { encrypted } from './e2e.js';
 import { OALError } from './errors.js';
 import { DEFAULT_CLIENT, checkEndpoint, relayUrl, type Endpoint, type Identity } from './identity.js';
 import { Queue } from './queue.js';
@@ -63,7 +64,7 @@ export type ConnectOptions = Endpoint & {
   /** One identity from `pair`, or several (one per host) with a relay. */
   credentials: Identity | Identity[];
   client?: ClientInfo;
-  /** The secure-channel layer. Default: `plaintext` (OAL 0.1). */
+  /** The secure-channel layer. Default: `encrypted` (end-to-end, OAL section 17). */
   secure?: SecureChannel;
   /** Opens sockets. Default: the platform `WebSocket`. */
   dialer?: Dialer;
@@ -83,7 +84,7 @@ export async function connect(options: ConnectOptions): Promise<Client> {
         new Host(identity, {
           url: options.url ?? relayUrl(options.relay!, `/oal/hosts/${encodeURIComponent(identity.host.id)}`),
           client: options.client ?? DEFAULT_CLIENT,
-          secure: options.secure ?? plaintext,
+          secure: options.secure ?? encrypted,
           // Through a relay, every connection first proves this device's key.
           dialer: options.relay ? relayDialer(options.relay, identity.device, dialer) : dialer,
         }),

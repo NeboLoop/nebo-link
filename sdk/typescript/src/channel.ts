@@ -5,10 +5,10 @@
 //   SecureChannel  turns a Socket into a FrameChannel: whole OAL frames.
 //
 // `plaintext` sends each frame as one JSON text message (OAL 0.1) and leaves
-// authentication to `host/hello`. An end-to-end channel (Noise IK, section
-// 17.2) does its handshake in `open`, authenticates the device by its static
-// key, and reports that in `FrameChannel.authenticated`; the client then
-// skips `host/hello`.
+// authentication to `host/hello`. An end-to-end channel (`encrypted` in
+// e2e.ts, Noise IK, section 17.2) does its handshake in `open`,
+// authenticates the device by its static key, and reports that in
+// `FrameChannel.authenticated`; the client then skips `host/hello`.
 
 import { OALError } from './errors.js';
 import type { ClientInfo, Frame, VersionRange } from './types.js';
@@ -61,6 +61,11 @@ export interface FrameChannel {
    * handshake). The client then sends no `host/hello`.
    */
   readonly authenticated?: { protocol: string; device: { id: string; name?: string } };
+  /**
+   * The peer's static public key (base64url), when the channel's handshake
+   * authenticated it. A pairing checks it against `info.host.publicKey`.
+   */
+  readonly peerKey?: string;
 }
 
 /** Turns a socket into a frame channel. See `plaintext`. */
@@ -118,7 +123,9 @@ export const webSocketDialer: Dialer = (url, protocols) =>
         },
         close: (code = 1000, reason = '') => {
           if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return;
-          ws.close(code, reason);
+          // The platform WebSocket sends only 1000 and 3000-4999; any other
+          // code (1002, 1009) goes as 1000 with its reason.
+          ws.close(code === 1000 || (code >= 3000 && code <= 4999) ? code : 1000, reason);
         },
       });
     });

@@ -70,7 +70,7 @@ function permanent(error: unknown): error is OALError {
   );
 }
 
-function closeError(close: { code: number; reason: string }, hostName: string): OALError {
+export function closeError(close: { code: number; reason: string }, hostName: string): OALError {
   switch (close.code) {
     case 4001:
       return new OALError('unauthenticated', `This device isn't paired with ${hostName}. Pair it again.`);
@@ -251,7 +251,9 @@ export class Link {
     const socket = await dialer(url, ['oal']).catch((error: unknown) => {
       throw error instanceof OALError ? new OALError(error.code, `Couldn't reach ${hostName}.`) : error;
     });
-    const channel = await secure.open(socket, context);
+    const channel = await secure.open(socket, context).catch((error: unknown) => {
+      throw error instanceof ChannelClosed ? closeError(error, hostName) : error;
+    });
     try {
       if (channel.authenticated) {
         const device = channel.authenticated.device;

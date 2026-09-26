@@ -4,6 +4,8 @@
 //   pnpm example:chat --url ws://127.0.0.1:7878/oal [--agent <id>]      chat
 //
 // Use --relay wss://relay.example.com instead of --url to go through a relay.
+// --plaintext turns end-to-end encryption off, for the conformance suite's
+// fake host, which speaks OAL 0.1 without it.
 // Permission prompts are answered here: y (allow once), a (always), n (deny).
 // /mode <id> switches the session's mode; Ctrl-C stops a turn, or quits.
 
@@ -13,11 +15,18 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 
-import { connect, pair, type Client, type Endpoint, type Identity, type Session } from '@openagentlink/client';
+import { connect, encrypted, pair, plaintext, type Client, type Endpoint, type Identity, type Session } from '@openagentlink/client';
 
 const { values: args } = parseArgs({
-  options: { url: { type: 'string' }, relay: { type: 'string' }, pair: { type: 'string' }, agent: { type: 'string' } },
+  options: {
+    url: { type: 'string' },
+    relay: { type: 'string' },
+    pair: { type: 'string' },
+    agent: { type: 'string' },
+    plaintext: { type: 'boolean' },
+  },
 });
+const secure = args.plaintext ? plaintext : encrypted;
 const endpoint = (args.relay ? { relay: args.relay } : { url: args.url ?? 'ws://127.0.0.1:7878/oal' }) as Endpoint;
 const file = join(homedir(), '.config', 'openagentlink', 'identity.json');
 const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -35,7 +44,7 @@ async function ask(question: string): Promise<string> {
 }
 
 if (args.pair) {
-  const identity = await pair({ ...endpoint, code: args.pair, deviceName: 'OAL example chat' });
+  const identity = await pair({ ...endpoint, code: args.pair, deviceName: 'OAL example chat', secure });
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify(identity, null, 2), { mode: 0o600 });
   console.log(`Paired with ${identity.host.name}. Now run without --pair.`);
@@ -51,7 +60,7 @@ try {
   process.exit(1);
 }
 
-client = await connect({ ...endpoint, credentials: identity });
+client = await connect({ ...endpoint, credentials: identity, secure });
 const host = client.hosts()[0]!;
 const agents = await host.agents();
 const agent = agents.find((a) => a.id === args.agent) ?? agents.find((a) => a.online);

@@ -8,7 +8,7 @@ OAL is ACP made reachable, plus a thin host layer. The spec is [`spec/oal-0.1.md
 pnpm add @openagentlink/client
 ```
 
-Runs in browsers and in Node 22 or later (it uses the platform `WebSocket` and WebCrypto). No runtime dependencies.
+Runs in browsers and in Node 22 or later (it uses the platform `WebSocket` and WebCrypto). Its only dependencies are the audited [noble](https://paulmillr.com/noble/) cryptography libraries (`@noble/curves`, `@noble/hashes`, `@noble/ciphers`), for end-to-end encryption.
 
 ## Quickstart
 
@@ -67,7 +67,11 @@ Every error is an `OALError` with a plain one-sentence `message` and a stable `c
 
 ### Transport and encryption
 
-`connect({ ..., dialer, secure })` takes the two transport layers. A `Dialer` opens a `Socket` (WebSocket messages); a `SecureChannel` turns it into a `FrameChannel` (whole OAL frames). The default, `plaintext`, is OAL 0.1: one JSON text message per frame, authenticated with `host/hello`. End-to-end encryption (spec section 17, Noise IK over X25519) plugs in as another `SecureChannel`: it gets the host's and this device's static keys in `ChannelContext`, does its handshake in `open`, and sets `FrameChannel.authenticated` so the client skips `host/hello`. Nothing else in your code changes.
+Every connection is encrypted end to end by default (spec section 17). `pair` binds the connection to the code with CPace (a password-authenticated key exchange) feeding a `Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s` handshake, so a relay that knows only the code's first half can't pair in the middle, and checks that the key the host names in `host/pair` is the one the handshake authenticated. Every later connection is a `Noise_IK_25519_ChaChaPoly_BLAKE2s` session with the keys pinned at pairing, which authenticates this device without `host/hello` or the token. Frames travel as Noise messages in binary WebSocket messages.
+
+A relay then sees which host each connection goes to, your IP address, when connections open and close, and the size and timing of messages. It never sees prompts, replies, tool calls, permission requests, agent or session ids, file names, the secret half of a pairing code, or either static key.
+
+`connect({ ..., dialer, secure })` and `pair` take the two transport layers. A `Dialer` opens a `Socket` (WebSocket messages); a `SecureChannel` turns it into a `FrameChannel` (whole OAL frames). The default is `encrypted`. `plaintext` is OAL 0.1 without encryption (one JSON text message per frame, authenticated with `host/hello`), for hosts that don't encrypt yet, such as the conformance suite's fake host.
 
 Through a `relay`, every connection first proves this device's key to the relay ([`crates/oal-relay`](../../crates/oal-relay/README.md#protocol)): a fresh challenge from `GET /oal/challenge`, answered with an HMAC over an X25519 Diffie-Hellman between the device's key and the relay's, bound to the request. It happens beneath your `Dialer`, which receives the proven URL. A relay must be `wss://`, except one on your own machine.
 
@@ -76,7 +80,7 @@ Through a `relay`, every connection first proves this device's key to the relay 
 - [`examples/chat.ts`](examples/chat.ts): a terminal chat. `pnpm example:chat --url ws://127.0.0.1:7878/oal --pair K7QM-3XRD`, then again without `--pair`.
 - [`examples/web/`](examples/web/): a one-page web client (pair, pick an agent, chat, answer permission cards). `pnpm example:web`.
 
-To try either without a real host, run the conformance suite's fake host: `cargo run -p oal-conformance -- client --listen 127.0.0.1:7878` (code `K7QM-3XRD`; `run: echo hi` asks permission, `wait` runs until stopped).
+To try the chat without a real host, run the conformance suite's fake host: `cargo run -p oal-conformance -- client --listen 127.0.0.1:7878` (code `K7QM-3XRD`; `run: echo hi` asks permission, `wait` runs until stopped). It speaks OAL 0.1 without encryption, so add `--plaintext` to both commands.
 
 ## Development
 
@@ -87,5 +91,7 @@ pnpm build && pnpm check && pnpm test
 ```
 
 The tests start `oal-conformance client` as a subprocess and fail on any frame it reports as breaking the spec; the relay test puts it behind `oal-relay serve` with `oal-relay host --forward`, then pairs and prompts through the relay. Set `OAL_CONFORMANCE` and `OAL_RELAY` to use binaries somewhere else.
+
+The encryption is checked against the CPace test vectors (draft-irtf-cfrg-cpace-21, appendix B.3) and the cacophony Noise vectors, and against the Rust reference (`crates/oal-secure`): build its peer with `cargo build -p oal-secure --example peer` and set `OAL_PEER` to it. `test/live.test.ts` runs against a real host through a relay when `OAL_LIVE_RELAY`, `OAL_LIVE_CODE` and `OAL_LIVE_AGENT` are set (see the file).
 
 License: Apache-2.0.

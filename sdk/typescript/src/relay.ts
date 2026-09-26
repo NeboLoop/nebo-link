@@ -96,7 +96,7 @@ async function hmac(key: BufferSource, message: BufferSource): Promise<ArrayBuff
   return crypto.subtle.sign('HMAC', k, message);
 }
 
-function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
+export function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
   const binary = atob(text.replace(/-/g, '+').replace(/_/g, '/'));
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
