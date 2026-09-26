@@ -1160,6 +1160,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
+name = "link-core"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "futures",
+ "nebo-runtimes",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1295,6 +1310,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "link-core",
  "nebo-comm",
  "nebo-runtimes",
  "nebo-updater",

@@ -1,0 +1,20 @@
+[package]
+name = "link-core"
+description = "Host coding agents (ACP) and agent runtimes (OpenClaw, Hermes) on a computer: their roster, sessions, turns and permission requests, in Open Agent Link's types. No transport: a daemon or an app embeds it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nebo-runtimes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

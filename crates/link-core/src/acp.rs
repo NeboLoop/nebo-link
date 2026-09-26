@@ -1,13 +1,13 @@
 //! The ACP backend: one agent process (Claude Code, Codex, Gemini CLI,
 //! OpenCode, or any command that speaks ACP) driven over stdio
-//! ([`nebo_runtimes::acp`]). The agent is the bot's one agent, a session is a
-//! chat, and a turn is one `session/prompt`.
+//! ([`nebo_runtimes::acp`]). The agent is its member's one agent, a session
+//! is a chat, and a turn is one `session/prompt`.
 //!
 //! - **The process.** Started on first use (the readiness probe is the first
-//!   use, so it runs while the link does) in the bot's working folder, kept
+//!   use, so it runs while the host does) in the agent's folder, kept
 //!   running, and started again on the next use after it exits: the probe
-//!   every 30 s is what brings a crashed agent back. Its stderr goes to the
-//!   bot's log folder. Starting runs detached from the caller, so a probe
+//!   every 30 s is what brings a crashed agent back. Its stderr goes to its
+//!   log file. Starting runs detached from the caller, so a probe
 //!   that times out while `npx` fetches the adapter doesn't kill it.
 //! - **Sessions.** `session/new` in the working folder, with no MCP servers.
 //!   One Nebo chat is one session; the agent keeps the transcript and only
@@ -16,7 +16,7 @@
 //!   transcript) or else `session/resume`.
 //! - **Chats.** `session/list` for the working folder where the agent serves
 //!   it (so a conversation begun in the terminal there shows too), else the
-//!   link's own record of the sessions it created.
+//!   host's own record of the sessions it created.
 //! - **Turns.** Message chunks are text; thought chunks and plans are
 //!   thinking; tool calls are tool cards, announced once the agent says what
 //!   the call is (it names a Bash call "Terminal" before its command
@@ -35,6 +35,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use std::path::Path;
+
 use nebo_runtimes::RuntimeCommand;
 use nebo_runtimes::acp::Agent as AcpAgent;
 use nebo_runtimes::acp::client::{
@@ -49,18 +51,53 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::backend::{
-    Agent, Ask, Backend, BoxFuture, Chat, Choice, Control, Error, Message, Permission, Role,
-    ToolCall, ToolResult, Turn, TurnEvent, Usage,
+use crate::backend::{
+    Agent, Ask, Backend, BoxFuture, Chat, Control, Error, Message, Permission, Role, ToolCall,
+    ToolResult, Turn, TurnEvent,
+};
+use crate::model::{
+    PermissionOption, SessionMode as ModeInfo, SessionModeState, StopReason, ToolCallStatus,
+    ToolCallUpdate, Usage, Words,
 };
 
 /// How long the agent gets to answer `initialize`: `npx` may be fetching the
 /// adapter on a first start.
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// How many chats the link's own record keeps (agents without
+/// How many chats the host's own record keeps (agents without
 /// `session/list`).
 const RECORDED_CHATS: usize = 200;
+
+/// Who drives the agent, as `initialize` introduces it: the host software's
+/// name and version (`nebo-link`, `nebo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Client {
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+/// An ACP agent a host runs, as it keeps it: the command that starts it
+/// speaking ACP (with absolute paths, since a background service's `PATH`
+/// is not the owner's shell's) and the folder its conversations work in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpLink {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// The folder its conversations work in.
+    pub workdir: PathBuf,
+}
+
+impl AcpLink {
+    pub fn command(&self) -> RuntimeCommand {
+        RuntimeCommand {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+        }
+    }
+}
 
 /// What the backend is given.
 #[derive(Debug, Clone)]
@@ -75,8 +112,9 @@ pub struct Settings {
     pub workdir: PathBuf,
     /// Where its stderr goes.
     pub log: PathBuf,
-    /// The link's record of the chats it created.
+    /// The host's record of the chats it created.
     pub chats_file: PathBuf,
+    pub client: Client,
 }
 
 /// A linked ACP agent.
@@ -91,6 +129,7 @@ impl Acp {
                 settings,
                 live: tokio::sync::Mutex::new(None),
                 opening: tokio::sync::Mutex::new(()),
+                known: Mutex::new(Known::default()),
             }),
         }
     }
@@ -123,6 +162,18 @@ struct Shared {
     live: tokio::sync::Mutex<Option<Arc<Live>>>,
     /// One session load at a time, so two callers never load one twice.
     opening: tokio::sync::Mutex<()>,
+    known: Mutex<Known>,
+}
+
+/// What the agent last said about itself, for its roster entry.
+#[derive(Default)]
+struct Known {
+    /// `agentCapabilities` from its last `initialize`.
+    capabilities: Option<Value>,
+    /// The modes its last new session started in.
+    modes: Option<SessionModeState>,
+    /// Why its last start failed; cleared when it starts.
+    failed: Option<String>,
 }
 
 /// The running agent.
@@ -166,12 +217,33 @@ impl Shared {
             return Ok(live.clone());
         }
         *slot = None;
-        let live = Arc::new(self.start().await?);
+        let started = self.start().await;
+        let mut known = self.known.lock().expect("known");
+        let live = match started {
+            Ok((live, capabilities)) => {
+                known.capabilities = Some(capabilities);
+                known.failed = None;
+                Arc::new(live)
+            }
+            Err(e) => {
+                known.failed = Some(match &e {
+                    // Why it did not start, as one sentence.
+                    Error::Unavailable(why) => {
+                        let mut chars = why.chars();
+                        chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+                    }
+                    other => other.message(self.name()),
+                });
+                return Err(e);
+            }
+        };
+        drop(known);
         *slot = Some(live.clone());
         Ok(live)
     }
 
-    async fn start(&self) -> Result<Live, Error> {
+    /// The agent started, and the capabilities it answered `initialize` with.
+    async fn start(&self) -> Result<(Live, Value), Error> {
         let settings = &self.settings;
         std::fs::create_dir_all(&settings.workdir).map_err(|e| {
             Error::Unavailable(format!(
@@ -195,12 +267,12 @@ impl Shared {
             START_TIMEOUT,
             conn.request(
                 "initialize",
-                protocol::initialize_params("nebo-link", crate::update::VERSION),
+                protocol::initialize_params(settings.client.name, settings.client.version),
             ),
         )
         .await;
-        let init = match answered {
-            Ok(Ok(result)) => Initialized::parse(&result),
+        let (init, capabilities) = match answered {
+            Ok(Ok(result)) => (Initialized::parse(&result), result["agentCapabilities"].clone()),
             Ok(Err(e)) if e.code == CLOSED => {
                 return Err(Error::Unavailable(match last_line(&settings.log) {
                     Some(line) => format!("{} stopped as it started: {line}", self.name()),
@@ -218,19 +290,24 @@ impl Shared {
         };
         if init.protocol_version != protocol::PROTOCOL_VERSION {
             return Err(Error::Unavailable(format!(
-                "{} speaks ACP version {}, and nebo-link speaks version {}. Update both.",
+                "{} speaks ACP version {}, and {} speaks version {}. Update both.",
                 self.name(),
                 init.protocol_version,
+                settings.client.name,
                 protocol::PROTOCOL_VERSION
             )));
         }
         tracing::info!(agent = settings.agent.key(), title = ?init.title, "the ACP agent started");
-        Ok(Live {
-            conn,
-            _child: child,
-            init,
-            state,
-        })
+        let capabilities = if capabilities.is_object() { capabilities } else { json!({}) };
+        Ok((
+            Live {
+                conn,
+                _child: child,
+                init,
+                state,
+            },
+            capabilities,
+        ))
     }
 
     /// What an error answer means to the owner.
@@ -345,6 +422,9 @@ impl Shared {
             })?
             .to_owned();
         let model = protocol::model(&result);
+        if let Some(modes) = mode_state(&result) {
+            self.known.lock().expect("known").modes = Some(modes);
+        }
         {
             let mut state = live.state.lock().expect("sessions");
             state.model = model.clone().or(state.model.take());
@@ -504,17 +584,15 @@ impl Shared {
             }
             let end = match answered {
                 Ok(result) => {
-                    let result = PromptResult::parse(&result);
-                    match result.stop_reason.as_str() {
+                    let usage = usage(&result);
+                    match PromptResult::parse(&result).stop_reason.as_str() {
                         "cancelled" => TurnEvent::Cancelled,
                         "refusal" => {
                             TurnEvent::Failed(format!("{} declined to do that.", self.name()))
                         }
-                        _ => TurnEvent::Completed {
-                            usage: result.usage.map(|u| Usage {
-                                input_tokens: u.input,
-                                output_tokens: u.output,
-                            }),
+                        other => TurnEvent::Completed {
+                            stop_reason: StopReason::parse(other),
+                            usage,
                         },
                     }
                 }
@@ -607,7 +685,7 @@ fn handle(state: &Mutex<Sessions>, incoming: Incoming, responder: &Responder) {
                         options = request.options.len(),
                         "acp: permission requested; asking the owner"
                     );
-                    sink.ask(id, request)
+                    sink.ask(id, request, &params)
                 }
                 // Nobody is there to answer: no turn of ours is running.
                 None => {
@@ -617,7 +695,7 @@ fn handle(state: &Mutex<Sessions>, incoming: Incoming, responder: &Responder) {
             }
         }
         Incoming::Request { id, method, .. } => {
-            tracing::info!(method = %method, "acp: a request the link does not offer; refused");
+            tracing::info!(method = %method, "acp: a request the host does not offer; refused");
             responder.respond(
                 &id,
                 Err(RpcError::new(
@@ -781,8 +859,12 @@ impl Sink {
     }
 
     /// The agent stops for the owner: the call's card, then the question.
-    fn ask(&mut self, rpc_id: Value, request: PermissionRequest) {
+    /// `params` are the request as the agent sent it, which the pending
+    /// request carries unchanged.
+    fn ask(&mut self, rpc_id: Value, request: PermissionRequest, params: &Value) {
         let call_id = request.tool_call.id.clone();
+        let tool_call = serde_json::from_value::<ToolCallUpdate>(params["toolCall"].clone())
+            .unwrap_or_else(|_| tool_call_update(&request.tool_call));
         self.tool(request.tool_call);
         self.announce(&call_id);
         let call = &self.tools[&call_id].call;
@@ -801,27 +883,37 @@ impl Sink {
         while self.asks.contains_key(&request_id) {
             request_id.push('+');
         }
-        let choices = request
+        let labels = request
             .options
             .iter()
-            .map(|o| Choice {
-                value: o.id.clone(),
-                label: match o.kind.as_str() {
-                    "allow_once" => "Allow once".to_owned(),
-                    "allow_always" => "Always allow".to_owned(),
-                    "reject_once" => "Deny".to_owned(),
-                    "reject_always" => "Never allow".to_owned(),
-                    _ => o.name.clone(),
-                },
+            .map(|o| match o.kind.as_str() {
+                "allow_once" => "Allow once".to_owned(),
+                "allow_always" => "Always allow".to_owned(),
+                "reject_once" => "Deny".to_owned(),
+                "reject_always" => "Never allow".to_owned(),
+                _ => o.name.clone(),
+            })
+            .collect();
+        let options = request
+            .options
+            .iter()
+            .map(|o| PermissionOption {
+                option_id: o.id.clone(),
+                name: o.name.clone(),
+                kind: o.kind.clone(),
             })
             .collect();
         self.asks.insert(request_id.clone(), rpc_id);
-        self.send(TurnEvent::Ask(Ask {
+        self.send(TurnEvent::Ask(Box::new(Ask {
             request_id: Some(request_id),
-            prompt,
-            summary,
-            choices,
-        }));
+            tool_call,
+            options,
+            words: Words {
+                question: prompt,
+                summary,
+                labels,
+            },
+        })));
     }
 }
 
@@ -932,12 +1024,18 @@ impl Backend for Acp {
 
     fn agents(&self) -> BoxFuture<'_, Result<Vec<Agent>, Error>> {
         let settings = &self.shared.settings;
+        let known = self.shared.known.lock().expect("known");
         let agent = Agent {
             id: settings.agent.key().to_owned(),
             name: settings.name.clone(),
             description: format!("Works in {}", settings.workdir.display()),
             is_default: true,
+            folder: Some(settings.workdir.display().to_string()),
+            capabilities: known.capabilities.clone().unwrap_or_else(|| json!({})),
+            modes: known.modes.clone(),
+            offline_reason: known.failed.clone(),
         };
+        drop(known);
         Box::pin(async move { Ok(vec![agent]) })
     }
 
@@ -1020,7 +1118,7 @@ fn mode_for(permission: Permission, modes: &[SessionMode]) -> Option<&str> {
         .map(|m| m.id.as_str())
 }
 
-/// One chat the link created, for agents that can't list their sessions.
+/// One chat the host created, for agents that can't list their sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Recorded {
     id: String,
@@ -1054,9 +1152,134 @@ fn record(file: &std::path::Path, id: &str, title: Option<&str>) {
         },
     );
     all.truncate(RECORDED_CHATS);
-    if let Err(e) = crate::state::write_json(file, &all) {
+    if let Err(e) = write_private_json(file, &all) {
         tracing::info!(error = %e, "could not record the chat");
     }
+}
+
+/// Writes `value` as JSON through a temporary file, so a crash never leaves
+/// half a file. Readable by the owner only.
+fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(serde_json::to_string_pretty(value).expect("chats serialize").as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
+/// A turn's tokens as `session/prompt`'s `usage` (unstable in ACP; sent by
+/// the Claude Code and Codex adapters) reports them.
+fn usage(result: &Value) -> Option<Usage> {
+    let usage = result.get("usage").filter(|u| u.is_object())?;
+    let count = |key: &str| usage[key].as_u64();
+    Some(Usage {
+        input_tokens: count("inputTokens").unwrap_or(0),
+        output_tokens: count("outputTokens").unwrap_or(0),
+        thought_tokens: count("thoughtTokens"),
+        cached_read_tokens: count("cachedReadTokens"),
+        cached_write_tokens: count("cachedWriteTokens"),
+        total_tokens: count("totalTokens"),
+        cost: None,
+    })
+}
+
+/// The modes a `session/new` answer says the session starts in.
+fn mode_state(result: &Value) -> Option<SessionModeState> {
+    let modes = &result["modes"];
+    Some(SessionModeState {
+        current_mode_id: modes["currentModeId"].as_str()?.to_owned(),
+        available_modes: modes["availableModes"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| {
+                let id = m["id"].as_str()?.to_owned();
+                Some(ModeInfo {
+                    name: m["name"].as_str().map(str::to_owned).unwrap_or_else(|| id.clone()),
+                    description: m["description"].as_str().map(str::to_owned),
+                    id,
+                })
+            })
+            .collect(),
+    })
+}
+
+/// A tool call as ACP's `ToolCallUpdate`, from what the host merged of it,
+/// for a request whose own `toolCall` did not parse.
+fn tool_call_update(call: &AcpToolCall) -> ToolCallUpdate {
+    ToolCallUpdate {
+        tool_call_id: call.id.clone(),
+        title: call.title.clone(),
+        kind: call.kind.clone(),
+        status: call.status.map(|s| match s {
+            ToolStatus::Pending => ToolCallStatus::Pending,
+            ToolStatus::InProgress => ToolCallStatus::InProgress,
+            ToolStatus::Completed => ToolCallStatus::Completed,
+            ToolStatus::Failed => ToolCallStatus::Failed,
+        }),
+        raw_input: call.raw_input.clone(),
+        raw_output: call.raw_output.clone(),
+        content: call.content.as_deref().map(ToolCallUpdate::text),
+    }
+}
+
+/// How long a coding agent's first start may take (`npx` may be fetching
+/// its adapter).
+const FIRST_START: Duration = START_TIMEOUT;
+
+/// Starts the agent once in `workdir`, proving it speaks ACP, and returns
+/// what it calls itself. `name` is its name for the messages.
+pub async fn probe(name: &str, command: &RuntimeCommand, workdir: &Path, client: Client) -> Result<Option<String>, String> {
+    let mut probe = tokio::process::Command::new(&command.program);
+    probe
+        .args(&command.args)
+        .envs(command.env.iter().cloned())
+        .current_dir(workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = probe.spawn().map_err(|e| format!("Could not start {name}: {e}"))?;
+    let conn = Connection::start(
+        child.stdout.take().expect("piped"),
+        child.stdin.take().expect("piped"),
+        Box::new(|_, _| {}),
+    );
+    let answered = tokio::time::timeout(
+        FIRST_START,
+        conn.request("initialize", protocol::initialize_params(client.name, client.version)),
+    )
+    .await;
+    let _ = child.kill().await;
+    match answered {
+        Ok(Ok(result)) => Ok(Initialized::parse(&result).title),
+        Ok(Err(e)) => Err(format!(
+            "{name} did not start in ACP mode ({e}). Run `{}` yourself to see why.",
+            shown(command)
+        )),
+        Err(_) => Err(format!(
+            "{name} did not answer in ACP mode. Run `{}` yourself to see why.",
+            shown(command)
+        )),
+    }
+}
+
+/// A command as the owner would type it.
+pub fn shown(command: &RuntimeCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {

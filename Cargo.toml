@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance"]
+members = ["crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/NeboLoop/nebo-link"
 
 [workspace.dependencies]
 nebo-runtimes = { path = "crates/nebo-runtimes" }
+link-core = { path = "crates/link-core" }
 # The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
 # nebo-comm is published to crates.io; then this becomes a version.
 nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "4b03c2c2a390123e2230a40f663bb484ae617365" }

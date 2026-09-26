@@ -9,14 +9,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use link_core::acp::Client;
+use link_core::backend::Backend;
+use link_core::host::Host;
+use link_core::phone::Contract;
+use link_core::roster::{Member, Roster};
 use nebo_runtimes::{
     acp, ApiServer, Change, ChangeKind, Environment, Installation, Journal, NeboaiModels, ProxyAccess, Runtime,
     RuntimeCommand, Service, detect, openclaw,
 };
 use tokio::sync::watch;
 
-use crate::contract::roster::{Member, Roster};
-use crate::contract::{self, Contract, Inbox};
+use crate::contract::Inbox;
 use crate::credentials::Credentials;
 use crate::endpoints::{Endpoints, WEB_ORIGIN};
 use crate::error::{Error, Result};
@@ -35,6 +39,12 @@ const PURPOSE: &str = "linked";
 
 /// The header OpenClaw reads the signed-in owner from (trusted-proxy auth).
 const USER_HEADER: &str = "x-nebo-user";
+
+/// Who drives a coding agent, as ACP's `initialize` introduces the link.
+pub const CLIENT: Client = Client {
+    name: "nebo-link",
+    version: crate::update::VERSION,
+};
 
 /// The agent to host: a runtime by name (OpenClaw, Hermes, Claude Code,
 /// Codex, ...), or any other agent that speaks ACP by the command that
@@ -237,7 +247,9 @@ async fn choose(link: Option<&Link>, wanted: Wanted) -> Result<Chosen> {
             same.label
         )));
     }
-    let title = probe(agent, &install, &workdir).await?;
+    let title = link_core::acp::probe(agent.name(), &install.restart, &workdir, CLIENT)
+        .await
+        .map_err(Error::Message)?;
     Ok(Chosen {
         acp: Some(AcpLink {
             program: install.restart.program.clone(),
@@ -354,23 +366,8 @@ fn new_id(agents: &[Hosted], label: &str) -> String {
     if agents.is_empty() {
         return PRIMARY.to_owned();
     }
-    let mut slug = String::new();
-    for c in label.chars().flat_map(char::to_lowercase) {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c);
-        } else if !slug.ends_with('-') && !slug.is_empty() {
-            slug.push('-');
-        }
-    }
-    let base = match slug.trim_end_matches('-') {
-        "" => "agent".to_owned(),
-        s => s.to_owned(),
-    };
-    let taken = |id: &str| id == PRIMARY || agents.iter().any(|a| a.id == id);
-    if !taken(&base) {
-        return base;
-    }
-    (2..).map(|n| format!("{base}-{n}")).find(|id| !taken(id)).expect("a free id")
+    let taken: Vec<&str> = std::iter::once(PRIMARY).chain(agents.iter().map(|a| a.id.as_str())).collect();
+    link_core::roster::new_id(label, &taken)
 }
 
 /// The change that serves an install's UI behind the link.
@@ -403,7 +400,7 @@ pub fn apply_api_server(
 }
 
 /// The chat contract for the bot: every hosted agent a member of one
-/// [`Roster`], which the running service changes as agents are added and
+/// [`Host`], which the running service changes as agents are added and
 /// removed. `installs` are the OpenClaw and Hermes installs found for the
 /// link's install agents, by agent id; an agent that can't be served is
 /// left out, and why is logged.
@@ -412,7 +409,7 @@ pub async fn chat(
     link: &Link,
     installs: &[(String, Installation)],
     token: watch::Receiver<String>,
-) -> (Arc<Contract>, Arc<Roster>) {
+) -> (Arc<Contract>, Arc<Host>) {
     let mut members = Vec::new();
     for agent in &link.agents {
         match member(dir, link, agent, installs).await {
@@ -420,11 +417,11 @@ pub async fn chat(
             Err(why) => tracing::info!(agent = %agent.id, why, "this agent's chat is not served"),
         }
     }
-    let roster = Arc::new(Roster::new(members));
+    let host = Host::new(Arc::new(Roster::new(members)));
     let inbox = Inbox::new(&link.endpoints.api, &link.bot_id, token);
     let runtime = link.runtime().unwrap_or(Runtime::Acp(acp::Agent::Other));
-    let contract = Contract::new(runtime_key(runtime), runtime_name(runtime), &link.bot_id, roster.clone(), Some(inbox));
-    (contract, roster)
+    let contract = Contract::new(runtime_key(runtime), runtime_name(runtime), host.clone(), Some(Arc::new(inbox)));
+    (contract, host)
 }
 
 /// The roster's member for a coding agent: its backend, ready to start the
@@ -434,17 +431,19 @@ pub fn acp_member(dir: &BotDir, agent: &Hosted) -> Option<Member> {
         return None;
     };
     let agent_dir = dir.agent(&agent.id);
-    let backend = contract::acp::Acp::new(contract::acp::Settings {
+    let backend = link_core::acp::Acp::new(link_core::acp::Settings {
         agent: kind,
         name: agent.label.clone(),
         command: acp.command(),
         workdir: acp.workdir.clone(),
         log: agent_dir.log(None),
         chats_file: agent_dir.acp_chats_file(),
+        client: CLIENT,
     });
     Some(Member {
         id: agent.id.clone(),
         label: agent.label.clone(),
+        runtime: runtime_key(agent.runtime).to_owned(),
         backend: Arc::new(backend),
     })
 }
@@ -489,11 +488,11 @@ async fn member(
         .map(|(_, install)| install)
         .ok_or_else(|| format!("{} was not found on this computer", runtime_name(agent.runtime)))?;
     let agent_dir = dir.agent(&agent.id);
-    let backend: Arc<dyn contract::backend::Backend> = match agent.runtime {
+    let backend: Arc<dyn Backend> = match agent.runtime {
         Runtime::Hermes => Arc::new(hermes_backend(&agent_dir, agent.runtime, settings, install).await?),
         Runtime::Openclaw => {
             let gateway = install::ui_addr(install).ok_or_else(|| "OpenClaw has no gateway to reach".to_owned())?;
-            Arc::new(contract::openclaw::Openclaw::new(
+            Arc::new(link_core::openclaw::Openclaw::new(
                 openclaw::gateway::Connect::new(
                     format!("ws://{gateway}"),
                     &proxy_access(link, settings),
@@ -507,6 +506,7 @@ async fn member(
     Ok(Member {
         id: agent.id.clone(),
         label: agent.label.clone(),
+        runtime: runtime_key(agent.runtime).to_owned(),
         backend,
     })
 }
@@ -517,7 +517,7 @@ async fn hermes_backend(
     runtime: Runtime,
     settings: &InstallLink,
     install: &Installation,
-) -> std::result::Result<contract::hermes::Hermes, String> {
+) -> std::result::Result<link_core::hermes::Hermes, String> {
     let mut journal = Journal::open(dir.journal_file()).map_err(|e| e.to_string())?;
     let restart = apply_api_server(&mut journal, install, settings)
         .map_err(|e| format!("could not turn on the {} API server: {e}", runtime_name(runtime)))?;
@@ -545,7 +545,7 @@ async fn hermes_backend(
             )
         })?;
     let profiles = install.profiles.iter().map(|p| p.name.clone()).collect();
-    Ok(contract::hermes::Hermes::new(&format!("http://{}", default.addr), &settings.api_server_key, profiles))
+    Ok(link_core::hermes::Hermes::new(&format!("http://{}", default.addr), &settings.api_server_key, profiles))
 }
 
 /// The models endpoint an install is pointed at, as seen from `link` with
@@ -760,51 +760,6 @@ pub fn default_workdir(home: &Path, agent: &str) -> PathBuf {
     home.join("NeboAI").join(agent)
 }
 
-/// How long a coding agent's first start may take (`npx` may be fetching
-/// its adapter).
-const ACP_FIRST_START: std::time::Duration = std::time::Duration::from_secs(180);
-
-/// Starts the coding agent once in `workdir`, proving it speaks ACP, and
-/// returns what it calls itself.
-async fn probe(agent: acp::Agent, install: &Installation, workdir: &Path) -> Result<Option<String>> {
-    let mut probe = tokio::process::Command::new(&install.restart.program);
-    probe
-        .args(&install.restart.args)
-        .envs(install.restart.env.iter().cloned())
-        .current_dir(workdir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let mut child = probe
-        .spawn()
-        .map_err(|e| Error::Message(format!("Could not start {}: {e}", agent.name())))?;
-    let conn = acp::client::Connection::start(
-        child.stdout.take().expect("piped"),
-        child.stdin.take().expect("piped"),
-        Box::new(|_, _| {}),
-    );
-    let answered = tokio::time::timeout(
-        ACP_FIRST_START,
-        conn.request("initialize", acp::protocol::initialize_params("nebo-link", crate::update::VERSION)),
-    )
-    .await;
-    let _ = child.kill().await;
-    match answered {
-        Ok(Ok(result)) => Ok(acp::protocol::Initialized::parse(&result).title),
-        Ok(Err(e)) => Err(Error::Message(format!(
-            "{} did not start in ACP mode ({e}). Run `{}` yourself to see why.",
-            agent.name(),
-            install::shown(&install.restart)
-        ))),
-        Err(_) => Err(Error::Message(format!(
-            "{} did not answer in ACP mode. Run `{}` yourself to see why.",
-            agent.name(),
-            install::shown(&install.restart)
-        ))),
-    }
-}
-
 /// This machine's name, as Nebo reports it.
 pub fn host_label() -> String {
     let from_env = std::env::var("COMPUTERNAME")
@@ -825,7 +780,7 @@ pub fn host_label() -> String {
 /// The `--home` the service must be given: set only when the state root is
 /// not the default one.
 fn root_override(root: &Root) -> Option<PathBuf> {
-    let default = dirs::data_dir().map(|d| d.join("nebo-link"));
+    let default = link_core::machine::default_daemon_home();
     (default.as_deref() != Some(root.path())).then(|| root.path().to_path_buf())
 }
 
