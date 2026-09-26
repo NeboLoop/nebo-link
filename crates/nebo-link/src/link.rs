@@ -20,6 +20,7 @@ use crate::janus::{self, Janus};
 use crate::proxy;
 use crate::service;
 use crate::state::{BotDir, Link, ModelsEndpoint, Removed, Root, write_json};
+use crate::supervise::{self, Supervisor};
 
 /// The bot's purpose as the hub records it.
 const PURPOSE: &str = "linked";
@@ -30,6 +31,8 @@ const USER_HEADER: &str = "x-nebo-user";
 /// What pairing did.
 pub struct Paired {
     pub link: Link,
+    /// The runtime's processes that were not running and the link started.
+    pub started: Vec<String>,
     /// Set when the agent could not be restarted to pick up its new settings
     /// (for one, a gateway started by hand in a terminal): the owner restarts
     /// it; everything else is in place.
@@ -79,6 +82,7 @@ pub async fn pair(
             enabled: false,
         },
         api_server_key: secret(),
+        services: Vec::new(),
     };
     dir.save(&link)?;
     // Linked again: what `status` said about its removal no longer applies.
@@ -88,9 +92,14 @@ pub async fn pair(
 
     let finish = async {
         Credentials::open(&dir).save(&resp.connection_token)?;
+        let supervisor = Supervisor::new(&dir, install.runtime, install.processes.clone());
+        let running = supervisor.running().await;
         let mut journal = Journal::open(dir.journal_file())?;
         let outcome = journal.apply(&install, None, &Change::ProxyAccess(proxy_access(&link)))?;
         let restart = apply_api_server(&mut journal, &install, &link)?.or(outcome.restart);
+        // What was not running is started now, onto the new settings; the
+        // service keeps it up from here.
+        let started = supervisor.ensure().await;
         service::install(&service::Spec {
             bot_id: bot_id.clone(),
             exe,
@@ -98,15 +107,24 @@ pub async fn pair(
             path: std::env::var("PATH").ok(),
         })?;
         // Last, and not fatal: the link is running and connects as soon as
-        // the agent comes back with its new settings.
-        let restart_failed = match restart {
-            Some(command) => install::restart(&command, install::RESTART_WAIT).await.err().map(|e| e.to_string()),
+        // the agent comes back with its new settings. Only a runtime that was
+        // already running needs restarting onto them.
+        let was_running = install.processes.first().is_some_and(|p| running.contains(&p.name));
+        let restart_failed = match restart.filter(|_| was_running) {
+            Some(command) => install::run(&command, install::COMMAND_WAIT, &dir.runtime_log(runtime_key(install.runtime)))
+                .await
+                .err()
+                .map(|e| e.to_string()),
             None => None,
         };
-        Ok::<_, Error>(restart_failed)
+        Ok::<_, Error>((started, restart_failed))
     };
     match finish.await {
-        Ok(restart_failed) => Ok(Paired { link, restart_failed }),
+        Ok((started, restart_failed)) => Ok(Paired {
+            link: dir.load()?,
+            started,
+            restart_failed,
+        }),
         Err(e) => Err(Error::Message(format!(
             "{e}\nThe bot is paired but not running. Fix the problem above and run `nebo-link run --bot {bot_id}`, or undo it with `nebo-link unlink --bot {bot_id}`."
         ))),
@@ -184,7 +202,7 @@ async fn hermes_backend(
     let restart = apply_api_server(&mut journal, install, link)
         .map_err(|e| format!("could not turn on the {} API server: {e}", runtime_name(link.runtime)))?;
     if let Some(command) = restart
-        && let Err(e) = install::restart(&command, install::RESTART_WAIT).await
+        && let Err(e) = install::run(&command, install::COMMAND_WAIT, &dir.runtime_log(runtime_key(link.runtime))).await
     {
         tracing::info!(error = %e, "the runtime was not restarted onto its API server key");
     }
@@ -251,7 +269,7 @@ pub async fn set_models(dir: &BotDir, link: &mut Link, janus: &Janus, enabled: b
     };
     let restarted = match &outcome.restart {
         Some(command) => {
-            install::restart(command, install::RESTART_WAIT).await?;
+            install::run(command, install::COMMAND_WAIT, &dir.runtime_log(runtime_key(link.runtime))).await?;
             true
         }
         None => false,
@@ -276,6 +294,9 @@ pub enum By {
 
 /// What unlinking did.
 pub struct Unlinked {
+    /// The runtime processes the link had started and its services the
+    /// link had installed, now stopped and removed.
+    pub released: supervise::Released,
     /// Settings the owner changed since the link set them, left as they are.
     pub conflicts: Vec<String>,
     /// Why the runtime's config could not be restored, when it could not.
@@ -298,12 +319,19 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
         service::uninstall(&link.bot_id, false)?;
     }
     let mut unlinked = Unlinked {
+        released: supervise::Released::default(),
         conflicts: Vec::new(),
         not_restored: None,
         not_restarted: None,
     };
     match install::find(link) {
         Ok(install) => {
+            // What the link started or installed goes first, so nothing of
+            // the link's is running on the config being restored.
+            unlinked.released = supervise::release(&dir, link.runtime, &link.services, &install.processes).await;
+            let runtime_released = install.processes.first().is_some_and(|p| {
+                unlinked.released.stopped.contains(&p.name) || unlinked.released.uninstalled.contains(&p.name)
+            });
             let mut journal = Journal::open(dir.journal_file())?;
             let mut restart = None;
             for kind in [ChangeKind::NeboaiModels, ChangeKind::ProxyAccess, ChangeKind::ApiServer] {
@@ -316,8 +344,10 @@ pub async fn unlink(root: &Root, link: &Link, by: By) -> Result<Unlinked> {
                 unlinked.conflicts.extend(outcome.conflicts);
                 restart = restart.or(outcome.restart);
             }
-            if let Some(command) = restart
-                && let Err(e) = install::restart(&command, install::RESTART_WAIT).await
+            // A runtime the link itself had started is not running now;
+            // it reads the restored config when the owner next starts it.
+            if let Some(command) = restart.filter(|_| !runtime_released)
+                && let Err(e) = install::run(&command, install::COMMAND_WAIT, &dir.runtime_log(runtime_key(link.runtime))).await
             {
                 unlinked.not_restarted = Some(e.to_string());
             }
@@ -424,6 +454,7 @@ mod tests {
                 enabled: false,
             },
             api_server_key: String::new(),
+            services: vec![],
         };
         let access = proxy_access(&link);
         assert_eq!(access.base_path, "/t/b1");

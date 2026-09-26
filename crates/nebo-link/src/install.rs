@@ -2,6 +2,7 @@
 //! finding it again, and running the runtime's own restart command.
 
 use std::net::SocketAddr;
+use std::path::Path;
 
 use nebo_runtimes::{Environment, Installation, Runtime, RuntimeCommand, Service, detect};
 
@@ -115,45 +116,84 @@ pub fn find(link: &Link) -> Result<Installation> {
         })
 }
 
-/// How long a runtime's restart command gets to return before the link
-/// treats it as the runtime itself running in the foreground.
-pub const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a runtime's own command gets to return before the link treats
+/// it as the runtime itself running in the foreground.
+pub const COMMAND_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Runs the runtime's own restart command and waits up to `wait` for it.
+/// Runs one of the runtime's own commands (restart, service install, start,
+/// uninstall) and waits up to `wait` for it. Its output goes to `log`.
 ///
-/// A restart of a service returns at once. Without a service, `hermes
-/// gateway restart` *is* the gateway, in the foreground, and never returns;
-/// the first live run hung the link on it. A command still running after
-/// `wait` is therefore the runtime, up: it is left running in its own process
-/// group so it outlives the link, and the restart counts as done.
-pub async fn restart(command: &RuntimeCommand, wait: std::time::Duration) -> Result<()> {
-    let shown = std::iter::once(command.program.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut cmd = tokio::process::Command::new(&command.program);
-    cmd.args(&command.args)
-        .envs(command.env.iter().cloned())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(false);
-    #[cfg(unix)]
-    cmd.process_group(0);
+/// A service command returns at once. Without a service, `hermes gateway
+/// restart` *is* the gateway, in the foreground, and never returns; the first
+/// live run hung the link on it. A command still running after `wait` is
+/// therefore the runtime, up: it is left running in its own process group so
+/// it outlives the link, and the command counts as done.
+pub async fn run(command: &RuntimeCommand, wait: std::time::Duration, log: &Path) -> Result<()> {
+    let shown = shown(command);
+    let mut cmd = detached(command, log)?;
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Message(format!("Could not run `{shown}`: {e}")))?;
     match tokio::time::timeout(wait, child.wait()).await {
         Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(Error::Message(format!(
-            "`{shown}` failed ({status}). Run it yourself to see why."
-        ))),
+        Ok(Ok(status)) => Err(Error::Message(match last_line(log) {
+            Some(line) => format!("`{shown}` failed ({status}): {line}"),
+            None => format!("`{shown}` failed ({status}). Run it yourself to see why."),
+        })),
         Ok(Err(e)) => Err(Error::Message(format!("Could not run `{shown}`: {e}"))),
         Err(_) => {
             tracing::info!(command = %shown, "still running; the runtime is up in the foreground and left running");
             Ok(())
         }
     }
+}
+
+/// The command as the owner would type it.
+pub fn shown(command: &RuntimeCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A command of the runtime's, set up to outlive the link: its own process
+/// group, never killed when dropped, its output appended to `log`.
+pub fn detached(command: &RuntimeCommand, log: &Path) -> Result<tokio::process::Command> {
+    let out = log_file(log)?;
+    let err = out.try_clone().map_err(|e| Error::io(log, e))?;
+    let mut cmd = tokio::process::Command::new(&command.program);
+    cmd.args(&command.args)
+        .envs(command.env.iter().cloned())
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .kill_on_drop(false);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    Ok(cmd)
+}
+
+/// Longest a runtime's log grows before it is started over.
+const LOG_LIMIT: u64 = 5 * 1024 * 1024;
+
+fn log_file(path: &Path) -> Result<std::fs::File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    }
+    let oversized = std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_LIMIT);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(!oversized)
+        .write(true)
+        .truncate(oversized)
+        .open(path)
+        .map_err(|e| Error::io(path, e))
+}
+
+/// The last non-empty line of `log`, for saying why a command failed.
+fn last_line(log: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    text.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -187,6 +227,7 @@ mod tests {
                 args: vec![],
                 env: vec![],
             },
+            processes: vec![],
         }
     }
 
@@ -224,14 +265,20 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn restart_reports_failure() {
-        let command = |program: &str| RuntimeCommand {
+    async fn a_failed_command_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("logs").join("runtime.log");
+        let command = |program: &str, args: &[&str]| RuntimeCommand {
             program: program.into(),
-            args: vec![],
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
             env: vec![],
         };
-        restart(&command("true"), RESTART_WAIT).await.unwrap();
-        assert!(restart(&command("false"), RESTART_WAIT).await.is_err());
+        run(&command("true", &[]), COMMAND_WAIT, &log).await.unwrap();
+        let err = run(&command("sh", &["-c", "echo nope >&2; exit 3"]), COMMAND_WAIT, &log)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`sh -c echo nope >&2; exit 3` failed") && err.ends_with(": nope"), "{err}");
     }
 
     /// `hermes gateway restart` without a service is the gateway itself and
@@ -244,8 +291,11 @@ mod tests {
             args: vec!["30".into()],
             env: vec![],
         };
+        let tmp = tempfile::tempdir().unwrap();
         let started = std::time::Instant::now();
-        restart(&command, std::time::Duration::from_millis(300)).await.unwrap();
+        run(&command, std::time::Duration::from_millis(300), &tmp.path().join("runtime.log"))
+            .await
+            .unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

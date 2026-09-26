@@ -312,6 +312,149 @@ fn hermes_home_pointing_at_a_profile_means_its_root() {
     );
 }
 
+// ------------------------------------------------------------ processes
+
+/// Where the runtime's own service definition lands for `label` (launchd)
+/// or `unit` (systemd) under `home`; `None` on Windows, where neither
+/// runtime has a definition file to look for.
+fn service_definition(home: &Path, label: &str, unit: &str) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library/LaunchAgents").join(format!("{label}.plist")))
+    } else if cfg!(unix) {
+        Some(home.join(".config/systemd/user").join(format!("{unit}.service")))
+    } else {
+        None
+    }
+}
+
+#[test]
+fn hermes_processes_are_the_gateway_and_the_dashboard() {
+    let home = hermes_home();
+    let install = home.install(Runtime::Hermes);
+    let names: Vec<&str> = install.processes.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["gateway", "dashboard"], "the gateway first: it is what `restart` restarts");
+
+    let gateway = &install.processes[0];
+    assert_eq!(gateway.health.url, "http://127.0.0.1:8650/health");
+    assert_eq!(gateway.health.pid_file, Some(home.path(".hermes/gateway.pid")));
+    assert_eq!(gateway.run.program, "hermes");
+    assert_eq!(gateway.run.args, ["gateway", "run"]);
+    assert!(gateway.run.env.is_empty(), "the default root needs no HERMES_HOME");
+    match (&gateway.service, service_definition(home.dir.path(), "ai.hermes.gateway", "hermes-gateway")) {
+        (Some(service), Some(definition)) => {
+            assert_eq!(service.definition, definition);
+            assert_eq!(service.install.args, ["gateway", "install", "--start-now", "--start-on-login"]);
+            assert_eq!(service.start.args, ["gateway", "start"]);
+            assert_eq!(service.uninstall.args, ["gateway", "uninstall"]);
+        }
+        (None, None) => {}
+        (service, definition) => panic!("service {service:?} for definition {definition:?}"),
+    }
+
+    let dashboard = &install.processes[1];
+    assert_eq!(dashboard.health.url, "http://127.0.0.1:9200/");
+    assert_eq!(dashboard.health.pid_file, None);
+    assert_eq!(dashboard.service, None, "Hermes has no service for its dashboard");
+    assert_eq!(
+        dashboard.run.args,
+        ["dashboard", "--host", "127.0.0.1", "--port", "9200", "--no-open"]
+    );
+}
+
+#[test]
+fn hermes_gateway_health_is_known_before_its_key_is_written() {
+    let home = Home::new();
+    home.write(".hermes/config.yaml", "model: gpt-5\n");
+    let install = home.install(Runtime::Hermes);
+    assert_eq!(install.endpoints.len(), 1, "no API server endpoint without a key");
+    assert_eq!(install.processes[0].health.url, "http://127.0.0.1:8642/health");
+    assert_eq!(install.processes[1].health.url, "http://127.0.0.1:9119/");
+}
+
+#[test]
+fn a_custom_hermes_home_gets_its_own_service_name_and_env() {
+    let home = Home::new().var("HERMES_HOME", "~/custom");
+    home.write("custom/config.yaml", "");
+    home.write("custom/hermes-agent/install-stamp.json", r#"{"baseVersion": "0.21.5"}"#);
+    let install = home.install(Runtime::Hermes);
+    let root = home.path("custom");
+    let env = [("HERMES_HOME".to_owned(), root.display().to_string())];
+    for command in install
+        .processes
+        .iter()
+        .flat_map(|p| {
+            std::iter::once(&p.run).chain(
+                p.service
+                    .iter()
+                    .flat_map(|s| [&s.install, &s.start, &s.uninstall]),
+            )
+        })
+        .chain(std::iter::once(&install.restart))
+    {
+        assert_eq!(command.env, env, "{}", command.args.join(" "));
+    }
+    // `hermes_cli/gateway.py` `_profile_suffix`: sha256 of the resolved path.
+    use sha2::{Digest, Sha256};
+    let resolved = root.canonicalize().unwrap();
+    let hash = format!("{:x}", Sha256::digest(resolved.display().to_string().as_bytes()));
+    let suffix = format!("-{}", &hash[..8]);
+    let expected = service_definition(
+        home.dir.path(),
+        &format!("ai.hermes.gateway{suffix}"),
+        &format!("hermes-gateway{suffix}"),
+    );
+    assert_eq!(
+        install.processes[0].service.as_ref().map(|s| s.definition.clone()),
+        expected
+    );
+
+    // Before 0.21.5 Hermes named any root's service the bare name.
+    home.write("custom/hermes-agent/install-stamp.json", r#"{"baseVersion": "0.19.0"}"#);
+    assert_eq!(
+        home.install(Runtime::Hermes).processes[0].service.as_ref().map(|s| s.definition.clone()),
+        service_definition(home.dir.path(), "ai.hermes.gateway", "hermes-gateway")
+    );
+}
+
+#[test]
+fn openclaw_process_is_its_gateway() {
+    let home = Home::new();
+    home.write(".openclaw/openclaw.json", OPENCLAW_FIXTURE);
+    let install = home.install(Runtime::Openclaw);
+    assert_eq!(install.processes.len(), 1);
+    let gateway = &install.processes[0];
+    assert_eq!(gateway.name, "gateway");
+    assert_eq!(gateway.health.url, "http://127.0.0.1:18789/healthz");
+    assert_eq!(gateway.health.pid_file, None);
+    assert_eq!(gateway.run.program, "openclaw");
+    assert_eq!(gateway.run.args, ["gateway"], "no subcommand runs it in the foreground");
+    assert_eq!(
+        gateway.service.as_ref().map(|s| s.definition.clone()),
+        service_definition(home.dir.path(), "ai.openclaw.gateway", "openclaw-gateway")
+    );
+    if let Some(service) = &gateway.service {
+        assert_eq!(service.install.args, ["gateway", "install"]);
+        assert_eq!(service.start.args, ["gateway", "start"]);
+        assert_eq!(service.uninstall.args, ["gateway", "uninstall"]);
+    }
+
+    let profile = Home::new().var("OPENCLAW_PROFILE", "work");
+    profile.write(".openclaw-work/openclaw.json", "{}");
+    let install = profile.install(Runtime::Openclaw);
+    assert_eq!(
+        install.processes[0].service.as_ref().map(|s| s.definition.clone()),
+        service_definition(profile.dir.path(), "ai.openclaw.work", "openclaw-gateway-work")
+    );
+    assert_eq!(
+        install.processes[0].run.env,
+        [("OPENCLAW_PROFILE".to_owned(), "work".to_owned())]
+    );
+
+    let remote = Home::new();
+    remote.write(".openclaw/openclaw.json", "{ gateway: { mode: 'remote' } }");
+    assert!(remote.install(Runtime::Openclaw).processes.is_empty(), "nothing local to keep running");
+}
+
 // ------------------------------------------------------------ apply/revert
 
 #[test]

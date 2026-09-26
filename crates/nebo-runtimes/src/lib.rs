@@ -41,7 +41,10 @@ pub use change::{
     ApiServer, Change, ChangeKind, Model, NeboaiModels, Outcome, PathMode, ProxyAccess,
     ProxyRoute,
 };
-pub use detect::{Endpoint, Installation, Profile, RuntimeCommand, Service, detect};
+pub use detect::{
+    Endpoint, HealthCheck, Installation, ManagedProcess, Profile, RuntimeCommand, Service,
+    ServiceCommand, detect,
+};
 pub use environment::Environment;
 pub use error::Error;
 pub use journal::{AppliedChange, Journal};

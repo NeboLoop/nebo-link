@@ -31,6 +31,52 @@ pub struct Installation {
     /// The runtime's own command for restarting it, with the environment
     /// overrides that selected this installation.
     pub restart: RuntimeCommand,
+    /// What must be running for the link to serve this installation, the
+    /// runtime itself (what `restart` restarts) first.
+    pub processes: Vec<ManagedProcess>,
+}
+
+/// A process of an installation the link needs up: how to tell it is, the
+/// runtime's own service for it when it has one, and the command that runs
+/// it in the foreground otherwise. All data; the caller runs the commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedProcess {
+    /// `gateway` or `dashboard`; unique within the installation.
+    pub name: String,
+    pub health: HealthCheck,
+    /// The runtime's own commands for running this process as a service that
+    /// starts at login and after a crash; `None` where the runtime has none
+    /// for it (the Hermes dashboard; both runtimes on Windows).
+    pub service: Option<ServiceCommand>,
+    /// Runs the process in the foreground (never returns while it lives).
+    pub run: RuntimeCommand,
+}
+
+/// How to tell a process is up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheck {
+    /// A URL the process answers without credentials once it is serving.
+    pub url: String,
+    /// The runtime's own record of the running process, when it keeps one
+    /// (Hermes `<home>/gateway.pid`). A live pid here with no answer at `url`
+    /// is a process that is up but not serving the link (for one, a Hermes
+    /// gateway started before its API key was written).
+    pub pid_file: Option<PathBuf>,
+}
+
+/// The runtime's own service for a process. Every command is bounded and
+/// touches only the current user's service manager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceCommand {
+    /// The service definition the runtime writes (a launchd plist, a systemd
+    /// user unit): present means a service is installed, by whoever did.
+    pub definition: PathBuf,
+    /// Installs the service and starts it.
+    pub install: RuntimeCommand,
+    /// Starts the installed service.
+    pub start: RuntimeCommand,
+    /// Stops and removes the service.
+    pub uninstall: RuntimeCommand,
 }
 
 /// A Hermes named profile under `<root>/profiles/<name>`.

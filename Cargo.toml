@@ -12,9 +12,9 @@ repository = "https://github.com/NeboLoop/nebo-link"
 nebo-runtimes = { path = "crates/nebo-runtimes" }
 # The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
 # nebo-comm is published to crates.io; then this becomes a version.
-nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "5ecc1ffc1528d8d1945df772c63f1331b0f781d2" }
+nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "4b03c2c2a390123e2230a40f663bb484ae617365" }
 # Nebo's updater, for self-update from nebo-link's signed release feed.
-nebo-updater = { git = "https://github.com/NeboLoop/nebo", rev = "5ecc1ffc1528d8d1945df772c63f1331b0f781d2" }
+nebo-updater = { git = "https://github.com/NeboLoop/nebo", rev = "4b03c2c2a390123e2230a40f663bb484ae617365" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }

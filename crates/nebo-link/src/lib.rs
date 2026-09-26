@@ -15,4 +15,5 @@ pub mod rewrite;
 pub mod run;
 pub mod service;
 pub mod state;
+pub mod supervise;
 pub mod update;
