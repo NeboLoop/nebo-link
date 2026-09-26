@@ -33,9 +33,13 @@ Your agent can also do this for you: the [Connect to NeboAI](skills/connect-to-n
 
 Removing the bot in the NeboAI app unlinks it here too: the service restores your agent's config, forgets the bot, removes itself, and `nebo-link status` tells you it was removed.
 
+## Chat from the phone
+
+A linked Hermes gets a native chat in the NeboAI app: its profiles are listed as employees, a conversation is one Hermes session, replies stream with their tool cards, and when Hermes stops to ask about a command the question reaches the phone as a card in the chat and an item in your inbox. Answer it there or in Hermes; both see the same answer. For this the link turns on Hermes' local API server with a key of its own (`API_SERVER_KEY` in the profile's `.env`, loopback only, recorded like every other change) and announces `chat` to NeboAI only while that server answers it; `nebo-link status` shows `chat: on`, or why it is off. Chat with OpenClaw is next.
+
 ### What it changes
 
-Every change to your agent's config is recorded with the value it replaced, so turning models off and `unlink` put it back exactly. For OpenClaw, linking sets the Control UI's base path and trusted-proxy sign-in for requests that come through NeboAI, and sets a local password (`gateway.auth.password`) so your own `openclaw` commands keep working. Hermes needs no config change. Where a change needs a restart, the link runs the agent's own restart command.
+Every change to your agent's config is recorded with the value it replaced, so turning models off and `unlink` put it back exactly. For OpenClaw, linking sets the Control UI's base path and trusted-proxy sign-in for requests that come through NeboAI, and sets a local password (`gateway.auth.password`) so your own `openclaw` commands keep working. For Hermes, linking writes `API_SERVER_KEY` into each profile's `.env` for the chat above; the dashboard itself needs no config change. Where a change needs a restart, the link runs the agent's own restart command.
 
 ### Where things are
 

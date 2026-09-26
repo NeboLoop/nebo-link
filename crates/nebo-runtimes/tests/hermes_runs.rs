@@ -843,3 +843,27 @@ async fn live_turn_approval_and_stop() {
     );
     assert!(page.data.iter().any(|m| m.text().contains("pong")));
 }
+
+#[tokio::test]
+async fn health_and_one_session() {
+    let (addr, _) = serve(handler(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/health") => Response::json(
+            200,
+            r#"{"status": "ok", "platform": "hermes-agent", "version": "0.19.0"}"#,
+        ),
+        ("GET", "/api/sessions/api_1790400000_ab12cd34") => Response::json(
+            200,
+            &format!(r#"{{"object": "hermes.session", "session": {SESSION}}}"#),
+        ),
+        _ => panic!("unexpected {} {}", req.method, req.path),
+    }))
+    .await;
+    let client = client(addr, None);
+    let health = client.health().await.unwrap();
+    assert_eq!(health.version, "0.19.0");
+    assert_eq!(health.platform, "hermes-agent");
+    let session = client.session("api_1790400000_ab12cd34").await.unwrap();
+    assert_eq!(session.model.as_deref(), Some("nebo-1"));
+    assert_eq!("once".parse::<Choice>(), Ok(Choice::Once));
+    assert_eq!("approve".parse::<Choice>(), Err(()));
+}
