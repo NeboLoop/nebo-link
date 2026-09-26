@@ -17,8 +17,8 @@ use crate::doc::yaml::Yaml;
 use crate::doc::{Edit, Format, Tree};
 use crate::environment::expand_tilde;
 use crate::{
-    ApiServer, Endpoint, Environment, Error, Installation, NeboaiModels, Profile, Runtime,
-    RuntimeCommand, Service,
+    ApiServer, Endpoint, Environment, Error, HealthCheck, Installation, ManagedProcess,
+    NeboaiModels, Profile, Runtime, RuntimeCommand, Service, ServiceCommand,
 };
 
 /// `hermes_cli/web_server.py` `start_server(port=9119)`.
@@ -27,6 +27,10 @@ const DEFAULT_DASHBOARD_PORT: u16 = 9119;
 const DEFAULT_API_PORT: u16 = 8642;
 /// First release whose dashboard honours `X-Forwarded-Prefix` (v2026.5.7).
 const PROXY_MIN_VERSION: [u64; 3] = [0, 13, 0];
+/// First release whose gateway service name is scoped to a custom root
+/// (`hermes_cli/gateway.py` `_native_service_homes`, 2026-09-12): before
+/// it, any root gets the bare name.
+const SCOPED_SERVICE_MIN_VERSION: [u64; 3] = [0, 21, 5];
 /// The named provider the link's endpoint is registered under.
 const PROVIDER: &str = "neboai";
 /// `hermes_constants.py` `_HERMES_HOME_MARKERS`.
@@ -42,7 +46,7 @@ const PROFILE_MARKERS: [&str; 6] = [
 ];
 
 pub(crate) fn detect(env: &Environment) -> Option<Installation> {
-    let root = root(env)?;
+    let (root, native) = root(env)?;
     let is_install = root.join("hermes-agent").is_dir()
         || root.join("profiles").is_dir()
         || ROOT_MARKERS.iter().any(|marker| root.join(marker).exists());
@@ -53,12 +57,14 @@ pub(crate) fn detect(env: &Environment) -> Option<Installation> {
     let (config, config_error) = read_config(&config_path);
     let profiles = named_profiles(&root);
 
-    let mut endpoints = vec![dashboard(&root)];
+    let dashboard = dashboard(&root);
+    let mut endpoints = vec![dashboard.clone()];
     // Multiplexing (the default, `gateway.multiplex_profiles`) binds only the
     // default profile's API server; a named profile is mirrored on it at
     // `/p/<name>` (`gateway/config.py` `SHARED_LISTENER_MIRROR_PATHS`).
     let listener = api_server(&config, &read_env_file(&root.join(".env")));
-    if let Some(addr) = listener {
+    if listener.enabled {
+        let addr = listener.addr;
         endpoints.push(Endpoint {
             service: Service::HermesApiServer {
                 profile: "default".to_owned(),
@@ -68,7 +74,7 @@ pub(crate) fn detect(env: &Environment) -> Option<Installation> {
         });
         for profile in &profiles {
             let (config, _) = read_config(&profile.config_path);
-            if api_server(&config, &read_env_file(&profile.home.join(".env"))).is_some() {
+            if api_server(&config, &read_env_file(&profile.home.join(".env"))).enabled {
                 endpoints.push(Endpoint {
                     service: Service::HermesApiServer {
                         profile: profile.name.clone(),
@@ -81,17 +87,60 @@ pub(crate) fn detect(env: &Environment) -> Option<Installation> {
     }
 
     let version = version(&root.join("hermes-agent"));
+    let command_env: Vec<(String, String)> = env
+        .var("HERMES_HOME")
+        .map(|_| ("HERMES_HOME".to_owned(), root.display().to_string()))
+        .into_iter()
+        .collect();
+    let hermes = |args: &[&str]| RuntimeCommand {
+        program: "hermes".to_owned(),
+        args: args.iter().map(|a| (*a).to_owned()).collect(),
+        env: command_env.clone(),
+    };
+    let processes = vec![
+        // The gateway hosts the API server (`gateway/platforms/api_server.py`
+        // runs inside it); `/health` answers without the key.
+        ManagedProcess {
+            name: "gateway".to_owned(),
+            health: HealthCheck {
+                url: format!("http://{}/health", listener.addr),
+                pid_file: Some(root.join("gateway.pid")),
+            },
+            service: gateway_service(env, &root, &native, version.as_deref()).map(|definition| ServiceCommand {
+                definition,
+                // Explicit answers to the questions `install` asks on a
+                // terminal (`hermes_cli/gateway.py` `_install_systemd_from_cli`).
+                install: hermes(&["gateway", "install", "--start-now", "--start-on-login"]),
+                start: hermes(&["gateway", "start"]),
+                uninstall: hermes(&["gateway", "uninstall"]),
+            }),
+            run: hermes(&["gateway", "run"]),
+        },
+        // The dashboard is its own process and has no service of its own
+        // (`hermes_cli/subcommands/dashboard.py`: "No service manager / PID
+        // file"); `hermes dashboard` runs it in the foreground.
+        ManagedProcess {
+            name: "dashboard".to_owned(),
+            health: HealthCheck {
+                url: format!("http://{}/", dashboard.addr),
+                pid_file: None,
+            },
+            service: None,
+            run: hermes(&[
+                "dashboard",
+                "--host",
+                &dashboard.addr.ip().to_string(),
+                "--port",
+                &dashboard.addr.port().to_string(),
+                "--no-open",
+            ]),
+        },
+    ];
+
     Some(Installation {
         runtime: Runtime::Hermes,
-        restart: RuntimeCommand {
-            program: "hermes".to_owned(),
-            args: vec!["gateway".to_owned(), "restart".to_owned()],
-            env: env
-                .var("HERMES_HOME")
-                .map(|_| ("HERMES_HOME".to_owned(), root.display().to_string()))
-                .into_iter()
-                .collect(),
-        },
+        restart: hermes(&["gateway", "restart"]),
+        processes,
         home: root,
         config_path,
         proxy_supported: version
@@ -104,9 +153,10 @@ pub(crate) fn detect(env: &Environment) -> Option<Installation> {
     })
 }
 
-/// The Hermes root: `hermes_constants.py` `get_default_hermes_root`. A
-/// `HERMES_HOME` pointing at `<root>/profiles/<name>` still means `<root>`.
-fn root(env: &Environment) -> Option<PathBuf> {
+/// The Hermes root and the platform's default one: `hermes_constants.py`
+/// `get_default_hermes_root`. A `HERMES_HOME` pointing at
+/// `<root>/profiles/<name>` still means `<root>`.
+fn root(env: &Environment) -> Option<(PathBuf, PathBuf)> {
     let home = env.home.clone()?;
     let suffix = env
         .vars
@@ -120,17 +170,48 @@ fn root(env: &Environment) -> Option<PathBuf> {
         home.join(format!(".hermes{suffix}"))
     };
     let Some(value) = env.var("HERMES_HOME") else {
-        return Some(native);
+        return Some((native.clone(), native));
     };
     let path = expand_tilde(value, &home);
     if path.starts_with(&native) {
-        return Some(native);
+        return Some((native.clone(), native));
     }
-    match path.parent() {
+    let root = match path.parent() {
         Some(parent) if parent.file_name().is_some_and(|name| name == "profiles") => {
-            parent.parent().map(Path::to_path_buf)
+            parent.parent().map(Path::to_path_buf)?
         }
-        _ => Some(path),
+        _ => path,
+    };
+    Some((root, native))
+}
+
+/// Where `hermes gateway install` writes the gateway's service definition
+/// for `root`: a launchd agent or a systemd user unit named
+/// `hermes_cli/gateway.py` `get_service_name` / `gateway_launchd.py`
+/// `launchd_label`: the bare name for the platform's default root, else the
+/// name with `-<sha256(path)[:8]>` (`_profile_suffix`) from
+/// [`SCOPED_SERVICE_MIN_VERSION`] on, and the bare name before it. Hermes
+/// has no service manager on Windows the link can name a file for.
+fn gateway_service(env: &Environment, root: &Path, native: &Path, version: Option<&str>) -> Option<PathBuf> {
+    let home = env.home.as_deref()?;
+    let scoped = version.and_then(|v| version_at_least(v, &SCOPED_SERVICE_MIN_VERSION)) != Some(false);
+    let suffix = if root == native || !scoped {
+        String::new()
+    } else {
+        use sha2::{Digest, Sha256};
+        let resolved = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let digest = Sha256::digest(resolved.display().to_string().as_bytes());
+        format!("-{}", &format!("{digest:x}")[..8])
+    };
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library/LaunchAgents").join(format!("ai.hermes.gateway{suffix}.plist")))
+    } else if cfg!(unix) {
+        let config = env
+            .var("XDG_CONFIG_HOME")
+            .map_or_else(|| home.join(".config"), |dir| expand_tilde(dir, home));
+        Some(config.join("systemd/user").join(format!("hermes-gateway{suffix}.service")))
+    } else {
+        None
     }
 }
 
@@ -238,14 +319,21 @@ fn dashboard(root: &Path) -> Endpoint {
     }
 }
 
-/// The API server's address when it is enabled for a profile.
+/// A profile's API server: whether it is enabled, and its address either way
+/// (the gateway's health is read there once it has a key).
+struct ApiServerSetting {
+    enabled: bool,
+    addr: SocketAddr,
+}
+
+/// The API server's setting for a profile.
 ///
 /// `gateway/config.py` `PlatformConfig.from_dict` merges the keys of
 /// `platforms.api_server` with its `extra` map (extra wins), and
 /// `gateway/config_env.py` `_api_server` then lets the profile's environment
 /// enable it (a usable `API_SERVER_KEY`, 16+ characters, unless the config
 /// says `enabled: false`) and override host and port.
-fn api_server(config: &Value, env: &BTreeMap<String, String>) -> Option<SocketAddr> {
+fn api_server(config: &Value, env: &BTreeMap<String, String>) -> ApiServerSetting {
     let platform = config.get("platforms").and_then(|p| p.get("api_server"));
     let setting = |key: &str| {
         platform.and_then(|p| {
@@ -259,9 +347,7 @@ fn api_server(config: &Value, env: &BTreeMap<String, String>) -> Option<SocketAd
         .and_then(|p| p.get("enabled"))
         .and_then(Value::as_bool);
     let env_key = env_var("API_SERVER_KEY").is_some_and(|key| key.len() >= 16);
-    if !(enabled == Some(true) || (env_key && enabled != Some(false))) {
-        return None;
-    }
+    let enabled = enabled == Some(true) || (env_key && enabled != Some(false));
     let port = env_var("API_SERVER_PORT")
         .and_then(|port| port.parse().ok())
         .or_else(|| {
@@ -276,7 +362,10 @@ fn api_server(config: &Value, env: &BTreeMap<String, String>) -> Option<SocketAd
         .map(str::to_owned)
         .or_else(|| setting("host").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or_default();
-    Some(SocketAddr::new(dial_ip(&host), port))
+    ApiServerSetting {
+        enabled,
+        addr: SocketAddr::new(dial_ip(&host), port),
+    }
 }
 
 /// The address to dial for a bind host: wildcard and name binds are reached

@@ -6,7 +6,8 @@
 
 mod common;
 
-use common::{FakeHub, Linked, PATIENCE, answer};
+use common::Linked;
+use common::hub::{FakeHub, PATIENCE, answer};
 
 #[test]
 fn a_dropped_connection_is_redialed_and_a_revoked_connect_unlinks() {
@@ -17,13 +18,13 @@ fn a_dropped_connection_is_redialed_and_a_revoked_connect_unlinks() {
     runtime.block_on(async {
         let service = tokio::time::timeout(PATIENCE, nebo_link::run::run(&linked.root, &linked.bot_id));
         let hub_side = async {
-            let mut ws = hub.next_connect().await;
+            let (mut ws, _) = hub.next_connect().await;
             answer(&mut ws, None).await;
             let tunnel = hub.next_tunnel().await;
 
             // The hub drops the connection, as a pod roll (or a revoke) does.
             drop(ws);
-            let mut ws = hub.next_connect().await;
+            let (mut ws, _) = hub.next_connect().await;
             linked.assert_linked();
 
             answer(&mut ws, Some("bot has been revoked")).await;

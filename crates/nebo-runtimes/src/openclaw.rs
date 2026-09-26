@@ -12,8 +12,8 @@ use crate::doc::json5::Json5;
 use crate::doc::{Edit, Format};
 use crate::environment::expand_tilde;
 use crate::{
-    Endpoint, Environment, Error, Installation, NeboaiModels, ProxyAccess, Runtime, RuntimeCommand,
-    Service,
+    Endpoint, Environment, Error, HealthCheck, Installation, ManagedProcess, NeboaiModels,
+    ProxyAccess, Runtime, RuntimeCommand, Service, ServiceCommand,
 };
 
 /// `src/config/paths.ts` `DEFAULT_GATEWAY_PORT`.
@@ -76,24 +76,53 @@ pub(crate) fn detect(env: &Environment) -> Option<Installation> {
     let version = config["meta"]["lastTouchedVersion"]
         .as_str()
         .map(str::to_owned);
+    let command_env: Vec<(String, String)> = SELECTOR_VARS
+        .iter()
+        .filter_map(|name| Some((name.to_string(), env.var(name)?.to_owned())))
+        .collect();
+    let openclaw = |args: &[&str]| RuntimeCommand {
+        program: "openclaw".to_owned(),
+        args: args.iter().map(|a| (*a).to_owned()).collect(),
+        env: command_env.clone(),
+    };
     // `gateway.mode: "remote"` means this machine only connects to a gateway
-    // elsewhere; there is nothing local to proxy.
-    let endpoints = if gateway["mode"] == "remote" {
-        Vec::new()
+    // elsewhere; there is nothing local to proxy or to keep running.
+    let (endpoints, processes) = if gateway["mode"] == "remote" {
+        (Vec::new(), Vec::new())
     } else {
-        vec![Endpoint {
+        // Every bind mode also listens on 127.0.0.1 (`gateway.bind` docs
+        // in docs/gateway/config-gateway.md).
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, gateway_port(&config, env, profile)));
+        let endpoint = Endpoint {
             service: Service::OpenclawGateway {
                 bind: gateway["bind"].as_str().unwrap_or("loopback").to_owned(),
                 auth_mode: auth_mode(gateway, env),
             },
-            // Every bind mode also listens on 127.0.0.1 (`gateway.bind` docs
-            // in docs/gateway/config-gateway.md).
-            addr: SocketAddr::from((Ipv4Addr::LOCALHOST, gateway_port(&config, env, profile))),
+            addr,
             base_path: gateway["controlUi"]["basePath"]
                 .as_str()
                 .unwrap_or_default()
                 .to_owned(),
-        }]
+        };
+        // One process serves the WebSocket API, the HTTP probes and the
+        // Control UI; `/healthz` is answered before auth
+        // (`src/gateway/server-http.ts`). `openclaw gateway` with no
+        // subcommand runs it in the foreground (`src/cli/gateway-cli/register.ts`).
+        let process = ManagedProcess {
+            name: "gateway".to_owned(),
+            health: HealthCheck {
+                url: format!("http://{addr}/healthz"),
+                pid_file: None,
+            },
+            service: gateway_service(env, &home, profile).map(|definition| ServiceCommand {
+                definition,
+                install: openclaw(&["gateway", "install"]),
+                start: openclaw(&["gateway", "start"]),
+                uninstall: openclaw(&["gateway", "uninstall"]),
+            }),
+            run: openclaw(&["gateway"]),
+        };
+        (vec![endpoint], vec![process])
     };
     Some(Installation {
         runtime: Runtime::Openclaw,
@@ -106,15 +135,30 @@ pub(crate) fn detect(env: &Environment) -> Option<Installation> {
         config_error,
         endpoints,
         profiles: Vec::new(),
-        restart: RuntimeCommand {
-            program: "openclaw".to_owned(),
-            args: vec!["gateway".to_owned(), "restart".to_owned()],
-            env: SELECTOR_VARS
-                .iter()
-                .filter_map(|name| Some((name.to_string(), env.var(name)?.to_owned())))
-                .collect(),
-        },
+        restart: openclaw(&["gateway", "restart"]),
+        processes,
     })
+}
+
+/// Where `openclaw gateway install` writes the gateway's service definition:
+/// a launchd agent `ai.openclaw.gateway` (`ai.openclaw.<profile>` for a named
+/// profile) or a systemd user unit `openclaw-gateway[-<profile>].service`
+/// (`src/daemon/constants.ts`), under the home `OPENCLAW_HOME` selects
+/// (`src/infra/home-dir.ts`). OpenClaw registers a scheduled task on Windows,
+/// which has no definition file to look for.
+fn gateway_service(env: &Environment, home: &Path, profile: Option<&str>) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let label = profile.map_or("ai.openclaw.gateway".to_owned(), |p| format!("ai.openclaw.{p}"));
+        Some(home.join("Library/LaunchAgents").join(format!("{label}.plist")))
+    } else if cfg!(unix) {
+        let unit = profile.map_or("openclaw-gateway".to_owned(), |p| format!("openclaw-gateway-{p}"));
+        let config = env
+            .var("XDG_CONFIG_HOME")
+            .map_or_else(|| home.join(".config"), |dir| expand_tilde(dir, home));
+        Some(config.join("systemd/user").join(format!("{unit}.service")))
+    } else {
+        None
+    }
 }
 
 fn read_config(path: &Path) -> (Option<Value>, Option<String>) {

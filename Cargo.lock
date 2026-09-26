@@ -1093,7 +1093,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nebo-comm"
 version = "0.15.0"
-source = "git+https://github.com/NeboLoop/nebo?rev=5ecc1ffc1528d8d1945df772c63f1331b0f781d2#5ecc1ffc1528d8d1945df772c63f1331b0f781d2"
+source = "git+https://github.com/NeboLoop/nebo?rev=4b03c2c2a390123e2230a40f663bb484ae617365#4b03c2c2a390123e2230a40f663bb484ae617365"
 dependencies = [
  "async-trait",
  "futures",
@@ -1173,7 +1173,7 @@ dependencies = [
 [[package]]
 name = "nebo-updater"
 version = "0.15.0"
-source = "git+https://github.com/NeboLoop/nebo?rev=5ecc1ffc1528d8d1945df772c63f1331b0f781d2#5ecc1ffc1528d8d1945df772c63f1331b0f781d2"
+source = "git+https://github.com/NeboLoop/nebo?rev=4b03c2c2a390123e2230a40f663bb484ae617365#4b03c2c2a390123e2230a40f663bb484ae617365"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

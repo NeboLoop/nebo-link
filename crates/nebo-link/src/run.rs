@@ -13,6 +13,12 @@
 //! revoked, or the hub closes its tunnel with 1008 "revoked". The service
 //! then stops retrying and unlinks it the way `nebo-link unlink` does.
 //!
+//! The runtime's own processes (a Hermes gateway and dashboard, an OpenClaw
+//! gateway) are kept up by `supervise`. Whether the chat contract can be
+//! served is probed on a timer and whenever one of them comes up; when the
+//! answer changes, the service reconnects so CONNECT announces `chat` as it
+//! is now.
+//!
 //! Once a day the service checks for a newer nebo-link; when one is out it
 //! hands back the bot's lease, disconnects and becomes the new release in
 //! place (see `update`).
@@ -34,6 +40,7 @@ use crate::link::{self, By, ModelsChange};
 use crate::offsets::FileOffsets;
 use crate::proxy::{self, Control, Target};
 use crate::state::{BotDir, Link, Root, STATUS_EVERY, Status};
+use crate::supervise::Supervisor;
 use crate::update::{self, Staged};
 
 /// Longest wait between failed connection attempts.
@@ -42,6 +49,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(600);
 const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 /// A tick this much later than scheduled means the machine slept.
 const SLEEP_DRIFT: Duration = Duration::from_secs(10);
+/// How often the chat contract's readiness is probed between process starts.
+const CHAT_PROBE_EVERY: Duration = Duration::from_secs(30);
 
 /// Shared by the service's tasks.
 struct Service {
@@ -55,6 +64,9 @@ struct Service {
     contract: Option<Arc<Contract>>,
     /// Why the chat contract is not announced, when it is not.
     chat_error: Mutex<Option<String>>,
+    /// What the current connection's CONNECT said about `chat`.
+    announced: AtomicBool,
+    supervisor: Arc<Supervisor>,
 }
 
 impl Service {
@@ -69,6 +81,7 @@ impl Service {
             error: if online { None } else { self.error.lock().expect("error lock").clone() },
             chat: chat_error.is_none(),
             chat_error,
+            processes: self.supervisor.status(),
         }
     }
 
@@ -109,6 +122,7 @@ impl Control for Service {
             "tunnel": status.tunnel,
             "models": { "enabled": link.models.enabled },
             "chat": { "enabled": status.chat, "error": status.chat_error },
+            "processes": status.processes,
         })
     }
 
@@ -178,6 +192,8 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
             (None, Some(why))
         }
     };
+    let supervisor = Supervisor::new(&dir, link.runtime, install.processes.clone());
+    tokio::spawn(supervisor.clone().run());
     let service = Arc::new(Service {
         dir: dir.clone(),
         janus: link::janus(&link, token_rx.clone()),
@@ -187,6 +203,8 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         error: Mutex::new(None),
         contract: contract.clone(),
         chat_error: Mutex::new(chat_error),
+        announced: AtomicBool::new(false),
+        supervisor: supervisor.clone(),
     });
 
     tokio::spawn(proxy::serve(
@@ -213,6 +231,31 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
             tokio::time::sleep(STATUS_EVERY).await;
         }
     });
+    // Chat readiness, re-probed on a timer and the moment a runtime process
+    // comes up; a change from what CONNECT announced makes the service
+    // reconnect, so the hub learns it without an unlink.
+    let chat_changed = Arc::new(tokio::sync::Notify::new());
+    let prober = service.clone();
+    let mut came_up = supervisor.came_up();
+    let changed = chat_changed.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(CHAT_PROBE_EVERY) => {}
+                changed = came_up.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+            let ready = prober.chat_ready().await;
+            prober.write_status();
+            if ready != prober.announced.load(Ordering::Relaxed) {
+                tracing::info!(chat = ready, "chat readiness changed; announcing it");
+                changed.notify_one();
+            }
+        }
+    });
     tracing::info!(
         bot = %link.bot_id,
         runtime = runtime_key(link.runtime),
@@ -235,6 +278,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
         // Probed before every connect, so a runtime that came up (or went
         // away) since the last one is announced as it is now.
         let chat = service.chat_ready().await;
+        service.announced.store(chat, Ordering::Relaxed);
         // Built before the match: a `borrow()` in the scrutinee would hold the
         // token's read lock through the arms, and `send_replace` below would
         // wait on it forever (the hub rotates the token on every connect).
@@ -254,7 +298,7 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
                 service.write_status();
                 tracing::info!("connected to NeboAI");
                 backoff = FIRST_BACKOFF;
-                let ended = connected(&plugin, &mut shutdown, &revoked, &mut staged).await;
+                let ended = connected(&plugin, &mut shutdown, &revoked, &chat_changed, &mut staged).await;
                 online_tx.send_replace(false);
                 service.write_status();
                 match ended {
@@ -315,7 +359,8 @@ pub async fn run(root: &Root, bot_id: &str) -> Result<()> {
 
 /// Why the service stopped waiting on a connection.
 enum Ended {
-    /// The connection dropped or the machine woke from sleep: reconnect.
+    /// The connection dropped, the machine woke from sleep, or what CONNECT
+    /// should announce changed: reconnect.
     Dropped,
     /// The service is shutting down.
     Shutdown,
@@ -330,6 +375,7 @@ async fn connected(
     plugin: &NeboAIPlugin,
     shutdown: &mut std::pin::Pin<&mut impl Future<Output = ()>>,
     revoked: &tokio::sync::Notify,
+    chat_changed: &tokio::sync::Notify,
     staged: &mut tokio::sync::mpsc::Receiver<Staged>,
 ) -> Ended {
     let tick = STATUS_EVERY;
@@ -357,6 +403,11 @@ async fn connected(
             }
             _ = shutdown.as_mut() => return Ended::Shutdown,
             _ = revoked.notified() => return Ended::Revoked,
+            _ = chat_changed.notified() => {
+                tracing::info!("reconnecting to announce chat as it is now");
+                let _ = plugin.disconnect().await;
+                return Ended::Dropped;
+            }
             Some(next) = staged.recv() => return Ended::Update(next),
         }
     }
@@ -487,6 +538,7 @@ mod tests {
                 enabled: false,
             },
             api_server_key: String::new(),
+            services: vec![],
         };
         let config = connect_config(&link, "jwt", false);
         assert_eq!(config["runtime"], "hermes");

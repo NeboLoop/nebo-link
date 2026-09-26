@@ -143,6 +143,24 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let link = root.select(bot.as_deref())?;
             let unlinked = link::unlink(&root, &link, link::By::Owner).await?;
             println!("Unlinked {} ({}).", link.name, link.bot_id);
+            let released = &unlinked.released;
+            if !released.stopped.is_empty() {
+                println!(
+                    "Stopped {}'s {}, which the link had started.",
+                    runtime_name(link.runtime),
+                    released.stopped.join(" and ")
+                );
+            }
+            if !released.uninstalled.is_empty() {
+                println!(
+                    "Removed the {} {} service the link had installed.",
+                    runtime_name(link.runtime),
+                    released.uninstalled.join(" and ")
+                );
+            }
+            for reason in &released.not_uninstalled {
+                println!("A service the link installed is still there: {reason}");
+            }
             if let Some(reason) = unlinked.not_restored {
                 println!("Its config was not restored: {reason}");
             }
@@ -196,6 +214,14 @@ async fn pair(root: &Root, code: &str, runtime: Option<Runtime>, name: Option<St
     );
     println!("Bot id: {}", link.bot_id);
     println!("nebo-link now runs in the background and starts with this computer.");
+    if !paired.started.is_empty() {
+        println!(
+            "It started {}'s {} and keeps {} running.",
+            runtime_name(link.runtime),
+            paired.started.join(" and "),
+            if paired.started.len() == 1 { "it" } else { "them" }
+        );
+    }
     println!("Open the NeboAI app to reach it. Check it any time with `nebo-link status`.");
     if let Some(problem) = &paired.restart_failed {
         println!(
@@ -268,6 +294,9 @@ fn status(root: &Root) -> Result<()> {
                 (false, None) => "off".to_string(),
             };
             println!("  chat:    {chat}");
+            for process in &s.processes {
+                println!("  {:<9}{}", format!("{}:", process.name), nebo_link::supervise::describe(process));
+            }
         }
         println!("  models:  {}", if link.models.enabled { "NeboAI" } else { "the agent's own" });
         println!("  state:   {}", dir.path().display());

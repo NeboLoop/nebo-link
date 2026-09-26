@@ -6,13 +6,15 @@
 //!   journal.json   every config change made to the runtime, with prior values
 //!   offsets.json   acked hub stream offsets
 //!   status.json    the running service's connection state
+//!   processes.json the runtime processes the link started (pid, when)
 //!   removed.json   only this, once NeboAI removed the bot and the service
 //!                  unlinked it (what `nebo-link status` reports)
 //!   token          the bot token (0600)
 //!   openclaw-device.json
 //!                  the keypair the link's own OpenClaw gateway socket
 //!                  proves itself with (chat contract)
-//!   logs/          rotating service logs
+//!   logs/          rotating service logs, and the runtime's own output
+//!                  (`<runtime>-<process>.log`, `<runtime>.log` for its commands)
 //! ```
 //!
 //! `<data dir>` is the platform data directory; `--home` (or
@@ -139,6 +141,13 @@ impl BotDir {
     pub fn removed_file(&self) -> PathBuf {
         self.0.join("removed.json")
     }
+    pub fn processes_file(&self) -> PathBuf {
+        self.0.join("processes.json")
+    }
+    /// Where the output of the runtime's process or command `name` goes.
+    pub fn runtime_log(&self, name: &str) -> PathBuf {
+        self.logs_dir().join(format!("{name}.log"))
+    }
     pub fn token_file(&self) -> PathBuf {
         self.0.join("token")
     }
@@ -212,6 +221,11 @@ pub struct Link {
     /// the contract existed, and filled in by its service at the next start.
     #[serde(default)]
     pub api_server_key: String,
+    /// The runtime processes (by [`nebo_runtimes::ManagedProcess::name`])
+    /// whose service the link installed with the runtime's own command, so
+    /// `unlink` removes those and never one the owner installed.
+    #[serde(default)]
+    pub services: Vec<String>,
 }
 
 impl Link {
@@ -270,6 +284,9 @@ pub struct Status {
     /// Why the chat contract is not announced, when it is not.
     #[serde(default)]
     pub chat_error: Option<String>,
+    /// The runtime's processes the link keeps up, as the supervisor sees them.
+    #[serde(default)]
+    pub processes: Vec<crate::supervise::ProcessStatus>,
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -337,6 +354,7 @@ mod tests {
                 enabled: false,
             },
             api_server_key: String::new(),
+            services: vec![],
         }
     }
 
