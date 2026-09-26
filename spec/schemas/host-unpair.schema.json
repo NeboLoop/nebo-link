@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-unpair.schema.json",
+  "title": "host/unpair",
+  "description": "Revokes a paired device. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "deviceId"
+      ]
+    },
+    "result": {
+      "type": "object"
+    }
+  }
+}

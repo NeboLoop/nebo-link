@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-hello.schema.json",
+  "title": "host/hello",
+  "description": "The first request of a paired device on a connection: negotiates the version and authenticates. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "defs.schema.json#/$defs/VersionRange"
+        },
+        "client": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version"
+          ]
+        },
+        "auth": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "device"
+                },
+                "deviceId": {
+                  "type": "string"
+                },
+                "token": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "deviceId",
+                "token"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "relay"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "client",
+        "auth"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "defs.schema.json#/$defs/Version"
+        },
+        "device": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ]
+        },
+        "info": {
+          "$ref": "defs.schema.json#/$defs/HostInfo"
+        }
+      },
+      "required": [
+        "protocol",
+        "device",
+        "info"
+      ]
+    }
+  }
+}

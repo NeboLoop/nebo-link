@@ -1,0 +1,10 @@
+{
+  "title": "Refuse a version mismatch plainly",
+  "description": "Sections 5 and 13. A client that speaks only OAL 9.0 is refused with version_mismatch, a message that says which side to update, and close code 4002.",
+  "steps": [
+    {"note": "Open a connection.", "connect": "host"},
+    {"note": "A future client: it speaks only 9.0.", "send": {"jsonrpc": "2.0", "id": 1, "method": "host/hello", "params": {"protocol": {"min": "9.0", "max": "9.0"}, "client": {"name": "oal-conformance", "version": "0.1.0"}, "auth": {"type": "device", "deviceId": "{{deviceId}}", "token": "{{token}}"}}}},
+    {"note": "version_mismatch (-33001). The message is for people: it names both versions and who should update.", "expect": {"jsonrpc": "2.0", "id": 1, "error": {"code": -33001, "message": "{{*}}"}}},
+    {"note": "Then the host closes with 4002.", "expectClose": 4002}
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "title": "Cancel a turn",
+  "description": "Section 8. ACP session/cancel from an attached client stops the turn; it ends with stopReason cancelled.",
+  "steps": [
+    {"note": "Open a connection to the host (through its relay, or on the LAN).", "connect": "host"},
+    {"note": "The first frame is host/hello: the versions this client speaks and the device credential from pairing.", "send": {"jsonrpc": "2.0", "id": 1, "method": "host/hello", "params": {"protocol": {"min": "0.1", "max": "0.1"}, "client": {"name": "oal-conformance", "version": "0.1.0"}, "auth": {"type": "device", "deviceId": "{{deviceId}}", "token": "{{token}}"}}}},
+    {"note": "The host picks 0.1 and says which device this connection is. `info` is the same object host/info returns.", "expect": {"jsonrpc": "2.0", "id": 1, "result": {"protocol": "0.1", "device": {"id": "{{deviceId}}"}, "info": {"host": {"id": "{{hostId}}"}}}}},
+    {"note": "ACP starts every agent channel with initialize. The host answers it itself with the agent's capabilities; the client's are not passed on.", "send": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "oal-conformance", "version": "0.1.0"}}}}},
+    {"note": "ACP protocol version 1. No sign-in methods: the agent runs under its owner's own sign-in on the host.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "authMethods": []}}}},
+    {"note": "ACP session/new, unchanged. cwd is the agent's folder from host/agents; a remote client can't pick another folder or add MCP servers that run commands.", "send": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "{{folder}}", "mcpServers": []}}}},
+    {"note": "The agent's own session id and modes. This connection is now attached to the session.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "{{session}}", "modes": {"currentModeId": "ask", "availableModes": [{"id": "ask"}, {"id": "folder"}, {"id": "full"}]}}}}},
+    {"note": "The fake agent works on `wait` until it is cancelled.", "send": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "{{session}}", "prompt": [{"type": "text", "text": "wait"}]}}}},
+    {"note": "The turn starts.", "expect": {"jsonrpc": "2.0", "method": "host/turn", "params": {"agent": "{{agent}}", "sessionId": "{{session}}", "turnId": "{{turn}}", "state": "running"}}},
+    {"note": "The agent says it is working.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "{{session}}", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Working on it."}}}}}},
+    {"note": "ACP session/cancel, a notification, unchanged.", "send": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "{{session}}"}}}},
+    {"note": "The prompt ends with ACP's cancelled stop reason, not an error.", "expect": {"agent": "{{agent}}", "acp": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "cancelled"}}}},
+    {"note": "Everyone attached sees the turn end.", "expect": {"jsonrpc": "2.0", "method": "host/turn", "params": {"agent": "{{agent}}", "sessionId": "{{session}}", "turnId": "{{turn}}", "state": "ended", "stopReason": "cancelled"}}}
+  ]
+}

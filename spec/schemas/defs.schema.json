@@ -1,0 +1,324 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/defs.schema.json",
+  "title": "OAL 0.1 shared types",
+  "description": "Types shared by the OAL host-layer messages. ACP types are referenced from ACP schema-v1.23.0, never copied.",
+  "$defs": {
+    "Version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "description": "An OAL version, MAJOR.MINOR."
+    },
+    "VersionRange": {
+      "type": "object",
+      "description": "The OAL versions a side supports, inclusive.",
+      "properties": {
+        "min": {
+          "$ref": "defs.schema.json#/$defs/Version"
+        },
+        "max": {
+          "$ref": "defs.schema.json#/$defs/Version"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ]
+    },
+    "Time": {
+      "type": "string",
+      "description": "RFC 3339, UTC.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "AgentId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "Software": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "DeviceRef": {
+      "type": "object",
+      "description": "The device that did something.",
+      "properties": {
+        "deviceId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "deviceId",
+        "name"
+      ]
+    },
+    "HostInfo": {
+      "type": "object",
+      "description": "What host/info returns.",
+      "properties": {
+        "host": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Stable id of the host."
+            },
+            "name": {
+              "type": "string",
+              "description": "What the owner calls the computer."
+            },
+            "publicKey": {
+              "type": "string",
+              "description": "X25519 static public key, 32 bytes, base64url without padding."
+            },
+            "tlsFingerprint": {
+              "type": "string",
+              "description": "SHA-256 of the LAN certificate (DER), base64url. Present when LAN direct is on."
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "publicKey"
+          ]
+        },
+        "software": {
+          "$ref": "defs.schema.json#/$defs/Software"
+        },
+        "protocol": {
+          "$ref": "defs.schema.json#/$defs/VersionRange"
+        },
+        "acp": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "protocolVersion"
+          ]
+        },
+        "runtimes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "description": "acp, or the adapter name (openclaw, hermes)."
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ]
+          }
+        },
+        "maxFrameBytes": {
+          "type": "integer",
+          "minimum": 4194304
+        },
+        "attachments": {
+          "type": "object",
+          "properties": {
+            "schemes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "schemes",
+            "maxBytes"
+          ]
+        }
+      },
+      "required": [
+        "host",
+        "software",
+        "protocol",
+        "acp",
+        "runtimes",
+        "maxFrameBytes",
+        "attachments"
+      ]
+    },
+    "Agent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.schema.json#/$defs/AgentId"
+        },
+        "label": {
+          "type": "string",
+          "description": "What the owner calls the agent."
+        },
+        "runtime": {
+          "type": "string",
+          "description": "A runtimes[].id from host/info."
+        },
+        "folder": {
+          "type": "string",
+          "description": "Absolute path of the folder its sessions work in, on the host."
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "offlineReason": {
+          "type": "string",
+          "description": "One plain sentence, when online is false."
+        },
+        "capabilities": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/AgentCapabilities"
+        },
+        "modes": {
+          "anyOf": [
+            {
+              "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/SessionModeState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "runtime",
+        "online",
+        "capabilities"
+      ]
+    },
+    "PendingRequest": {
+      "type": "object",
+      "description": "A permission request waiting for an answer.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Host-assigned id of the pending request."
+        },
+        "agent": {
+          "$ref": "defs.schema.json#/$defs/AgentId"
+        },
+        "sessionId": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/SessionId"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "toolCall": {
+          "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/ToolCallUpdate"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/schema-v1.23.0/schema/v1/schema.json#/$defs/PermissionOption"
+          }
+        },
+        "createdAt": {
+          "$ref": "defs.schema.json#/$defs/Time"
+        }
+      },
+      "required": [
+        "id",
+        "agent",
+        "sessionId",
+        "toolCall",
+        "options",
+        "createdAt"
+      ]
+    },
+    "Usage": {
+      "type": "object",
+      "description": "Tokens and cost of one turn. Field meanings follow ACP's Usage.",
+      "properties": {
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thoughtTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedReadTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedWriteTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "object",
+          "properties": {
+            "amount": {
+              "type": "number"
+            },
+            "currency": {
+              "type": "string",
+              "description": "ISO 4217."
+            }
+          },
+          "required": [
+            "amount",
+            "currency"
+          ]
+        }
+      }
+    },
+    "ErrorObject": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    }
+  }
+}
