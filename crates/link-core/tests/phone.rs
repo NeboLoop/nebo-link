@@ -128,3 +128,43 @@ async fn a_chat_frame_asks_is_answered_and_completes() {
     );
     assert_eq!(cancelled[0].data["session_id"], Value::from(session));
 }
+
+/// Every agent has one id in one form; a hire saved with an agent's id in an
+/// older form (`<member>.<agent>`) still reaches it, and its chat's frames
+/// carry the id it knows.
+#[tokio::test]
+async fn an_agent_id_saved_in_an_older_form_still_names_its_agent() {
+    let openclaw = Arc::new(Fake {
+        others: vec!["Research_Bot"],
+        ..Fake::default()
+    });
+    let host = Host::new(Arc::new(Roster::new(vec![
+        member(link_core::PRIMARY, "Claude Code", Arc::new(Fake::default())),
+        member("openclaw", "OpenClaw", openclaw.clone()),
+    ])));
+    let contract = Contract::new("openclaw", "OpenClaw", host, None);
+    let mut frames = contract.subscribe();
+
+    let agents = contract.rest("GET", "/api/v1/agents").await.unwrap();
+    let ids: Vec<&str> = agents["agents"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["assistant", "openclaw", "openclaw-research-bot"]);
+
+    let legacy = "openclaw.Research_Bot";
+    let agent = contract.rest("GET", &format!("/api/v1/agents/{legacy}")).await.unwrap();
+    assert_eq!(agent["agent"]["id"], legacy);
+    let created = contract.rest("POST", &format!("/api/v1/agents/{legacy}/chats")).await.unwrap();
+    let chat = created["chat"]["id"].as_str().unwrap().to_owned();
+    let session = format!("agent:{legacy}:thread:{chat}");
+    contract.inbound(&json!({
+        "type": "chat",
+        "message_id": "m1",
+        "data": { "prompt": "hi", "agent_id": legacy, "session_id": session },
+    }));
+    let asked = until(&mut frames, "ask_request").await;
+    assert!(asked.iter().all(|f| f.data["session_id"] == session.as_str() && f.data["agent_id"] == legacy));
+    contract.inbound(&json!({ "type": "ask_response", "data": { "request_id": "call_1", "value": "Allow once" } }));
+    let done = until(&mut frames, "chat_complete").await;
+    assert!(done.iter().all(|f| f.data["session_id"] == session.as_str()));
+    assert_eq!(openclaw.answers.lock().unwrap().len(), 1, "the turn ran on the agent the old id names");
+    assert!(contract.rest("GET", "/api/v1/agents/openclaw.nobody").await.is_err());
+}

@@ -168,15 +168,23 @@ impl BotDir {
     }
 
     /// The bot's link. One saved before a bot could host several agents is
-    /// moved to this shape first, its one agent becoming [`PRIMARY`].
+    /// moved to this shape first, its one agent becoming [`PRIMARY`]; an
+    /// agent whose id isn't in the one form every agent id takes
+    /// ([`link_core::roster::agent_id`]) gets its id in that form, and its
+    /// files move with it. A hire saved with the old id still names it: the
+    /// roster reads an id that names no agent as its form.
     pub fn load(&self) -> Result<Link> {
         let path = self.link_file();
         let value: serde_json::Value = read_json(&path)?;
         if value.get("agents").is_some() {
-            return serde_json::from_value(value).map_err(|e| Error::Parse {
+            let mut link: Link = serde_json::from_value(value).map_err(|e| Error::Parse {
                 path,
                 message: e.to_string(),
-            });
+            })?;
+            if self.migrate_ids(&mut link)? {
+                self.save(&link)?;
+            }
+            return Ok(link);
         }
         let single: SingleAgent = serde_json::from_value(value).map_err(|e| Error::Parse {
             path: path.clone(),
@@ -212,6 +220,30 @@ impl BotDir {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::io(&self.0, e)),
             _ => Ok(()),
         }
+    }
+
+    /// Gives every agent whose id isn't in the one form its id in that form
+    /// (made unique among the link's), moving its directory. Returns whether
+    /// any changed.
+    fn migrate_ids(&self, link: &mut Link) -> Result<bool> {
+        let mut changed = false;
+        for i in 0..link.agents.len() {
+            let old = link.agents[i].id.clone();
+            if link_core::roster::is_agent_id(&old) {
+                continue;
+            }
+            let taken: Vec<&str> = link.agents.iter().map(|a| a.id.as_str()).collect();
+            let new = link_core::roster::new_id(&old, &taken);
+            let from = self.agent(&old).path();
+            if from.exists() {
+                let to = self.agent(&new).path();
+                std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e))?;
+            }
+            tracing::info!(from = %old, to = %new, "an agent id now takes the one form every agent id takes");
+            link.agents[i].id = new;
+            changed = true;
+        }
+        Ok(changed)
     }
 
     /// The one agent's files of a link saved before several agents could
@@ -636,6 +668,26 @@ mod tests {
                 }),
             }],
         }
+    }
+
+    #[test]
+    fn an_agent_id_saved_in_another_form_takes_the_one_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Root::at(tmp.path());
+        let dir = root.bot("b1");
+        dir.create().unwrap();
+        let mut saved = link("b1", "Studio");
+        let long = "a".repeat(70);
+        saved.agents[0].id = long.clone();
+        dir.save(&saved).unwrap();
+        dir.agent(&long).create().unwrap();
+        std::fs::write(dir.agent(&long).journal_file(), "{}").unwrap();
+
+        let loaded = dir.load().unwrap();
+        let id = &loaded.agents[0].id;
+        assert_eq!(id, &"a".repeat(63));
+        assert!(dir.agent(id).journal_file().is_file(), "its files moved with it");
+        assert_eq!(dir.load().unwrap(), loaded, "saved once, in the new form");
     }
 
     #[test]

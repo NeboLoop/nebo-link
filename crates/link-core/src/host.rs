@@ -28,7 +28,7 @@ use crate::model::{
     self, Agent, AgentChange, AgentUpdate, DeviceRef, ErrorObject, Outcome, PendingChange,
     PendingRequest, PendingUpdate, StopReason, TurnState, TurnUpdate, code,
 };
-use crate::roster::{Member, Roster, member_agent};
+use crate::roster::{Member, Roster, member_agents};
 
 /// How many resolved request ids are remembered, so a late answer reads
 /// `already_answered` rather than `unknown_request`.
@@ -148,10 +148,11 @@ impl Host {
 
     async fn current(&self) -> Vec<Agent> {
         let mut all = Vec::new();
-        for member in self.roster.members() {
+        let members = self.roster.members();
+        let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
+        for member in &members {
             match member.backend.agents().await {
-                Ok(agents) => all.extend(agents.into_iter().map(|a| {
-                    let a = member_agent(&member, a);
+                Ok(agents) => all.extend(member_agents(member, agents, &ids).into_iter().map(|a| {
                     Agent {
                         online: a.offline_reason.is_none(),
                         id: a.id,
@@ -601,11 +602,14 @@ impl Host {
             .iter()
             .find(|m| m.id == agent)
             .or_else(|| {
-                members.iter().find(|m| {
-                    agent
-                        .strip_prefix(m.id.as_str())
-                        .is_some_and(|rest| rest.starts_with('.'))
-                })
+                members
+                    .iter()
+                    .filter(|m| {
+                        agent
+                            .strip_prefix(m.id.as_str())
+                            .is_some_and(|rest| rest.starts_with('-'))
+                    })
+                    .max_by_key(|m| m.id.len())
             })
             .or_else(|| members.iter().find(|m| m.id == crate::PRIMARY))
             .map(|m| m.label.clone())
