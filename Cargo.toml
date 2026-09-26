@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance", "crates/oal-secure"]
+members = ["crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance", "crates/oal-relay", "crates/oal-secure"]
 
 [workspace.package]
 version = "0.1.0"
@@ -64,3 +64,11 @@ zeroize = "1"
 # Decoding and re-encoding compressed text bodies the proxy rewrites.
 flate2 = "1"
 brotli = "8"
+# oal-relay: the relay's proof of possession (with x25519-dalek above), its
+# store, and its optional built-in TLS (ring, the provider the rest of the
+# workspace already uses).
+hmac = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+form_urlencoded = "1"
