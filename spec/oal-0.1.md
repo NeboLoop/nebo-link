@@ -26,7 +26,7 @@ Open Agent Link lets a client drive agents on another computer. The client can b
 | Resuming after a reconnect | 12 |
 | Files by reference | 14 |
 | Error model | 15 |
-| End-to-end encryption (shape only; required for 1.0) | 17 |
+| End-to-end encryption and pairing through an untrusted relay (specified for 0.2; required for 1.0) | 17 |
 
 ### 1.1 Conventions
 
@@ -137,7 +137,7 @@ A relay MUST:
 
 A relay MAY authenticate the client (for example with a bearer token for an account) before the upgrade. It MAY stamp the stream with the identity it verified, so the host can accept `{"type":"relay"}` authentication (section 5).
 
-A relay endpoint for pairing is `wss://<relay>/oal/pair/<code>`. The relay routes it to the host that registered that code (section 6.2).
+A relay endpoint for pairing is `wss://<relay>/oal/pair/<nameplate>`, where the nameplate is the first four characters of the code. The relay routes it to the host that registered that nameplate (section 6.2). The rest of the code never goes to the relay outside the pairing connection itself.
 
 ### 4.5 LAN direct path
 
@@ -182,7 +182,7 @@ Params: `protocol` and `client` as in `host/hello`, plus:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `code` | string | The code shown by the host or issued by the relay. Case-insensitive; hyphens and spaces are ignored. |
+| `code` | string | The code shown to the owner (section 6.2). Case-insensitive; hyphens and spaces are ignored; `I` and `L` read as `1`, `O` as `0`. |
 | `device.name` | string | What the owner calls this device ("Alma's phone"). |
 | `device.publicKey` | string | The device's X25519 static public key, 32 bytes, base64url without padding. |
 
@@ -190,12 +190,16 @@ Result: as `host/hello`, except that `device` also carries `token`, the device's
 
 The device stores `device.id`, `device.token` and the host's `info.host.publicKey`. In 0.1 the public keys are exchanged and stored, and nothing is encrypted with them yet. They are the static keys the end-to-end handshake uses (section 17), so an 0.1 pairing will not need to be redone.
 
+In 0.2, `host/pair` is unchanged but travels inside an encrypted pairing connection that is bound to the code, and each side checks that the key the other names in `host/pair` is the key that connection authenticated (section 17.5).
+
 ### 6.2 Codes
 
-- A code is 8 characters from the Crockford base32 alphabet (40 bits). It is shown as `XXXX-XXXX`.
-- A host issues codes when the owner asks for one (for example `nebo-link pair`). A relay may issue codes on the host's behalf. A relay-issued code is registered with the relay, so `wss://<relay>/oal/pair/<code>` reaches the right host.
+- A code is 8 characters from the Crockford base32 alphabet (40 bits). It is shown as `XXXX-XXXX`. The first four characters are the **nameplate**; the last four are the **secret**.
+- The relay routes a pairing by the nameplate alone (section 4.4). The secret never goes to the relay: not in a URL, a header or a relay API. In 0.2 the whole code is the password of the pairing key exchange (section 17.5), so a relay that knows only the nameplate cannot pair in the middle.
+- A host issues codes when the owner asks for one (for example `nebo-link pair`). A relay MAY issue the nameplate on the host's behalf. The nameplate is registered with the relay for the host, so `wss://<relay>/oal/pair/<nameplate>` reaches the right host.
+- The device that shows the code makes the secret, from a cryptographic random source. That is the host, or a client that shows a code for the owner to type on the host (the host then registers the nameplate, and the client connects once the code is entered). A relay never makes or shows the secret: a code shown on a relay's own page gives no protection against that relay.
 - A code MUST be single-use and MUST expire within 10 minutes.
-- A host MUST compare codes in constant time.
+- A host MUST compare codes (all eight characters) in constant time.
 - A host MUST allow at most one `host/pair` attempt per connection. A wrong code closes the connection with 4001.
 - A host MUST accept no more than 10 failed attempts per minute across all connections. Once a code has had 5 failed attempts, the host MUST stop accepting it.
 - On failure the host answers `pairing_refused` with a plain message ("That code didn't work. Get a new one on the computer.").
@@ -403,7 +407,7 @@ OAL codes (schema `schemas/error.schema.json`):
 - **Permission modes.** A client can change a session's mode (`session/set_mode`). A host SHOULD let the owner refuse remote changes to modes that let the agent act without asking. It SHOULD label such modes plainly: "Runs anything on this computer without asking."
 - **Audit.** A host SHOULD keep a local log of who prompted, which device answered which permission request with which option, mode changes, pairings and unpairings. The log records device ids and never message content.
 - **Revocation.** `host/unpair`, or removing the device on the host, closes its connections (4003) and invalidates its token.
-- **Pairing codes** are short and single-use. The limits in section 6.2 make guessing a code impractical within its lifetime.
+- **Pairing codes** are short and single-use. The limits in section 6.2 make guessing a code impractical within its lifetime. In 0.1 the relay can read the code in `host/pair`; section 17.5 removes that.
 
 ## 17. End-to-end encryption (specified shape; to be implemented in 0.2; required for 1.0)
 
@@ -411,7 +415,7 @@ OAL 1.0 MUST encrypt every connection between client and host, so that a relay f
 
 ### 17.1 Keys
 
-Each device and each host has an X25519 static key pair. Public keys are exchanged at pairing (section 6.1) and stored by both sides. They rotate by pairing again (an RFC defines in-band rotation).
+Each device and each host has an X25519 static key pair. Public keys are exchanged at pairing (section 6.1) and stored by both sides. They rotate by pairing again (an RFC defines in-band rotation). A side that rotates MAY keep its previous key for a transition, answering and connecting with whichever key each peer holds until that peer has the new one.
 
 ### 17.2 Handshake
 
@@ -421,20 +425,70 @@ Each device and each host has an X25519 static key pair. Public keys are exchang
 - Message 2 (host to client, one binary message) is `<- e, ee, se`. Its payload is the JSON `{"protocol":"<selected>","device":{"id":…}}`.
 - The host authenticates the device by its static key, which must belong to a paired device. `host/hello` is not sent. The token is not used on encrypted connections.
 - A host that requires encryption closes a connection whose first message is text, with 4001.
+- A message 1 that no static key of the host opens, or whose static key is not a paired device, closes the connection with 4001. A revoked device's key is not a paired device.
+- Message 1 can be replayed by the relay, and its payload is not forward-secret. Its payload therefore carries version negotiation only. A replayed message 1 gets a message 2 that only the real device can read, so the host MUST NOT count the device as connected (presence, `lastSeenAt`) until the first transport message from it decrypts.
 
 ### 17.3 Framing after the handshake
 
-Every OAL frame is encrypted as one or more Noise transport messages, each in its own binary WebSocket message. A Noise message is at most 65535 bytes. The plaintext of each message starts with one byte: `0x01` means more parts follow, `0x00` means this is the last part of the frame. The receiver joins the parts and parses the frame. Each side rekeys (Noise `Rekey`) after 2^20 messages. A new connection always performs a new handshake.
+Every OAL frame is encrypted as one or more Noise transport messages, each in its own binary WebSocket message. A Noise message is at most 65535 bytes, so it carries at most 65518 bytes of the frame (less the 16-byte tag and the part byte). The plaintext of each message starts with one byte: `0x01` means more parts follow, `0x00` means this is the last part of the frame. The receiver joins the parts and parses the frame. `maxFrameBytes` (section 4.1) limits the joined frame.
+
+Each side rekeys its sending key (Noise `REKEY`) after every 2^20 transport messages it sends, and its receiving key after every 2^20 transport messages it receives. Handshake messages are not counted. A new connection always performs a new handshake.
+
+Transport messages use Noise's implicit counter as the nonce, so a message that is replayed, reordered, dropped or altered fails to decrypt. A message that fails to decrypt ends the connection with close 4001, and nothing after it is read. A part byte other than `0x00` or `0x01` ends it with close 1002.
 
 ### 17.4 What the relay still sees
 
-With encryption on, the relay still sees: which host each connection goes to (the host id in the path), the client's IP address, when connections open and close, and the size and timing of messages. With relay-issued identity, it also sees the account. It sees no agent ids, session ids, prompts, replies, tool calls, permission requests, or file names inside frames. A host that asks its relay to send a push notification sends a content-free notice ("An agent on Studio Mac needs your answer"), unless the owner chooses otherwise.
+With encryption on, the relay still sees: which host each connection goes to (the host id in the path), the client's IP address, when connections open and close, and the size and timing of messages. With relay-issued identity, it also sees the account. It sees no agent ids, session ids, prompts, replies, tool calls, permission requests, or file names inside frames. During pairing (section 17.5) it sees the nameplate, that a pairing happened, and the sizes and timing of its messages; it never sees the secret half of the code, either static key, the device's name, or the token. A host that asks its relay to send a push notification sends a content-free notice ("An agent on Studio Mac needs your answer"), unless the owner chooses otherwise.
 
-### 17.5 Open for 0.2
+### 17.5 Pairing through an untrusted relay (0.2)
 
-- **Pairing over an untrusted relay (open).** A 40-bit code that the relay routes must not let the relay insert its own keys. Pairing will bind the exchanged keys to the code with a PAKE (CPace or SPAKE2), or the client will confirm a short fingerprint of the host key on the host's screen. The choice is settled by RFC.
+In 0.1 the relay can read the code in `host/pair`, so it could pair in the middle and hold keys of its own. In 0.2 the pairing connection is encrypted and bound to the code with CPace, a password-authenticated key exchange (PAKE). The whole code is the password; the relay knows only the nameplate (section 6.2). A relay that tries to take part must guess the secret half: it gets one guess per attempt, a wrong guess makes that pairing fail, and no guess can be tested offline. With the limits in section 6.2 (5 failed attempts per code) its chance per code is at most 5 in 2^20, and every attempt shows as a failed pairing.
+
+Pairing does not ask the owner to compare fingerprints. Hosts are often servers with no screen.
+
+The pairing connection is `wss://<relay>/oal/pair/<nameplate>`, or the host's own `/oal` on the LAN. Every message below is one binary WebSocket message. The client sends first.
+
+| # | Direction | Message | Bytes |
+|---|---|---|---|
+| 1 | client → host | CPace `MSGa` = `0x20` ‖ `Ya` ‖ `0x00` | 34 |
+| 2 | host → client | CPace `MSGb` = `0x20` ‖ `Yb` ‖ `0x00` | 34 |
+| 3 | client → host | Noise message 1: `-> psk, e`, empty payload | 48 |
+| 4 | host → client | Noise message 2: `<- e, ee, s, es`, empty payload | 96 |
+| 5 | client → host | Noise message 3: `-> s, se`, empty payload | 64 |
+| 6 | client → host | `host/pair` request, as an encrypted frame (section 17.3) | |
+| 7 | host → client | `host/pair` result or error, as an encrypted frame | |
+
+**CPace** is as specified in draft-irtf-cfrg-cpace-21:
+
+- Cipher suite `CPACE-RISTR255-SHA512`, in the initiator-responder setting. The client is the initiator (A); the host is the responder (B).
+- `PRS`: the code's eight characters as ASCII, normalized as in section 6.1 (upper case, `I` and `L` read as `1`, `O` as `0`, no hyphen or spaces). For the code `K7QM-3XRD`, `PRS` is `K7QM3XRD`.
+- `CI`: the ASCII bytes `OAL-PAIR/1`. `sid`, `ADa` and `ADb`: empty.
+- `MSGa` = `lv_cat(Ya, ADa)` and `MSGb` = `lv_cat(Yb, ADb)`; with empty associated data these are the 34 bytes in the table. A message of any other length or shape, a `Y` that does not decode, or `K` equal to the identity ends the pairing (close 4001).
+- `ISK` is the draft's `ISK` over `transcript_ir(Ya, ADa, Yb, ADb)`. Implementations SHOULD check their CPace against the ristretto255 test vectors in the draft's appendix B.3.
+
+**Noise:**
+
+- Pattern `Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s`. The client is the initiator. The static keys are each side's X25519 static key (section 17.1).
+- PSK: the first 32 bytes of SHA-512(`lv_cat("OAL-PAIR/1 psk", ISK)`).
+- Prologue: the ASCII bytes `OAL-PAIR/1`.
+- A wrong code gives the two sides different PSKs, so message 3 fails to decrypt at the host. The host counts a failed attempt against the code (section 6.2) and closes with 4001; the client sees the close. A relay that changes any of messages 1 to 5 causes the same failure.
+
+**`host/pair` inside the encrypted connection:**
+
+- After message 5 the connection uses the framing and rekeying of section 17.3. The client sends `host/pair` exactly as in section 6.1, `code` included.
+- The host MUST check that `device.publicKey` is the client static key it received in message 5, and otherwise answer `pairing_refused` and close with 4001.
+- The client MUST check that `info.host.publicKey` in the result is the host static key it received in message 4, and otherwise close with 4001 and keep nothing.
+- On success the connection stays open, authenticated as the new device, as in 0.1. Later connections use the handshake in section 17.2 with the keys pinned here. The host issues the token as in 0.1; encrypted connections do not use it.
+
+**Why this construction.** The code has 20 secret bits, so it is never used as a Noise PSK directly: a PSK that small could be tested offline from message 3. CPace turns the code into a key only its two holders share, and that key keys a standard Noise handshake, as the draft recommends (section 10.5 of the draft). Noise then confirms the key, proves that each side holds its static private key, and carries both static keys encrypted, so OAL adds no key-confirmation step of its own. Binding `host/pair`'s keys to the handshake keys makes the keys the host and device store the ones the code authenticated.
+
+The reference implementation is `crates/oal-secure` in nebo-link.
+
+### 17.6 Open for 0.2
+
 - **Files (open).** Files uploaded to a relay's file service are readable by that service. 0.2 will encrypt files on the client with a per-file key, and send the key inside the encrypted prompt.
 - **Relay identity with encryption (open).** Devices that authenticate only through the relay need a way to register a static key with the host.
+- **In-band key rotation (open).** A message that tells a peer a side's new static key over an encrypted connection (section 17.1).
 
 ## 18. Deferred to 0.2
 

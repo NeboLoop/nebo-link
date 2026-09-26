@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance"]
+members = ["crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance", "crates/oal-secure"]
 
 [workspace.package]
 version = "0.1.0"
@@ -54,6 +54,13 @@ jsonschema = { version = "0.58", default-features = false }
 # Its client dials wss:// hosts and relays with ring, the provider the rest of the
 # workspace already uses.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# oal-secure: end-to-end encryption for OAL. Noise sessions, CPace pairing on
+# ristretto255, X25519 device keys; no primitives of our own.
+snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom", "std"] }
+curve25519-dalek = { version = "4", features = ["zeroize"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
 # Decoding and re-encoding compressed text bodies the proxy rewrites.
 flate2 = "1"
 brotli = "8"
