@@ -416,6 +416,7 @@ impl Shared {
             }
         });
         let (control_tx, mut control_rx) = mpsc::channel(8);
+        tracing::info!(agent = self.settings.agent.key(), session = %chat, prompt_len = prompt.len(), "acp: prompt sent");
         tokio::spawn(async move {
             let request = live.conn.request(
                 "session/prompt",
@@ -448,6 +449,10 @@ impl Shared {
                 }
             }
             record(&self.settings.chats_file, &chat, title.as_deref());
+            match &answered {
+                Ok(result) => tracing::info!(session = %chat, stop_reason = %PromptResult::parse(result).stop_reason, "acp: turn ended"),
+                Err(e) => tracing::info!(session = %chat, code = e.code, "acp: turn failed"),
+            }
             let end = match answered {
                 Ok(result) => {
                     let result = PromptResult::parse(&result);
@@ -485,6 +490,7 @@ impl Shared {
         };
         match control {
             Control::Cancel => {
+                tracing::info!(session = %chat, open_asks = sink.asks.len(), "acp: turn cancelled by the owner");
                 live.conn
                     .notify("session/cancel", json!({ "sessionId": chat }));
                 for (_, id) in sink.asks.drain() {
@@ -502,7 +508,10 @@ impl Shared {
                         .and_then(|k| sink.asks.remove(&k)),
                 };
                 match id {
-                    Some(id) => responder.respond(&id, Ok(protocol::selected(&choice))),
+                    Some(id) => {
+                        tracing::info!(session = %chat, choice = %choice, "acp: permission answered");
+                        responder.respond(&id, Ok(protocol::selected(&choice)))
+                    }
                     None => tracing::info!("an answer for a question the agent no longer asks"),
                 }
             }
@@ -529,6 +538,7 @@ fn handle(state: &Mutex<Sessions>, incoming: Incoming, responder: &Responder) {
         }
         Incoming::Request { id, method, params } if method == "session/request_permission" => {
             let Some(request) = PermissionRequest::parse(&params) else {
+                tracing::warn!("acp: a permission request that does not parse; refused");
                 responder.respond(
                     &id,
                     Err(RpcError::new(-32602, "invalid permission request")),
@@ -541,12 +551,24 @@ fn handle(state: &Mutex<Sessions>, incoming: Incoming, responder: &Responder) {
                 .get_mut(&request.session_id)
                 .and_then(|s| s.turn.as_mut())
             {
-                Some(sink) => sink.ask(id, request),
+                Some(sink) => {
+                    tracing::info!(
+                        session = %request.session_id,
+                        tool = %request.tool_call.id,
+                        options = request.options.len(),
+                        "acp: permission requested; asking the owner"
+                    );
+                    sink.ask(id, request)
+                }
                 // Nobody is there to answer: no turn of ours is running.
-                None => responder.respond(&id, Ok(protocol::cancelled())),
+                None => {
+                    tracing::info!(session = %request.session_id, "acp: permission requested with no turn running; cancelled");
+                    responder.respond(&id, Ok(protocol::cancelled()))
+                }
             }
         }
         Incoming::Request { id, method, .. } => {
+            tracing::info!(method = %method, "acp: a request the link does not offer; refused");
             responder.respond(
                 &id,
                 Err(RpcError::new(
@@ -668,6 +690,7 @@ impl Sink {
             && !tool.finished
         {
             tool.finished = true;
+            tracing::info!(tool = %id, ?status, "acp: tool call finished");
             let event = TurnEvent::ToolResult {
                 id,
                 name: tool.call.label(),
@@ -687,6 +710,7 @@ impl Sink {
             return;
         }
         tool.announced = true;
+        tracing::info!(tool = id, kind = ?tool.call.kind, "acp: tool call");
         let event = TurnEvent::ToolStart {
             id: id.to_owned(),
             name: tool.call.label(),
