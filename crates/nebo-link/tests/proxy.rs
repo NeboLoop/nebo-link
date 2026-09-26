@@ -1,8 +1,9 @@
 //! The link's proxy in front of a fake runtime UI: per-runtime paths and
 //! headers (the rules the 2026-09-25 spike proved against OpenClaw 2026.9.6
 //! and the Hermes 0.19.0 dashboard), the tunnel stamp gate, the `/_link/`
-//! endpoints, unbuffered streaming, WebSocket upgrades, and the whole path
-//! from a fake hub through `nebo_comm::tunnel` to the runtime.
+//! endpoints, unbuffered streaming, WebSocket upgrades, URL rewriting both
+//! ways, and the whole path from a fake hub through `nebo_comm::tunnel` to
+//! the runtime.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -28,17 +29,21 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 const BOT: &str = "/t/test-bot";
 const OWNER: &str = "owner-1";
 
-/// What the fake runtime saw of one request.
+/// What the fake runtime saw of one request, and the WebSocket text
+/// messages it received on it.
 #[derive(Debug, Clone)]
 struct Seen {
     uri: String,
     headers: HeaderMap,
+    messages: Arc<Mutex<Vec<String>>>,
 }
 
 type Log = Arc<Mutex<Vec<Seen>>>;
 
 /// A runtime UI: answers `…/stream` with two chunks 1.5 s apart, echoes
-/// WebSocket messages, and answers anything else with "ok".
+/// WebSocket messages (answering `hello` with an OpenClaw-style hello that
+/// names its canvas by origin only), serves the pages in [`page`], and
+/// answers anything else with "ok".
 async fn fake_runtime() -> (SocketAddr, Log) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -52,11 +57,13 @@ async fn fake_runtime() -> (SocketAddr, Log) {
                 let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                     let seen = seen.clone();
                     async move {
+                        let messages = Arc::default();
                         seen.lock().unwrap().push(Seen {
                             uri: req.uri().to_string(),
                             headers: req.headers().clone(),
+                            messages: Arc::clone(&messages),
                         });
-                        Ok::<_, std::convert::Infallible>(respond(req))
+                        Ok::<_, std::convert::Infallible>(respond(req, messages))
                     }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
@@ -69,7 +76,11 @@ async fn fake_runtime() -> (SocketAddr, Log) {
     (addr, log)
 }
 
-fn respond(mut req: Request<Incoming>) -> Response<Body> {
+/// The canvas URL OpenClaw's hello advertises: origin only, no prefix
+/// (`resolveHostedPluginSurfaceUrl`).
+const CANVAS: &str = "https://neboai.com:443/__openclaw__/cap/tok";
+
+fn respond(mut req: Request<Incoming>, messages: Arc<Mutex<Vec<String>>>) -> Response<Body> {
     if let Some(key) = req.headers().get("sec-websocket-key") {
         let accept = derive_accept_key(key.as_bytes());
         let upgrade = hyper::upgrade::on(&mut req);
@@ -77,8 +88,17 @@ fn respond(mut req: Request<Incoming>) -> Response<Body> {
             let io = TokioIo::new(upgrade.await.unwrap());
             let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(io, Role::Server, None).await;
             while let Some(Ok(msg)) = ws.next().await {
-                if msg.is_text() {
-                    ws.send(Message::text(format!("echo {}", msg.to_text().unwrap()))).await.unwrap();
+                match msg {
+                    Message::Text(text) if text.as_str() == "hello" => {
+                        let hello = serde_json::json!({ "type": "hello", "pluginSurfaceUrls": { "canvas": CANVAS } });
+                        ws.send(Message::text(hello.to_string())).await.unwrap();
+                    }
+                    Message::Text(text) => {
+                        messages.lock().unwrap().push(text.to_string());
+                        ws.send(Message::text(format!("echo {}", text.as_str()))).await.unwrap();
+                    }
+                    Message::Binary(data) => ws.send(Message::Binary(data)).await.unwrap(),
+                    _ => {}
                 }
             }
         });
@@ -103,7 +123,52 @@ fn respond(mut req: Request<Incoming>) -> Response<Body> {
         });
         return Response::new(BodyExt::boxed(StreamBody::new(chunks)));
     }
-    Response::new(proxy::full("ok"))
+    let host = req.headers().get("host").unwrap().to_str().unwrap().to_string();
+    page(req.uri().path(), &host).unwrap_or_else(|| Response::new(proxy::full("ok")))
+}
+
+/// Responses that carry URLs, as a runtime unaware of the prefix writes
+/// them. `host` is the runtime's own loopback address.
+fn page(path: &str, host: &str) -> Option<Response<Body>> {
+    let resp = Response::builder();
+    let resp = match path.rsplit('/').next().unwrap() {
+        "page" => resp.header("content-type", "text/html; charset=utf-8").body(proxy::full(format!(
+            r#"<a href="https://neboai.com/chat">chat</a><script src="http://{host}/app.js"></script><a href="https://example.com/x">x</a>"#
+        ))),
+        "loopback.json" => resp.header("content-type", "application/json").body(proxy::full(format!(
+            r#"{{"url":"http://{host}/x","escaped":"https:\/\/neboai.com\/y","origin":"https://neboai.com"}}"#
+        ))),
+        "gzip" => {
+            use std::io::Write;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(br#"<a href="https://neboai.com/chat">chat</a>"#).unwrap();
+            resp.header("content-type", "text/html")
+                .header("content-encoding", "gzip")
+                .body(proxy::full(gz.finish().unwrap()))
+        }
+        "redirect" => resp
+            .status(StatusCode::FOUND)
+            .header("location", "https://neboai.com/login?next=/")
+            .header("content-location", "/login")
+            .header("set-cookie", "sid=1; Path=/; HttpOnly")
+            .body(proxy::full("")),
+        "events" => {
+            let chunks = futures::stream::unfold(0, |n| async move {
+                match n {
+                    0 => Some((Ok::<_, BoxError>(Frame::data(Bytes::from("data: https://neboai"))), 1)),
+                    1 => {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        Some((Ok(Frame::data(Bytes::from(".com/x\n\n"))), 2))
+                    }
+                    _ => None,
+                }
+            });
+            resp.header("content-type", "text/event-stream")
+                .body(BodyExt::boxed(StreamBody::new(chunks)))
+        }
+        _ => return None,
+    };
+    Some(resp.unwrap())
 }
 
 fn empty() -> Body {
@@ -179,6 +244,19 @@ where
         .send_request(req.body(http_body_util::Full::new(Bytes::from(body.to_string()))).unwrap())
         .await
         .unwrap()
+}
+
+/// A stamped GET with `headers`, as the tunnel delivers it.
+async fn fetch(addr: SocketAddr, path: &str, headers: &[(&str, &str)]) -> Response<Incoming> {
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(TcpStream::connect(addr).await.unwrap()))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let mut req = Request::builder().uri(path).header("host", "neboai.com").header("x-nebo-tunnel-auth", "s3cret");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    sender.send_request(req.body(empty()).unwrap()).await.unwrap()
 }
 
 async fn text(resp: Response<Incoming>) -> String {
@@ -324,6 +402,121 @@ async fn websockets_upgrade_with_the_runtime_headers() {
         assert_eq!(header(&seen, "upgrade"), Some("websocket"), "{runtime}");
         assert_eq!(header(&seen, "host"), Some(upstream.to_string().as_str()), "{runtime}");
     }
+}
+
+// ── URL rewriting ───────────────────────────────────────────────────────
+
+/// OpenClaw names its canvas surface by origin only; the browser gets it
+/// under the tunnel prefix, and the rest of the conversation is unchanged.
+#[tokio::test]
+async fn the_canvas_url_in_the_websocket_hello_gets_the_prefix() {
+    let (upstream, _) = fake_runtime().await;
+    let (addr, _) = start_proxy(target("openclaw", upstream), "s3cret").await;
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request("ws://neboai.com/").unwrap();
+    request.headers_mut().insert("x-nebo-tunnel-auth", "s3cret".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::client_async(request, TcpStream::connect(addr).await.unwrap())
+        .await
+        .unwrap();
+    ws.send(Message::text("hello")).await.unwrap();
+    let hello = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.unwrap().unwrap().unwrap();
+    let hello: serde_json::Value = serde_json::from_str(hello.to_text().unwrap()).unwrap();
+    assert_eq!(
+        hello["pluginSurfaceUrls"]["canvas"],
+        "https://neboai.com:443/t/test-bot/__openclaw__/cap/tok"
+    );
+    ws.send(Message::binary(Bytes::from_static(b"https://neboai.com/raw"))).await.unwrap();
+    let binary = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(binary.into_data(), "https://neboai.com/raw", "binary frames pass untouched");
+}
+
+/// Hermes serves at its root, so a public URL the browser sends it loses
+/// the prefix, and gets it back on the way out.
+#[tokio::test]
+async fn inbound_frames_and_referer_follow_the_path_mode() {
+    let (upstream, log) = fake_runtime().await;
+    let (addr, _) = start_proxy(target("hermes", upstream), "s3cret").await;
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request("ws://neboai.com/api/ws")
+            .unwrap();
+    request.headers_mut().insert("x-nebo-tunnel-auth", "s3cret".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("sec-websocket-extensions", "permessage-deflate; client_max_window_bits".parse().unwrap());
+    let (mut ws, resp) = tokio_tungstenite::client_async(request, TcpStream::connect(addr).await.unwrap())
+        .await
+        .unwrap();
+    assert!(resp.headers().get("sec-websocket-extensions").is_none());
+    ws.send(Message::text("open https://neboai.com/t/test-bot/x")).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(reply.to_text().unwrap(), "echo open https://neboai.com/t/test-bot/x");
+    let seen = log.lock().unwrap()[0].clone();
+    assert_eq!(*seen.messages.lock().unwrap(), vec!["open https://neboai.com/x".to_string()]);
+    assert_eq!(header(&seen, "sec-websocket-extensions"), None);
+
+    fetch(addr, "/", &[("referer", "https://neboai.com/t/test-bot/sessions")]).await;
+    let seen = log.lock().unwrap()[1].clone();
+    assert_eq!(header(&seen, "referer"), Some("https://neboai.com/sessions"));
+}
+
+#[tokio::test]
+async fn html_json_and_redirects_point_through_the_tunnel() {
+    let (upstream, _) = fake_runtime().await;
+    let (addr, _) = start_proxy(target("hermes", upstream), "s3cret").await;
+
+    let resp = fetch(addr, "/page", &[]).await;
+    assert!(resp.headers().get("content-length").is_none());
+    assert_eq!(
+        text(resp).await,
+        r#"<a href="https://neboai.com/t/test-bot/chat">chat</a><script src="https://neboai.com/t/test-bot/app.js"></script><a href="https://example.com/x">x</a>"#
+    );
+
+    let resp = fetch(addr, "/loopback.json", &[]).await;
+    assert_eq!(
+        text(resp).await,
+        r#"{"url":"https://neboai.com/t/test-bot/x","escaped":"https:\/\/neboai.com\/t\/test-bot\/y","origin":"https://neboai.com"}"#
+    );
+
+    let resp = fetch(addr, "/redirect", &[]).await;
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    let get = |name: &str| resp.headers().get(name).unwrap().to_str().unwrap().to_string();
+    assert_eq!(get("location"), "https://neboai.com/t/test-bot/login?next=/");
+    assert_eq!(get("content-location"), "/t/test-bot/login");
+    assert_eq!(get("set-cookie"), "sid=1; Path=/t/test-bot; HttpOnly");
+
+    // Unrewritten types stream as they are.
+    assert_eq!(text(fetch(addr, "/other", &[]).await).await, "ok");
+}
+
+#[tokio::test]
+async fn compressed_text_is_rewritten_and_stays_compressed() {
+    let (upstream, log) = fake_runtime().await;
+    let (addr, _) = start_proxy(target("openclaw", upstream), "s3cret").await;
+    let resp = fetch(addr, "/gzip", &[("accept-encoding", "gzip, zstd;q=0.5")]).await;
+    assert_eq!(resp.headers().get("content-encoding").unwrap(), "gzip");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let mut html = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&body[..]), &mut html).unwrap();
+    assert_eq!(html, r#"<a href="https://neboai.com/t/test-bot/chat">chat</a>"#);
+    let seen = log.lock().unwrap()[0].clone();
+    assert_eq!(header(&seen, "accept-encoding"), Some("gzip"), "only codings the link can read");
+}
+
+/// An event stream is rewritten without waiting for the response to end: a
+/// URL split across chunks is completed when its end arrives.
+#[tokio::test]
+async fn event_streams_are_rewritten_as_they_stream() {
+    let (upstream, _) = fake_runtime().await;
+    let (addr, _) = start_proxy(target("hermes", upstream), "s3cret").await;
+    let mut body = fetch(addr, "/events", &[]).await.into_body();
+    let first = tokio::time::timeout(Duration::from_millis(1000), body.frame())
+        .await
+        .expect("the first chunk arrives before the upstream sends the second")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.into_data().unwrap(), "data: ");
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert_eq!(rest, "https://neboai.com/t/test-bot/x\n\n");
 }
 
 // ── Through the real tunnel ─────────────────────────────────────────────

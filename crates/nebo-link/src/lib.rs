@@ -10,6 +10,7 @@ pub mod janus;
 pub mod link;
 pub mod offsets;
 pub mod proxy;
+pub mod rewrite;
 pub mod run;
 pub mod service;
 pub mod state;

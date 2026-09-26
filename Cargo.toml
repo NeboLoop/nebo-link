@@ -48,3 +48,6 @@ tokio-util = { version = "0.7", features = ["compat"] }
 base64 = "0.22"
 ed25519-dalek = "2"
 sha2 = "0.10"
+# Decoding and re-encoding compressed text bodies the proxy rewrites.
+flate2 = "1"
+brotli = "8"

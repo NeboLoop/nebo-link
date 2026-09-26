@@ -37,6 +37,8 @@ bytes = { workspace = true }
 uuid = { workspace = true }
 getrandom = { workspace = true }
 tokio-tungstenite = { workspace = true }
+flate2 = { workspace = true }
+brotli = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
