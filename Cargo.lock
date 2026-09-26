@@ -1152,16 +1152,21 @@ dependencies = [
 name = "nebo-runtimes"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "dirs",
+ "ed25519-dalek",
  "futures",
+ "getrandom 0.2.17",
  "json5",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "yaml_serde",
 ]
 

@@ -13,11 +13,18 @@ thiserror = { workspace = true }
 dirs = { workspace = true }
 json5 = { workspace = true }
 yaml_serde = { workspace = true }
-# The runtime clients (`hermes::runs`).
+# The runtime clients (`hermes::runs`, `openclaw::gateway`): HTTP + SSE to
+# Hermes; a WebSocket over loopback to the OpenClaw gateway with a device
+# keypair for the connect proof and the ids it mints.
 reqwest = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true }

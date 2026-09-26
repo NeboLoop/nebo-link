@@ -35,7 +35,7 @@ mod environment;
 mod error;
 pub mod hermes;
 mod journal;
-mod openclaw;
+pub mod openclaw;
 
 pub use change::{
     ApiServer, Change, ChangeKind, Model, NeboaiModels, Outcome, PathMode, ProxyAccess,

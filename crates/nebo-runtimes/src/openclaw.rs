@@ -1,5 +1,7 @@
 //! OpenClaw: `~/.openclaw/openclaw.json` (JSON5) and its gateway.
 
+pub mod gateway;
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
