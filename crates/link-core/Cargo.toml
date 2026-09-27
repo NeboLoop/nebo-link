@@ -15,6 +15,14 @@ futures = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
+# The host's own MCP server, on loopback, for the tools it gives every
+# coding agent's session.
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The conformance suite's scripted ACP agent, run as a process in the tests.
+oal-conformance = { path = "../oal-conformance" }

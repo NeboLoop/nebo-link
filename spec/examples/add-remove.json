@@ -1,0 +1,23 @@
+{
+  "title": "Add an agent, then remove it",
+  "description": "Section 7.4. host/info marks the runtimes a device can add an agent of. host/agents/add starts a new agent of one, in a new folder of its own that the host chooses, and every connection hears host/agent_update added. host/agents/remove stops hosting it and leaves its folder; every connection hears removed.",
+  "steps": [
+    {"note": "Open a connection to the host (through its relay, or on the LAN).", "connect": "host"},
+    {"note": "host/hello with the device credential from pairing: only a paired device may add or remove agents.", "send": {"jsonrpc": "2.0", "id": 1, "method": "host/hello", "params": {"protocol": {"min": "0.1", "max": "0.1"}, "client": {"name": "oal-conformance", "version": "0.1.0"}, "auth": {"type": "device", "deviceId": "{{deviceId}}", "token": "{{token}}"}}}},
+    {"note": "The host says which device this connection is.", "expect": {"jsonrpc": "2.0", "id": 1, "result": {"protocol": "0.1", "device": {"id": "{{deviceId}}"}}}},
+    {"note": "Which runtimes can this computer add an agent of?", "send": {"jsonrpc": "2.0", "id": 2, "method": "host/info", "params": {}}},
+    {"note": "The suite's scripted agent is installed on the host as the runtime `oal-fake-agent`, and addable.", "expect": {"jsonrpc": "2.0", "id": 2, "result": {"runtimes": [{"id": "oal-fake-agent", "addable": true}]}}},
+    {"note": "A runtime nobody installed can't be added.", "send": {"jsonrpc": "2.0", "id": 3, "method": "host/agents/add", "params": {"runtime": "not-installed"}}},
+    {"note": "not_permitted, in plain words.", "expect": {"jsonrpc": "2.0", "id": 3, "error": {"code": -33010, "message": "{{*}}"}}},
+    {"note": "Add one more agent of `oal-fake-agent`. No folder is sent: the host gives it one of its own.", "send": {"jsonrpc": "2.0", "id": 4, "method": "host/agents/add", "params": {"runtime": "oal-fake-agent"}}},
+    {"note": "The new agent, as host/agents lists it: its own id and its own folder.", "expect": {"jsonrpc": "2.0", "id": 4, "result": {"agent": {"id": "{{added}}", "label": "{{*}}", "runtime": "{{*}}", "folder": "{{addedFolder}}", "online": true}}}},
+    {"note": "Every connection hears that it was added.", "expect": {"jsonrpc": "2.0", "method": "host/agent_update", "params": {"change": "added", "agent": {"id": "{{added}}", "folder": "{{addedFolder}}"}}}},
+    {"note": "It is listed after the agents that were there.", "send": {"jsonrpc": "2.0", "id": 5, "method": "host/agents", "params": {}}},
+    {"note": "The suite's agent, then the new one.", "expect": {"jsonrpc": "2.0", "id": 5, "result": {"agents": [{"id": "{{agent}}"}, {"id": "{{added}}", "folder": "{{addedFolder}}"}]}}},
+    {"note": "Remove it.", "send": {"jsonrpc": "2.0", "id": 6, "method": "host/agents/remove", "params": {"agentId": "{{added}}"}}},
+    {"note": "Done. Its folder, and everything in it, stays on the computer.", "expect": {"jsonrpc": "2.0", "id": 6, "result": {}}},
+    {"note": "Every connection hears that it was removed, with its last state.", "expect": {"jsonrpc": "2.0", "method": "host/agent_update", "params": {"change": "removed", "agent": {"id": "{{added}}"}}}},
+    {"note": "An agent the host doesn't have can't be removed.", "send": {"jsonrpc": "2.0", "id": 7, "method": "host/agents/remove", "params": {"agentId": "{{added}}"}}},
+    {"note": "unknown_agent.", "expect": {"jsonrpc": "2.0", "id": 7, "error": {"code": -33004, "message": "{{*}}"}}}
+  ]
+}

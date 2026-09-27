@@ -4,13 +4,17 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use link_core::backend::{Agent, AgentMessage, Backend, BoxFuture, Error, ErrorObject, FromAgent, Inbox, Reply};
+use link_core::acp::{Acp, Client, Settings};
 use link_core::host::Host;
+use link_core::keep::{CodingAgent, Installable, Keeper, Kept};
 use link_core::roster::{Member, Roster};
+use nebo_runtimes::RuntimeCommand;
+use nebo_runtimes::acp::Agent as AcpAgent;
 use oal_conformance::fake_agent;
 use oal_host::{Config, OalHost, Runtime};
 use serde_json::{Value, json};
@@ -147,7 +151,97 @@ impl Backend for FakeAcp {
     }
 }
 
-/// An OAL host hosting the scripted agent, its state in `dir`.
+/// Set when this test binary runs as the scripted agent.
+const SCRIPTED: &str = "OAL_HOST_SCRIPTED_AGENT";
+
+/// Not a test when a host starts it: the conformance suite's scripted ACP
+/// agent as a process (this test binary again, with `SCRIPTED` set), the
+/// agent an added `oal-fake-agent` runs.
+#[test]
+fn scripted_agent() {
+    if std::env::var_os(SCRIPTED).is_none() {
+        return;
+    }
+    // The harness printed "test … " without a newline: end that line, so
+    // every message is a line of its own.
+    println!();
+    tokio::runtime::Runtime::new().unwrap().block_on(fake_agent::stdio());
+}
+
+/// How an added agent starts the scripted agent.
+pub fn scripted_command() -> RuntimeCommand {
+    RuntimeCommand {
+        program: std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+        args: ["common::scripted_agent", "--exact", "--nocapture", "--test-threads=1"].map(String::from).to_vec(),
+        env: vec![(SCRIPTED.into(), "1".into())],
+    }
+}
+
+const CLIENT: Client = Client { name: "oal-host tests", version: "0" };
+
+/// What the host keeps the agents a device adds in: `oal-fake-agent` (the
+/// scripted agent, as a process) is addable; `fake` is not the keeper's.
+pub struct TestKeeper {
+    dir: PathBuf,
+    pub agents: Mutex<Vec<CodingAgent>>,
+}
+
+impl TestKeeper {
+    pub fn new(dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self { dir, agents: Mutex::new(Vec::new()) })
+    }
+}
+
+impl Keeper for TestKeeper {
+    fn client(&self) -> Client {
+        CLIENT
+    }
+
+    fn addable(&self) -> Vec<Installable> {
+        vec![Installable {
+            id: "oal-fake-agent".into(),
+            name: "Fake Agent".into(),
+            agent: AcpAgent::Other,
+            command: scripted_command(),
+        }]
+    }
+
+    fn agents(&self) -> Vec<Kept> {
+        self.agents
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| Kept { id: a.id.clone(), label: a.label.clone(), runtime: "oal-fake-agent".into(), folder: Some(a.acp.workdir.clone()) })
+            .collect()
+    }
+
+    fn keep(&self, agent: &CodingAgent) -> Result<Member, String> {
+        self.agents.lock().unwrap().push(agent.clone());
+        let backend = Acp::new(Settings {
+            agent: agent.agent,
+            name: agent.label.clone(),
+            command: agent.acp.command(),
+            workdir: agent.acp.workdir.clone(),
+            log: self.dir.join("logs").join(format!("{}.log", agent.id)),
+            chats_file: self.dir.join("agents").join(&agent.id).join("acp-chats.json"),
+            client: CLIENT,
+        });
+        Ok(Member { id: agent.id.clone(), label: agent.label.clone(), runtime: "oal-fake-agent".into(), backend: Arc::new(backend) })
+    }
+
+    fn forget(&self, id: &str) -> Result<(), String> {
+        let mut agents = self.agents.lock().unwrap();
+        let before = agents.len();
+        agents.retain(|a| a.id != id);
+        match agents.len() < before {
+            true => Ok(()),
+            false => Err(format!("{id} is removed on the computer itself.")),
+        }
+    }
+}
+
+/// An OAL host hosting the scripted agent, its state in `dir`; a device can
+/// add more of it, each in a folder of its own under `dir/home/NeboAI`.
 pub async fn host(dir: &Path) -> Arc<OalHost> {
     let member = Member {
         id: AGENT.into(),
@@ -156,6 +250,9 @@ pub async fn host(dir: &Path) -> Arc<OalHost> {
         backend: FakeAcp::start(),
     };
     let host = Host::new(Arc::new(Roster::new(vec![member])));
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    host.set_home(dir.join("home").canonicalize().unwrap());
+    host.set_keeper(TestKeeper::new(dir.join("added")));
     let oal = OalHost::new(
         Config {
             host_id: "h-test".into(),
@@ -169,6 +266,7 @@ pub async fn host(dir: &Path) -> Arc<OalHost> {
                     name: "Fake Agent".into(),
                     kind: "acp".into(),
                     version: None,
+                    addable: false,
                 }]
             }),
         },

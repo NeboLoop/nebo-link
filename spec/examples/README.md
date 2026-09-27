@@ -6,6 +6,7 @@ Each file is one recorded conversation between a client and a host, annotated st
 |---|---|
 | `pair.json` | Pairing with a one-time code; heartbeat; the device list. |
 | `agents.json` | `host/hello` on a later connection; listing agents; the pending list. |
+| `add-remove.json` | Adding an agent of an addable runtime (it gets a folder of its own) and removing it (its folder stays). |
 | `prompt-permission.json` | A prompt that runs a command: stream, tool call, permission request, approval, result, reply, end of turn with usage. |
 | `reconnect.json` | The connection drops while the agent waits for permission; the client reconnects, loads the session, and answers the same request. |
 | `turn-ended-while-away.json` | The phone leaves mid-turn; another connection answers from the pending list with `host/answer` and the turn ends; the phone's `session/load` returns the record and the turn's `ended` notice. |
@@ -35,4 +36,4 @@ Each file is one recorded conversation between a client and a host, annotated st
 - Captures belong to one example, except the names in `keeps`, which later examples use (`pair` keeps the device credential, `agents` the agent's folder).
 - Frames on one agent channel arrive in the order shown. Host-channel notifications may arrive in any order relative to each other and to agent channels.
 
-The scripted agent the examples expect (`oal-conformance agent`) answers `run: <command>` with a tool call and a permission request (options `allow-once`, `reject-once`), `wait` with a turn that runs until cancelled, and anything else with an echo. Its modes are `ask`, `folder` and `full`; every turn reports 12 input and 5 output tokens.
+The scripted agent the examples expect (`oal-conformance agent`) answers `run: <command>` with a tool call and a permission request (options `allow-once`, `reject-once`), `wait` with a turn that runs until cancelled, `work in <folder>` by calling the host's `move_to_folder` tool (section 8.1), `where` with the folder it works in, and anything else with an echo. Its modes are `ask`, `folder` and `full`; every turn reports 12 input and 5 output tokens. A host under test also offers it as the addable runtime `oal-fake-agent` (`add-remove.json`).

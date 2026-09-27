@@ -4,11 +4,14 @@
 //! |---|---|
 //! | `run: <command>` | A `tool_call` for the command, then `session/request_permission` (options `allow-once`, `reject-once`) unless the session is in mode `full`; then the result (`echo X` prints `X`), `Done.` and `end_turn`. |
 //! | `wait` | `Working on it.`, then nothing until `session/cancel`, then `cancelled`. |
+//! | `work in <folder>` | Calls the host's `move_to_folder` tool (its MCP server named `host`, over HTTP) with that folder and the handoff `Was working in <cwd>.`, as a `move_to_folder` tool call; then `Moved.` or `Couldn't move: <why>`, and `end_turn`. `work in new <folder>` asks the host to make it. |
+//! | `where` | `Working in <cwd>.`, then `Handoff: <text>` when the prompt started with another text block (a moved conversation's handoff), and `end_turn`. |
 //! | anything else | `You said: <prompt>` and `end_turn`. |
 //!
-//! Every finished turn reports usage `{inputTokens: 12, outputTokens: 5,
-//! totalTokens: 17}`. Sessions are `sess-1`, `sess-2`, … and start in mode
-//! `ask`; the other modes are `folder` and `full`.
+//! The command is the prompt's last text block. Every finished turn reports
+//! usage `{inputTokens: 12, outputTokens: 5, totalTokens: 17}`. Sessions are
+//! `sess-1`, `sess-2`, … and start in mode `ask`; the other modes are
+//! `folder` and `full` (kind `full_access`). It takes HTTP MCP servers.
 
 use std::collections::BTreeMap;
 
@@ -46,18 +49,37 @@ pub async fn stdio() {
 
 /// Runs the agent on channels of ACP messages until `input` closes.
 pub async fn run(mut input: mpsc::UnboundedReceiver<Value>, out: mpsc::UnboundedSender<Value>) {
+    let (done, mut calls) = mpsc::unbounded_channel();
     let mut agent = Agent {
         out,
         sessions: BTreeMap::new(),
         next_request: 0,
+        done,
     };
-    while let Some(msg) = input.recv().await {
-        agent.handle(msg);
+    loop {
+        tokio::select! {
+            msg = input.recv() => match msg {
+                Some(msg) => agent.handle(msg),
+                None => return,
+            },
+            Some(called) = calls.recv() => agent.called(called),
+        }
     }
+}
+
+/// A tool call to the host that came back.
+struct Called {
+    session: String,
+    prompt_id: Value,
+    call: String,
+    /// The tool's text, and whether it is an error.
+    result: Result<String, String>,
 }
 
 struct Session {
     cwd: String,
+    /// The URL of the host's MCP server, when the host gave one.
+    host_tools: Option<String>,
     mode: String,
     /// Every update of the session, for `session/load` to replay.
     log: Vec<Value>,
@@ -85,6 +107,18 @@ struct Agent {
     out: mpsc::UnboundedSender<Value>,
     sessions: BTreeMap<String, Session>,
     next_request: u64,
+    done: mpsc::UnboundedSender<Called>,
+}
+
+/// The host's MCP server among `params`' `mcpServers`: the HTTP one named
+/// `host`.
+fn host_tools(params: &Value) -> Option<String> {
+    params["mcpServers"]
+        .as_array()?
+        .iter()
+        .find(|s| s["type"] == "http" && s["name"] == "host")
+        .and_then(|s| s["url"].as_str())
+        .map(str::to_owned)
 }
 
 /// The fake agent's modes, `current` first chosen.
@@ -92,7 +126,7 @@ pub fn modes(current: &str) -> Value {
     json!({ "currentModeId": current, "availableModes": [
         { "id": "ask", "name": "Ask me", "description": "Asks before it runs a command." },
         { "id": "folder", "name": "Allow in its folder", "description": "Works in its folder; asks before it runs a command." },
-        { "id": "full", "name": "Full access", "description": "Runs anything on this computer without asking." }
+        { "id": "full", "name": "Full access", "description": "Runs anything on this computer without asking.", "_meta": { "kind": "full_access" } }
     ]})
 }
 
@@ -166,7 +200,8 @@ impl Agent {
                 "agentCapabilities": {
                     "loadSession": true,
                     "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
-                    "sessionCapabilities": { "list": {}, "resume": {} }
+                    "sessionCapabilities": { "list": {}, "resume": {} },
+                    "mcpCapabilities": { "http": true, "sse": false }
                 },
                 "agentInfo": { "name": "oal-fake-agent", "title": "Fake Agent", "version": env!("CARGO_PKG_VERSION") },
                 "authMethods": []
@@ -175,6 +210,7 @@ impl Agent {
                 let id_text = format!("sess-{}", self.sessions.len() + 1);
                 self.sessions.insert(id_text.clone(), Session {
                     cwd: params["cwd"].as_str().unwrap_or("").to_owned(),
+                    host_tools: host_tools(&params),
                     mode: "ask".into(),
                     log: Vec::new(),
                     calls: 0,
@@ -183,9 +219,13 @@ impl Agent {
                 self.respond(&id, Ok(json!({ "sessionId": id_text, "modes": modes("ask") })));
             }
             "session/load" | "session/resume" => {
-                let Some(session) = self.sessions.get(&session_id) else {
+                let Some(session) = self.sessions.get_mut(&session_id) else {
                     return self.respond(&id, Err((-32002, "Resource not found")));
                 };
+                if let Some(url) = host_tools(&params) {
+                    session.host_tools = Some(url);
+                }
+                let session = &*session;
                 let mode = session.mode.clone();
                 if method == "session/load" {
                     for update in session.log.clone() {
@@ -225,12 +265,13 @@ impl Agent {
         if session.turn.is_some() {
             return self.respond(&id, Err((-32600, "A turn is already running")));
         }
-        let text: String = prompt
+        let texts: Vec<String> = prompt
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|b| b["text"].as_str())
+            .filter_map(|b| b["text"].as_str().map(str::to_owned))
             .collect();
+        let text = texts.last().cloned().unwrap_or_default();
         // The owner's message, for replay; ACP agents don't echo it live.
         for block in prompt.as_array().into_iter().flatten() {
             session
@@ -260,6 +301,33 @@ impl Agent {
             });
             self.send(json!({ "jsonrpc": "2.0", "id": request_id, "method": "session/request_permission",
                 "params": { "sessionId": session_id, "toolCall": tool_call, "options": options() } }));
+        } else if let Some(folder) = text.strip_prefix("work in ") {
+            let (folder, create) = match folder.strip_prefix("new ") {
+                Some(folder) => (folder.trim().to_owned(), true),
+                None => (folder.trim().to_owned(), false),
+            };
+            session.calls += 1;
+            let call = format!("call-{}", session.calls);
+            let (url, cwd) = (session.host_tools.clone(), session.cwd.clone());
+            self.update(session_id, json!({ "sessionUpdate": "tool_call", "toolCallId": call, "title": "move_to_folder", "kind": "other",
+                "status": "in_progress", "rawInput": { "path": folder } }));
+            let done = self.done.clone();
+            let session = session_id.to_owned();
+            tokio::spawn(async move {
+                let arguments = json!({ "path": folder, "handoff": format!("Was working in {cwd}."), "create": create });
+                let result = match url {
+                    Some(url) => call_tool(&url, "move_to_folder", arguments).await,
+                    None => Err("the host gave me no tools".to_owned()),
+                };
+                let _ = done.send(Called { session, prompt_id: id, call, result });
+            });
+        } else if text == "where" {
+            let cwd = session.cwd.clone();
+            self.say(session_id, &format!("Working in {cwd}."));
+            if texts.len() > 1 {
+                self.say(session_id, &format!(" Handoff: {}", texts[0]));
+            }
+            self.end(session_id, &id, "end_turn");
         } else if text == "wait" {
             session.turn = Some(Turn {
                 prompt_id: id,
@@ -270,6 +338,22 @@ impl Agent {
             self.say(session_id, &format!("You said: {text}"));
             self.end(session_id, &id, "end_turn");
         }
+    }
+
+    /// A call to the host's tool came back: the turn ends with what it said.
+    fn called(&mut self, called: Called) {
+        let Called { session, prompt_id, call, result } = called;
+        let (status, text) = match &result {
+            Ok(text) => ("completed", text.clone()),
+            Err(text) => ("failed", text.clone()),
+        };
+        self.update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": call, "status": status,
+            "content": [{ "type": "content", "content": { "type": "text", "text": text } }] }));
+        match result {
+            Ok(_) => self.say(&session, "Moved."),
+            Err(why) => self.say(&session, &format!("Couldn't move: {why}")),
+        }
+        self.end(&session, &prompt_id, "end_turn");
     }
 
     fn run_command(&mut self, session_id: &str, prompt_id: &Value, call: &str, command: &str) {
@@ -343,9 +427,122 @@ impl Agent {
     }
 }
 
+/// Calls `tool` on an MCP server over Streamable HTTP (`initialize`, then
+/// `tools/call`): its text, or its error.
+pub async fn call_tool(url: &str, tool: &str, arguments: Value) -> Result<String, String> {
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "oal-fake-agent", "version": env!("CARGO_PKG_VERSION") } } });
+    post(url, &init).await?;
+    post(url, &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await?;
+    let answer = post(url, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": tool, "arguments": arguments } })).await?;
+    if let Some(e) = answer.get("error") {
+        return Err(e["message"].as_str().unwrap_or("the tool failed").to_owned());
+    }
+    let text: String = answer["result"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect();
+    match answer["result"]["isError"].as_bool() {
+        Some(true) => Err(text),
+        _ => Ok(text),
+    }
+}
+
+/// One JSON-RPC message POSTed to `url` (`http://host:port/path`): the JSON
+/// answer, or `null` for none (202).
+async fn post(url: &str, message: &Value) -> Result<Value, String> {
+    let rest = url.strip_prefix("http://").ok_or("only http:// tools")?;
+    let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".to_owned()));
+    let mut stream = tokio::net::TcpStream::connect(authority).await.map_err(|e| e.to_string())?;
+    let body = message.to_string();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
+    let mut response = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response).await.map_err(|e| e.to_string())?;
+    let response = String::from_utf8_lossy(&response);
+    let (head, body) = response.split_once("\r\n\r\n").ok_or("no HTTP answer")?;
+    let status = head.split_whitespace().nth(1).unwrap_or("");
+    match status {
+        "202" => Ok(Value::Null),
+        "200" => serde_json::from_str(body.trim()).map_err(|e| format!("not JSON: {e}")),
+        other => Err(format!("the host's tools answered {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `work in <folder>` calls the host's `move_to_folder` over MCP's
+    /// Streamable HTTP, with the handoff, and ends the turn with the answer.
+    #[tokio::test]
+    async fn work_in_calls_the_hosts_tool() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp/t0k", listener.local_addr().unwrap());
+        let (calls_tx, mut calls) = mpsc::unbounded_channel::<Value>();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                // One small request per connection: head, then its body.
+                loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("Content-Length: "))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                assert!(text.starts_with("POST /mcp/t0k HTTP/1.1"), "{text}");
+                let message: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                let answer = match message["method"].as_str() {
+                    Some("initialize") => Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "host" } } })),
+                    Some("tools/call") => {
+                        calls_tx.send(message["params"].clone()).unwrap();
+                        Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "content": [{ "type": "text", "text": "Moved there." }], "isError": false } }))
+                    }
+                    _ => None,
+                };
+                let response = match answer {
+                    Some(answer) => {
+                        let body = answer.to_string();
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    }
+                    None => "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (out, mut from) = mpsc::unbounded_channel();
+        tokio::spawn(run(rx, out));
+        let servers = json!([{ "type": "http", "name": "host", "url": url, "headers": [] }]);
+        tx.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "session/new", "params": { "cwd": "/w", "mcpServers": servers } })).unwrap();
+        assert_eq!(from.recv().await.unwrap()["result"]["sessionId"], "sess-1");
+        tx.send(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": { "sessionId": "sess-1", "prompt": [{ "type": "text", "text": "work in new ~/proj" }] } })).unwrap();
+        assert_eq!(from.recv().await.unwrap()["params"]["update"]["title"], "move_to_folder");
+        let call = calls.recv().await.unwrap();
+        assert_eq!(call, json!({ "name": "move_to_folder", "arguments": { "path": "~/proj", "handoff": "Was working in /w.", "create": true } }));
+        let done = from.recv().await.unwrap();
+        assert_eq!(done["params"]["update"]["status"], "completed");
+        assert_eq!(from.recv().await.unwrap()["params"]["update"]["content"]["text"], "Moved.");
+        assert_eq!(from.recv().await.unwrap()["result"]["stopReason"], "end_turn");
+    }
 
     #[tokio::test]
     async fn a_command_asks_then_runs() {

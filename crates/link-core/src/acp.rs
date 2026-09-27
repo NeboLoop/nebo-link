@@ -20,6 +20,12 @@
 //!   conversation begun in the terminal there shows too); for one that
 //!   doesn't, the backend answers from its own record of the sessions it
 //!   created.
+//! - **Moving.** A conversation moves to another folder when the owner asks
+//!   ([`Backend::move_session`]): the agent starts a new session there, and
+//!   the conversation continues in it under its own id. The backend keeps
+//!   which session each moved conversation continues in, its folder and the
+//!   handoff its next prompt starts with (`acp-moves.json` beside the chats
+//!   record), so a restart finds it where it went.
 //! - **Sign-in.** The agent runs under its owner's own login. `-32000`
 //!   "Authentication required" reads "Claude Code isn't signed in on this
 //!   computer. Run `claude` once to sign in.", with the agent's text in
@@ -109,12 +115,14 @@ impl Acp {
     pub fn new(settings: Settings) -> Self {
         Self {
             shared: Arc::new(Shared {
-                settings,
                 live: tokio::sync::Mutex::new(None),
                 opening: tokio::sync::Mutex::new(()),
                 known: Mutex::new(Known::default()),
                 inbox: Mutex::new(None),
                 next_reply: AtomicU64::new(0),
+                moves: Mutex::new(read_json(&moves_file(&settings.chats_file)).unwrap_or_default()),
+                mcp: Mutex::new(HashMap::new()),
+                settings,
             }),
         }
     }
@@ -142,6 +150,27 @@ struct Shared {
     known: Mutex<Known>,
     inbox: Mutex<Option<Inbox>>,
     next_reply: AtomicU64,
+    /// The conversations that moved to another folder, by their id.
+    moves: Mutex<HashMap<String, Moved>>,
+    /// The MCP servers each of the agent's sessions was opened with, so a
+    /// session reopened after a restart has them again.
+    mcp: Mutex<HashMap<String, Value>>,
+}
+
+/// Where a conversation that moved works now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Moved {
+    /// The agent's session it continues in.
+    session: String,
+    /// The folder that session works in.
+    folder: PathBuf,
+    /// The note its next prompt starts with, until that prompt is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
+    /// The sessions it continued in before, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    earlier: Vec<String>,
 }
 
 /// What the agent last said about itself, for its roster entry.
@@ -187,6 +216,56 @@ impl Shared {
 
     fn key(&self) -> &'static str {
         self.settings.agent.key()
+    }
+
+    /// The agent's session the conversation `id` continues in: its own, or
+    /// the one it moved to.
+    fn target(&self, id: &str) -> String {
+        self.moves
+            .lock()
+            .expect("moves")
+            .get(id)
+            .map(|m| m.session.clone())
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    /// The conversation the agent's session `session` belongs to.
+    fn conversation(&self, session: &str) -> String {
+        self.moves
+            .lock()
+            .expect("moves")
+            .iter()
+            .find(|(_, m)| m.session == session || m.earlier.iter().any(|e| e == session))
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| session.to_owned())
+    }
+
+    /// Every session of the agent's the conversation `id` has run in.
+    fn sessions_of(&self, id: &str) -> Vec<String> {
+        let mut all = vec![id.to_owned()];
+        if let Some(moved) = self.moves.lock().expect("moves").get(id) {
+            all.extend(moved.earlier.iter().cloned());
+            all.push(moved.session.clone());
+        }
+        all
+    }
+
+    /// The folder the agent's session `session` works in.
+    fn folder_of(&self, session: &str) -> PathBuf {
+        self.moves
+            .lock()
+            .expect("moves")
+            .values()
+            .find(|m| m.session == session)
+            .map(|m| m.folder.clone())
+            .unwrap_or_else(|| self.settings.workdir.clone())
+    }
+
+    fn save_moves(&self) {
+        let moves = self.moves.lock().expect("moves").clone();
+        if let Err(e) = write_private_json(&moves_file(&self.settings.chats_file), &moves) {
+            tracing::info!(error = %e, "could not record where a conversation moved");
+        }
     }
 
     /// The running agent, started if it is not.
@@ -340,7 +419,11 @@ impl Shared {
             .conn
             .request(
                 method,
-                json!({ "sessionId": session, "cwd": self.settings.workdir, "mcpServers": [] }),
+                json!({
+                    "sessionId": session,
+                    "cwd": self.folder_of(session),
+                    "mcpServers": self.mcp.lock().expect("mcp").get(session).cloned().unwrap_or_else(|| json!([])),
+                }),
             )
             .await;
         let mut state = live.state.lock().expect("sessions");
@@ -358,7 +441,14 @@ impl Shared {
         let live = self.live().await.map_err(|e| {
             ErrorObject::new(code::AGENT_UNAVAILABLE, sentence(&e, self.name()))
         })?;
+        // The conversation the host names, and the agent's session it
+        // continues in (another, once it moved).
         let session = params["sessionId"].as_str().map(str::to_owned);
+        let target = session.as_deref().map(|s| self.target(s));
+        if let Some(target) = &target {
+            params["sessionId"] = json!(target);
+        }
+        let mut handoff = false;
         match method.as_str() {
             "session/list" if !live.init.list_sessions => return Ok(self.recorded_sessions()),
             "session/list" => {
@@ -366,19 +456,40 @@ impl Shared {
                     params["cwd"] = json!(self.settings.workdir);
                 }
             }
-            "session/new" | "session/load" | "session/resume" => {}
+            "session/new" => {}
+            "session/load" | "session/resume" => {
+                if let (Some(session), Some(target)) = (&session, &target)
+                    && session != target
+                {
+                    params["cwd"] = json!(self.folder_of(target));
+                }
+            }
             _ => {
-                if let Some(session) = &session {
-                    self.ensure_open(&live, session).await?;
+                if let Some(target) = &target {
+                    self.ensure_open(&live, target).await?;
+                }
+                // A moved conversation's first prompt starts with the
+                // handoff its agent wrote before the move.
+                if method == "session/prompt"
+                    && let Some(note) = session.as_deref().and_then(|s| self.moves.lock().expect("moves").get(s).and_then(|m| m.handoff.clone()))
+                    && let Some(prompt) = params["prompt"].as_array_mut()
+                {
+                    prompt.insert(0, json!({ "type": "text", "text": handoff_text(&note) }));
+                    handoff = true;
                 }
             }
         }
+        let servers = params.get("mcpServers").cloned();
         let result = live.conn.request(&method, params).await.map_err(|e| self.refusal(e))?;
         let mut state = live.state.lock().expect("sessions");
         let session = session.or_else(|| result["sessionId"].as_str().map(str::to_owned));
-        match (method.as_str(), &session) {
-            ("session/new" | "session/load" | "session/resume", Some(session)) => {
-                state.open.insert(session.clone());
+        let target = target.or_else(|| session.clone());
+        match (method.as_str(), &session, &target) {
+            ("session/new" | "session/load" | "session/resume", Some(session), Some(target)) => {
+                state.open.insert(target.clone());
+                if let Some(servers) = servers {
+                    self.mcp.lock().expect("mcp").insert(target.clone(), servers);
+                }
                 if let Some(model) = protocol::model(&result) {
                     state.models.insert(session.clone(), model.clone());
                     state.model = Some(model);
@@ -390,15 +501,85 @@ impl Shared {
                     record(&self.settings.chats_file, session, None);
                 }
             }
-            ("session/prompt", Some(session)) => {
+            ("session/prompt", Some(session), _) => {
                 record(&self.settings.chats_file, session, state.titles.get(session).map(String::as_str));
+                if handoff {
+                    if let Some(moved) = self.moves.lock().expect("moves").get_mut(session) {
+                        moved.handoff = None;
+                    }
+                    self.save_moves();
+                }
             }
-            ("session/close" | "session/delete", Some(session)) => {
-                state.open.remove(session);
+            ("session/close" | "session/delete", Some(session), Some(target)) => {
+                state.open.remove(target);
+                if self.moves.lock().expect("moves").remove(session).is_some() {
+                    self.save_moves();
+                }
+            }
+            ("session/list", _, _) => {
+                drop(state);
+                return Ok(self.moved_in_list(result));
             }
             _ => {}
         }
         Ok(result)
+    }
+
+    /// `session/list`'s answer as the host tells it: a moved conversation
+    /// listed with the folder it works in now, and the sessions it moved
+    /// into not listed as conversations of their own.
+    fn moved_in_list(&self, mut result: Value) -> Value {
+        let moves = self.moves.lock().expect("moves").clone();
+        if moves.is_empty() {
+            return result;
+        }
+        if let Some(sessions) = result["sessions"].as_array_mut() {
+            sessions.retain(|s| {
+                let id = s["sessionId"].as_str().unwrap_or("");
+                !moves.values().any(|m| m.session == id || m.earlier.iter().any(|e| e == id))
+            });
+            for session in sessions.iter_mut() {
+                if let Some(moved) = session["sessionId"].as_str().and_then(|id| moves.get(id)) {
+                    session["cwd"] = json!(moved.folder);
+                }
+            }
+        }
+        result
+    }
+
+    /// Starts the agent's new session in `folder` for the conversation `id`,
+    /// which continues in it from its next prompt.
+    async fn move_to(self: Arc<Self>, id: String, folder: PathBuf, handoff: String, mcp: Vec<Value>) -> Result<(), ErrorObject> {
+        let live = self.live().await.map_err(|e| {
+            ErrorObject::new(code::AGENT_UNAVAILABLE, sentence(&e, self.name()))
+        })?;
+        let servers = json!(mcp);
+        let created = live
+            .conn
+            .request("session/new", json!({ "cwd": folder, "mcpServers": servers }))
+            .await
+            .map_err(|e| self.refusal(e))?;
+        let session = created["sessionId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ErrorObject::new(code::INTERNAL, format!("{} started a conversation without an id.", self.name())))?
+            .to_owned();
+        live.state.lock().expect("sessions").open.insert(session.clone());
+        self.mcp.lock().expect("mcp").insert(session.clone(), servers);
+        {
+            let mut moves = self.moves.lock().expect("moves");
+            let moved = moves.entry(id.clone()).or_default();
+            if !moved.session.is_empty() {
+                let before = std::mem::take(&mut moved.session);
+                moved.earlier.push(before);
+            }
+            moved.session = session.clone();
+            moved.folder = folder.clone();
+            moved.handoff = Some(handoff).filter(|h| !h.trim().is_empty());
+        }
+        self.save_moves();
+        tracing::info!(conversation = %id, session = %session, folder = %folder.display(), "acp: a conversation moved to another folder");
+        Ok(())
     }
 
     /// `session/list`'s answer from the backend's own record, for an agent
@@ -408,8 +589,8 @@ impl Shared {
             .into_iter()
             .map(|r| {
                 json!({
+                    "cwd": self.moves.lock().expect("moves").get(&r.id).map(|m| m.folder.clone()).unwrap_or_else(|| self.settings.workdir.clone()),
                     "sessionId": r.id,
-                    "cwd": self.settings.workdir,
                     "title": r.title,
                     "updatedAt": crate::model::rfc3339(r.updated as i64, (r.updated.fract() * 1000.0) as u32),
                 })
@@ -455,11 +636,12 @@ fn handle(shared: &Weak<Shared>, state: &Arc<Mutex<Sessions>>, incoming: Incomin
             let Some(session) = params["sessionId"].as_str().map(str::to_owned) else {
                 return;
             };
+            if state.lock().expect("sessions").reopening.contains(&session) {
+                return;
+            }
+            let session = shared.conversation(&session);
             {
                 let mut state = state.lock().expect("sessions");
-                if state.reopening.contains(&session) {
-                    return;
-                }
                 match protocol::update(&params).map(|(_, update)| update) {
                     Some(protocol::Update::Model(model)) => {
                         state.models.insert(session.clone(), model.clone());
@@ -482,11 +664,14 @@ fn handle(shared: &Weak<Shared>, state: &Arc<Mutex<Sessions>>, incoming: Incomin
                 shared.tell(AgentMessage::Withdrawn { reply });
             }
         }
-        Incoming::Request { id, method, params } if method == "session/request_permission" => {
-            let Some(session) = params["sessionId"].as_str().map(str::to_owned) else {
+        Incoming::Request { id, method, mut params } if method == "session/request_permission" => {
+            let Some(session) = params["sessionId"].as_str().map(|s| shared.conversation(s)) else {
                 responder.respond(&id, Err(RpcError::new(-32602, "invalid permission request")));
                 return;
             };
+            // Asked in the session a conversation moved into: the host and
+            // its clients know it by the conversation's id.
+            params["sessionId"] = json!(session);
             let reply_id = shared.next_reply.fetch_add(1, Ordering::Relaxed) + 1;
             let (reply, answer) = Reply::new(reply_id);
             state.lock().expect("sessions").asks.insert(id.to_string(), reply_id);
@@ -577,7 +762,19 @@ impl Backend for Acp {
             // A notification never starts the agent: with none running there
             // is nothing to tell.
             let live = shared.live.lock().await.clone();
-            if let Some(live) = live.filter(|l| !l.conn.is_closed()) {
+            let Some(live) = live.filter(|l| !l.conn.is_closed()) else {
+                return;
+            };
+            // A conversation that moved may still be finishing its turn in
+            // the session it moved from: a cancel reaches each of them.
+            let sessions = params["sessionId"].as_str().map(|s| shared.sessions_of(s)).unwrap_or_default();
+            if sessions.len() < 2 {
+                live.conn.notify(&method, params);
+                return;
+            }
+            for session in sessions {
+                let mut params = params.clone();
+                params["sessionId"] = json!(session);
                 live.conn.notify(&method, params);
             }
         });
@@ -599,6 +796,44 @@ impl Backend for Acp {
                 .unwrap_or_else(|e| Err(Error::Unavailable(e.to_string())))
         })
     }
+
+    fn move_session<'a>(
+        &'a self,
+        agent: &'a str,
+        session: &'a str,
+        folder: &'a Path,
+        handoff: &'a str,
+        mcp: Vec<Value>,
+    ) -> BoxFuture<'a, Result<(), ErrorObject>> {
+        Box::pin(async move {
+            if agent != self.shared.key() {
+                return Err(ErrorObject::new(code::UNKNOWN_AGENT, format!("There's no agent called {agent} here.")));
+            }
+            let (session, folder, handoff) = (session.to_owned(), folder.to_path_buf(), handoff.to_owned());
+            self.detached(|shared| shared.move_to(session, folder, handoff, mcp)).await
+        })
+    }
+
+    fn session_folder(&self, agent: &str, session: &str) -> Option<PathBuf> {
+        if agent != self.shared.key() {
+            return None;
+        }
+        self.shared.moves.lock().expect("moves").get(session).map(|m| m.folder.clone())
+    }
+}
+
+/// Where a backend keeps its moved conversations: beside its chats record.
+fn moves_file(chats_file: &Path) -> PathBuf {
+    chats_file.with_file_name("acp-moves.json")
+}
+
+/// The first context of a moved conversation's next prompt.
+fn handoff_text(note: &str) -> String {
+    format!("[You moved to a new folder at the owner's request. Your note from before the move: {note}]")
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
 /// The modes a `session/new` answer says the session starts in.

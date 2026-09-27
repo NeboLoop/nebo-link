@@ -56,6 +56,11 @@ async fn agents() {
 }
 
 #[tokio::test]
+async fn add_remove() {
+    passes("add-remove").await;
+}
+
+#[tokio::test]
 async fn prompt_permission() {
     passes("prompt-permission").await;
 }

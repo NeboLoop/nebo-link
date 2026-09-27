@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-agents-add.schema.json",
+  "title": "host/agents/add",
+  "description": "Adds an agent of an addable runtime, working in a new folder of its own that the host chooses. Request, client to host; only a paired device may send it.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "runtime": {
+          "type": "string",
+          "description": "A runtimes[].id from host/info with addable true."
+        },
+        "label": {
+          "type": "string",
+          "description": "What the owner calls the new agent. Without it, the host names it (\"Claude Code 2\")."
+        }
+      },
+      "required": [
+        "runtime"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "defs.schema.json#/$defs/Agent"
+        }
+      },
+      "required": [
+        "agent"
+      ]
+    }
+  }
+}

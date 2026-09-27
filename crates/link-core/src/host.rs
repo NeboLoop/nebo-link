@@ -26,11 +26,20 @@
 //!   runtime doesn't answer included, offline with the reason;
 //!   [`Host::set_members`] and [`Host::refresh`] announce what changed with
 //!   [`AgentUpdate`].
+//! - **Adding and removing agents.** [`Host::add_agent`] starts a new
+//!   coding agent in a folder of its own and hosts it; [`Host::remove_agent`]
+//!   stops hosting one and leaves its folder. What the host keeps of them is
+//!   its embedder's ([`crate::keep`]).
+//! - **Moving.** Every coding agent's session gets the host's own tools
+//!   ([`crate::tools`]); with `move_to_folder` the agent moves the
+//!   conversation to another folder when the owner asks
+//!   ([`Host::move_to_folder`]).
 //! - **Order.** Every event carries the host's sequence number, and a
 //!   snapshot ([`Opened::seq`]) the number it was taken at, so a client that
 //!   attaches to a session skips the events its snapshot already holds.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
@@ -44,7 +53,14 @@ use crate::model::{
     self, Agent, AgentChange, AgentUpdate, DeviceRef, ErrorObject, Outcome, PendingChange,
     PendingRequest, PendingUpdate, StopReason, ToolCallUpdate, TurnState, TurnUpdate, Usage, code,
 };
+use crate::keep::{Add, Addable, CodingAgent, Keeper, Kept};
 use crate::roster::{Member, Roster, member_agents};
+use crate::tools::Tools;
+
+/// Where a session's `_meta` says the folder it works in, once it moved
+/// (`session_info_update`, and the answer to `session/load` and
+/// `session/resume`).
+pub const META_CWD: &str = "oal/cwd";
 
 /// How many resolved request ids are remembered, so a late answer reads
 /// `already_answered` rather than `unknown_request`.
@@ -169,6 +185,16 @@ pub struct Host {
     clients: AtomicU64,
     /// The backends handed the host's inbox, by address.
     connected: Mutex<std::collections::HashSet<usize>>,
+    /// What keeps the agents the host adds; `None` = agents are added only
+    /// where the host is made.
+    keeper: Mutex<Option<Arc<dyn Keeper>>>,
+    /// One agent added or removed at a time, so two never take one id.
+    adding: tokio::sync::Mutex<()>,
+    /// The host's own MCP server, started when a session first needs it.
+    tools: tokio::sync::OnceCell<Option<Arc<Tools>>>,
+    /// The OS user's home: where new agents' folders go, and where a session
+    /// may move outside Full access.
+    home: Mutex<Option<PathBuf>>,
     me: Weak<Host>,
 }
 
@@ -201,6 +227,8 @@ struct Session {
     modes: Option<Value>,
     config_options: Option<Value>,
     model: Option<String>,
+    /// The folder it works in, once it moved to another.
+    folder: Option<String>,
     turn: Option<Running>,
     last_ended: Option<TurnUpdate>,
     /// Being opened in its agent: its replay is recorded but not announced.
@@ -217,6 +245,7 @@ impl Session {
             modes: None,
             config_options: None,
             model: None,
+            folder: None,
             turn: None,
             last_ended: None,
             opening: false,
@@ -234,6 +263,9 @@ impl Session {
         }
         if let Some(model) = protocol::model(result) {
             self.model = Some(model);
+        }
+        if let Some(folder) = result["_meta"][META_CWD].as_str() {
+            self.folder = Some(folder.to_owned());
         }
     }
 
@@ -267,6 +299,9 @@ impl Session {
         if let Some(options) = &self.config_options {
             answer["configOptions"] = options.clone();
         }
+        if let Some(folder) = &self.folder {
+            answer["_meta"] = json!({ META_CWD: folder });
+        }
         answer
     }
 
@@ -298,6 +333,10 @@ impl Host {
             opening: tokio::sync::Mutex::new(()),
             clients: AtomicU64::new(0),
             connected: Mutex::new(std::collections::HashSet::new()),
+            keeper: Mutex::new(None),
+            adding: tokio::sync::Mutex::new(()),
+            tools: tokio::sync::OnceCell::new(),
+            home: Mutex::new(dirs::home_dir()),
             me: me.clone(),
         });
         for member in host.roster.members() {
@@ -308,6 +347,21 @@ impl Host {
 
     pub fn roster(&self) -> &Arc<Roster> {
         &self.roster
+    }
+
+    /// Where the agents the host adds are kept: from now on the host adds
+    /// and removes agents ([`Host::add_agent`], [`Host::remove_agent`]).
+    pub fn set_keeper(&self, keeper: Arc<dyn Keeper>) {
+        *self.keeper.lock().expect("keeper") = Some(keeper);
+    }
+
+    /// The OS user's home, when it isn't the one the OS reports.
+    pub fn set_home(&self, home: PathBuf) {
+        *self.home.lock().expect("home") = Some(home);
+    }
+
+    fn home(&self) -> Option<PathBuf> {
+        self.home.lock().expect("home").clone()
     }
 
     /// Every event from now on.
@@ -463,18 +517,296 @@ impl Host {
         Ok(found)
     }
 
+    // -- Adding and removing agents -------------------------------------------
+
+    fn keeper(&self) -> Result<Arc<dyn Keeper>, ErrorObject> {
+        self.keeper
+            .lock()
+            .expect("keeper")
+            .clone()
+            .ok_or_else(|| ErrorObject::new(code::NOT_PERMITTED, "Agents are added on this computer itself."))
+    }
+
+    /// The coding agents that can be added on this computer
+    /// ([`Host::add_agent`]); none where the host adds none.
+    pub fn addable(&self) -> Vec<Addable> {
+        let keeper = self.keeper.lock().expect("keeper").clone();
+        keeper
+            .map(|k| k.addable())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| Addable { id: a.id, name: a.name })
+            .collect()
+    }
+
+    /// Adds a coding agent ([`crate::keep`]): it is started once in its
+    /// folder (made now, one of its own unless the owner on the computer
+    /// named one), kept, hosted, and announced `added`.
+    pub async fn add_agent(self: &Arc<Self>, add: Add) -> Result<Agent, ErrorObject> {
+        let keeper = self.keeper()?;
+        let refused = |why: String| ErrorObject::new(code::NOT_PERMITTED, why);
+        let (kind, name, command) = match add.command {
+            Some(command) => (nebo_runtimes::acp::Agent::Other, nebo_runtimes::acp::Agent::Other.name().to_owned(), command),
+            None => {
+                let found = crate::keep::find(keeper.addable(), &add.runtime).map_err(refused)?;
+                (found.agent, found.name, found.command)
+            }
+        };
+        let name = name.as_str();
+        let _one = self.adding.lock().await;
+        let kept = keeper.agents();
+        let label = add
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::keep::label(&kept, kind.key(), name, add.folder.as_deref()));
+        let id = crate::keep::id(&kept, &label);
+        let folder = match add.folder {
+            Some(folder) => folder,
+            None => {
+                let home = self.home().ok_or_else(|| refused("This user has no home folder to work in.".to_owned()))?;
+                crate::keep::default_folder(&home, &id)
+            }
+        };
+        let folder = crate::keep::make(&folder, name).map_err(refused)?;
+        if let Some(same) = kept.iter().find(|k| k.runtime == kind.key() && k.folder.as_deref() == Some(folder.as_path())) {
+            return Err(refused(format!(
+                "{name} already works in {} as \"{}\". Choose another folder.",
+                folder.display(),
+                same.label
+            )));
+        }
+        let title = crate::acp::probe(name, &command, &folder, keeper.client()).await.map_err(|why| {
+            ErrorObject::new(code::AGENT_UNAVAILABLE, why)
+        })?;
+        let label = match (kind, title, add.label.is_some()) {
+            (nebo_runtimes::acp::Agent::Other, Some(title), false) => title,
+            _ => label,
+        };
+        let coding = CodingAgent {
+            id: id.clone(),
+            label,
+            agent: kind,
+            acp: crate::acp::AcpLink {
+                program: command.program,
+                args: command.args,
+                env: command.env,
+                workdir: folder,
+            },
+        };
+        let member = keeper.keep(&coding).map_err(|why| ErrorObject::new(code::INTERNAL, why))?;
+        self.ensure(&member);
+        let mut members = self.roster.members();
+        members.retain(|m| m.id != member.id);
+        members.push(member);
+        self.roster.set(members);
+        self.refresh().await;
+        tracing::info!(agent = %coding.id, folder = %coding.acp.workdir.display(), "host: an agent was added");
+        Ok(self
+            .current()
+            .await
+            .into_iter()
+            .find(|a| a.id == id)
+            .unwrap_or_else(|| Agent {
+                id,
+                label: coding.label.clone(),
+                runtime: kind.key().to_owned(),
+                folder: Some(coding.acp.workdir.display().to_string()),
+                online: true,
+                offline_reason: None,
+                capabilities: json!({}),
+                modes: None,
+            }))
+    }
+
+    /// Stops hosting the agent `id`: its turns are stopped, its
+    /// conversations closed, its process ended, and it is announced
+    /// `removed`. Its folder and everything in it stay.
+    pub async fn remove_agent(self: &Arc<Self>, id: &str) -> Result<Agent, ErrorObject> {
+        let keeper = self.keeper()?;
+        let _one = self.adding.lock().await;
+        let listed = self.current().await.into_iter().find(|a| a.id == id);
+        let kept: Option<Kept> = keeper.agents().into_iter().find(|k| k.id == id);
+        let Some(agent) = listed.or_else(|| {
+            kept.map(|k| Agent {
+                id: k.id,
+                label: k.label,
+                runtime: k.runtime,
+                folder: k.folder.map(|f| f.display().to_string()),
+                online: false,
+                offline_reason: None,
+                capabilities: json!({}),
+                modes: None,
+            })
+        }) else {
+            return Err(ErrorObject::new(code::UNKNOWN_AGENT, format!("There's no agent called {id} on this computer.")));
+        };
+        keeper.forget(id).map_err(|why| ErrorObject::new(code::NOT_PERMITTED, why))?;
+        self.cancel(Some(id), None);
+        {
+            let mut state = self.lock();
+            let keys: Vec<Key> = state.sessions.keys().filter(|k| k.0 == id).cloned().collect();
+            for key in keys {
+                self.resolve_session(&mut state, &key, None);
+                Self::forget(&mut state, &key);
+                Self::emit(&mut state, &self.events, Event::Closed { agent: key.0.clone(), session_id: key.1.clone() });
+            }
+        }
+        if let Some(Some(tools)) = self.tools.get() {
+            tools.forget_session(id, None);
+        }
+        let mut members = self.roster.members();
+        members.retain(|m| m.id != id);
+        self.roster.set(members);
+        self.refresh().await;
+        tracing::info!(agent = %id, "host: an agent was removed; its folder stays");
+        Ok(agent)
+    }
+
+    // -- The host's tools -----------------------------------------------------
+
+    /// The host's MCP server, started on first use; `None` when it can't
+    /// listen.
+    async fn tools(&self) -> Option<Arc<Tools>> {
+        self.tools
+            .get_or_init(|| async {
+                match Tools::start(self.me.clone()).await {
+                    Ok(tools) => Some(tools),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "host: the host's tools could not be served");
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+
+    /// Whether `member`'s agent gets the host's tools: it works in a folder
+    /// and takes an HTTP MCP server (started first, so its capabilities are
+    /// its own).
+    async fn takes_tools(&self, member: &Member, runtime_agent: &str) -> bool {
+        let capabilities = |agents: Vec<crate::backend::Agent>| {
+            agents
+                .into_iter()
+                .find(|a| a.id == runtime_agent && a.folder.is_some())
+                .map(|a| a.capabilities)
+        };
+        let Some(mut known) = member.backend.agents().await.ok().and_then(capabilities) else {
+            return false;
+        };
+        if known.as_object().is_none_or(|o| o.is_empty()) && member.backend.ready().await.is_ok() {
+            known = member.backend.agents().await.ok().and_then(capabilities).unwrap_or_default();
+        }
+        known["mcpCapabilities"]["http"].as_bool() == Some(true)
+    }
+
+    /// `params` with the host's tools added to its `mcpServers`, for the
+    /// conversation `session` of `agent` (`None`: about to be made), and the
+    /// token they carry.
+    async fn with_tools(&self, member: &Member, runtime_agent: &str, agent: &str, session: Option<&str>, mut params: Value) -> (Value, Option<String>) {
+        if !self.takes_tools(member, runtime_agent).await {
+            return (params, None);
+        }
+        let Some(tools) = self.tools().await else {
+            return (params, None);
+        };
+        let token = tools.token(agent, session);
+        let mut servers = params["mcpServers"].as_array().cloned().unwrap_or_default();
+        servers.retain(|s| s["name"] != crate::tools::SERVER);
+        servers.push(tools.entry(&token));
+        params["mcpServers"] = Value::Array(servers);
+        (params, Some(token))
+    }
+
+    /// Moves the conversation `session` of `agent` to `path` on the owner's
+    /// request (the agent's `move_to_folder`): the folder must exist (made
+    /// when `create`), and be inside the owner's home unless the session
+    /// runs with full access. The agent starts a new session there, in the
+    /// conversation's mode, and the conversation continues in it from its
+    /// next prompt, whose first context is `handoff`. Clients are told the
+    /// folder (`session_info_update` `_meta."oal/cwd"`) and the owner reads
+    /// "Now working in <folder>." The error is the agent's to relay.
+    pub async fn move_to_folder(&self, agent: &str, session: &str, path: &str, handoff: &str, create: bool) -> Result<PathBuf, String> {
+        let key = (agent.to_owned(), session.to_owned());
+        let (member, runtime_agent, modes, current) = {
+            let state = self.lock();
+            let s = state.sessions.get(&key).ok_or("This conversation isn't open on this computer.")?;
+            (s.member.clone(), s.runtime_agent.clone(), s.modes.clone(), s.folder.clone())
+        };
+        let backend = self.backend(&member).ok_or("This agent is no longer on this computer.")?;
+        let home = self.home();
+        let here = match current {
+            Some(folder) => PathBuf::from(folder),
+            None => self
+                .current()
+                .await
+                .into_iter()
+                .find(|a| a.id == agent)
+                .and_then(|a| a.folder)
+                .map(PathBuf::from)
+                .ok_or("This agent works without a folder, so it can't move to one.")?,
+        };
+        let full_access = modes.as_ref().and_then(|m| protocol::modes(&json!({ "modes": m }))).is_some_and(|m| {
+            crate::turn::mode_for(crate::turn::Permission::FullAccess, &m.available) == Some(m.current.as_str())
+        });
+        let folder = resolve_folder(path, home.as_deref(), &here, create, full_access)?;
+        // The call came through the host's tools, so they are serving.
+        let tools = self.tools.get().cloned().flatten().ok_or("This computer can't move conversations right now. Try again.")?;
+        let token = tools.token(agent, Some(session));
+        backend
+            .move_session(&runtime_agent, session, &folder, handoff, vec![tools.entry(&token)])
+            .await
+            .map_err(|e| e.message)?;
+        // The new session runs in the conversation's mode, as the old one did.
+        if let Some(mode) = modes.as_ref().and_then(|m| m["currentModeId"].as_str()) {
+            let params = json!({ "sessionId": session, "modeId": mode });
+            if let Err(e) = backend.request(&runtime_agent, "session/set_mode", params).await {
+                tracing::info!(error = %e.message, mode, "host: the moved conversation's mode was not set again");
+            }
+        }
+        let shown = shown_folder(&folder, home.as_deref());
+        let mut state = self.lock();
+        if let Some(s) = state.sessions.get_mut(&key) {
+            s.folder = Some(folder.display().to_string());
+        }
+        let info = json!({ "sessionUpdate": "session_info_update", "_meta": { META_CWD: folder.display().to_string() } });
+        self.record(&mut state, &key, info, None);
+        let note = json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": format!("\n\nNow working in {shown}.\n\n") } });
+        self.record(&mut state, &key, note, None);
+        tracing::info!(agent, session, folder = %folder.display(), "host: a conversation moved to another folder");
+        Ok(folder)
+    }
+
     // -- Sessions -------------------------------------------------------------
 
     /// ACP `session/new` on `agent`; the session is open from its answer on.
+    /// A coding agent's session gets the host's own tools.
     pub async fn new_session(&self, agent: &str, params: Value) -> Result<Value, ErrorObject> {
         let (member, runtime_agent) = self.locate(agent).await?;
-        let result = member.backend.request(&runtime_agent, "session/new", params).await?;
+        let (params, token) = self.with_tools(&member, &runtime_agent, agent, None, params).await;
+        let answered = member.backend.request(&runtime_agent, "session/new", params).await;
+        let tools = self.tools.get().cloned().flatten();
+        let result = match answered {
+            Ok(result) => result,
+            Err(e) => {
+                if let (Some(tools), Some(token)) = (&tools, &token) {
+                    tools.forget(token);
+                }
+                return Err(e);
+            }
+        };
         let Some(session_id) = result["sessionId"].as_str() else {
             return Err(ErrorObject::new(
                 code::INTERNAL,
                 format!("{} started a conversation without an id.", member.label),
             ));
         };
+        if let (Some(tools), Some(token)) = (&tools, &token) {
+            tools.bind(token, session_id);
+        }
         let mut state = self.lock();
         let mut session = Session::new(&member.id, &runtime_agent);
         session.answered(&result);
@@ -560,8 +892,12 @@ impl Host {
                 .snapshot(&key, how, None)
                 .ok_or_else(|| ErrorObject::new(code::NOT_FOUND, "That conversation was closed."));
         };
+        let (params, _) = self.with_tools(&member, &runtime_agent, agent, Some(&session_id), params).await;
         match member.backend.request(&runtime_agent, how.method(), params).await {
-            Ok(result) => {
+            Ok(mut result) => {
+                if let Some(folder) = member.backend.session_folder(&runtime_agent, &session_id) {
+                    result["_meta"][META_CWD] = json!(folder.display().to_string());
+                }
                 {
                     let mut state = self.lock();
                     if let Some(session) = state.sessions.get_mut(&key) {
@@ -645,6 +981,27 @@ impl Host {
             .and_then(|s| s.modes.clone())
     }
 
+    /// The folder the conversation `session` of `agent` works in: where it
+    /// moved, else its agent's.
+    pub async fn folder(&self, agent: &str, session: &str) -> Option<String> {
+        let (member, moved) = {
+            let state = self.lock();
+            let s = state.sessions.get(&(agent.to_owned(), session.to_owned()));
+            (s.map(|s| (s.member.clone(), s.runtime_agent.clone())), s.and_then(|s| s.folder.clone()))
+        };
+        if moved.is_some() {
+            return moved;
+        }
+        let (member, runtime_agent) = match member {
+            Some(found) => found,
+            None => self.locate(agent).await.ok().map(|(m, r)| (m.id, r))?,
+        };
+        if let Some(folder) = self.backend(&member).and_then(|b| b.session_folder(&runtime_agent, session)) {
+            return Some(folder.display().to_string());
+        }
+        self.current().await.into_iter().find(|a| a.id == agent).and_then(|a| a.folder)
+    }
+
     /// ACP `session/list` on `agent`.
     pub async fn list_sessions(&self, agent: &str, params: Value) -> Result<Value, ErrorObject> {
         let (member, runtime_agent) = self.locate(agent).await?;
@@ -680,6 +1037,9 @@ impl Host {
                 Some(json!({ "sessionUpdate": "config_option_update", "configOptions": result["configOptions"] }))
             }
             "session/close" | "session/delete" => {
+                if let Some(Some(tools)) = self.tools.get() {
+                    tools.forget_session(&key.0, Some(&key.1));
+                }
                 self.resolve_session(&mut state, &key, None);
                 Self::forget(&mut state, &key);
                 Self::emit(&mut state, &self.events, Event::Closed { agent: key.0.clone(), session_id });
@@ -1081,6 +1441,56 @@ impl Host {
     }
 }
 
+/// The folder `path` names, for a conversation working in `here`: `~` is
+/// `home`, a relative path is inside `here`. It must exist unless `create`
+/// (then it is made), be a folder, and be inside `home` unless
+/// `full_access`. The error is plain, for the agent to relay.
+pub fn resolve_folder(path: &str, home: Option<&Path>, here: &Path, create: bool, full_access: bool) -> Result<PathBuf, String> {
+    let path = path.trim();
+    let named = match (path, path.strip_prefix("~/"), home) {
+        ("~", _, Some(home)) => home.to_path_buf(),
+        (_, Some(rest), Some(home)) => home.join(rest),
+        _ if path.starts_with('~') => return Err(format!("{path} isn't a folder on this computer. Name it with its full path.")),
+        _ => here.join(path),
+    };
+    if !named.exists() {
+        if !create {
+            return Err(format!(
+                "There's no folder {}. If the owner asked for a new folder, call move_to_folder again with create: true.",
+                named.display()
+            ));
+        }
+        std::fs::create_dir_all(&named).map_err(|e| format!("Could not make the folder {}: {e}", named.display()))?;
+    }
+    let folder = named.canonicalize().map_err(|e| format!("Could not use the folder {}: {e}", named.display()))?;
+    if !folder.is_dir() {
+        return Err(format!("{} is a file, not a folder.", folder.display()));
+    }
+    if !full_access {
+        let home = home
+            .and_then(|h| h.canonicalize().ok())
+            .ok_or("This user has no home folder, so only an employee with Full access can move.")?;
+        if !folder.starts_with(&home) {
+            return Err(format!(
+                "{} is outside the home folder ({}). In this permission mode the work stays inside the home folder; with Full access it can go anywhere.",
+                folder.display(),
+                home.display()
+            ));
+        }
+    }
+    Ok(folder)
+}
+
+/// A folder as the owner reads it: under the home folder, from `~`.
+fn shown_folder(folder: &Path, home: Option<&Path>) -> String {
+    let home = home.and_then(|h| h.canonicalize().ok());
+    match home.as_deref().and_then(|h| folder.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => folder.display().to_string(),
+    }
+}
+
 fn not_open() -> ErrorObject {
     ErrorObject::new(code::NOT_FOUND, "Load the session on this connection first.")
 }
@@ -1111,6 +1521,36 @@ fn unix_now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_to_move_to_is_the_owners_and_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let foo = home.join("workspaces").join("foo");
+        std::fs::create_dir_all(&foo).unwrap();
+        let home = home.canonicalize().unwrap();
+        let here = home.join("NeboAI").join("claude-code");
+        let foo = foo.canonicalize().unwrap();
+        assert_eq!(resolve_folder("~/workspaces/foo", Some(&home), &here, false, false).unwrap(), foo);
+        assert_eq!(resolve_folder(&foo.display().to_string(), Some(&home), &here, false, false).unwrap(), foo);
+        let missing = resolve_folder("~/workspaces/bar", Some(&home), &here, false, false).unwrap_err();
+        assert!(missing.starts_with("There's no folder") && missing.contains("create: true"), "{missing}");
+        assert!(!home.join("workspaces/bar").exists(), "nothing is made unless asked");
+        let made = resolve_folder("~/workspaces/bar", Some(&home), &here, true, false).unwrap();
+        assert!(made.is_dir() && made.ends_with("workspaces/bar"));
+        let outside = root.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let refused = resolve_folder(&outside.display().to_string(), Some(&home), &here, false, false).unwrap_err();
+        assert!(refused.contains("outside the home folder") && refused.contains("Full access"), "{refused}");
+        assert_eq!(
+            resolve_folder(&outside.display().to_string(), Some(&home), &here, false, true).unwrap(),
+            outside.canonicalize().unwrap()
+        );
+        std::fs::write(home.join("notes.txt"), "x").unwrap();
+        assert!(resolve_folder("~/notes.txt", Some(&home), &here, false, false).unwrap_err().ends_with("is a file, not a folder."));
+        assert_eq!(shown_folder(&foo, Some(&home)), "~/workspaces/foo");
+        assert_eq!(shown_folder(&outside, Some(&home)), outside.display().to_string());
+    }
 
     #[test]
     fn usage_reads_the_prompt_response() {

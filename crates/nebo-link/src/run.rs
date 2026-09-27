@@ -64,8 +64,9 @@ const RELOAD_EVERY: Duration = Duration::from_secs(2);
 /// Shared by the service's tasks.
 struct Service {
     dir: BotDir,
-    /// The link as last read: what CONNECT announces.
-    link: Mutex<Link>,
+    /// The link as last read: what CONNECT announces. The host's keeper
+    /// updates it with each agent the host adds or removes.
+    link: Arc<Mutex<Link>>,
     token: watch::Receiver<String>,
     /// Serializes model toggles.
     toggling: tokio::sync::Mutex<()>,
@@ -280,6 +281,10 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     }
 
     let (contract, host) = link::chat(&dir, &link, &installs, token_rx.clone()).await;
+    // Agents added and removed through the host (Open Agent Link, the phone
+    // contract) go into the link's file, as the CLI's do.
+    let current = Arc::new(Mutex::new(link.clone()));
+    host.set_keeper(Arc::new(link::Keeper::new(&dir, Some(current.clone()))));
     let settings = Oal {
         relay: oal.relay.or(link.oal.relay.clone()),
         lan: oal.lan.or(link.oal.lan.clone()),
@@ -303,7 +308,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     }
     let service = Arc::new(Service {
         dir: dir.clone(),
-        link: Mutex::new(link.clone()),
+        link: current,
         token: token_rx.clone(),
         toggling: tokio::sync::Mutex::new(()),
         online: online_rx.clone(),

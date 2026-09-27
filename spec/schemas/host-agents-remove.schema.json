@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-agents-remove.schema.json",
+  "title": "host/agents/remove",
+  "description": "Stops hosting an agent the host can remove. Its folder and everything in it stay. Request, client to host; only a paired device may send it.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "agentId": {
+          "$ref": "defs.schema.json#/$defs/AgentId"
+        }
+      },
+      "required": [
+        "agentId"
+      ]
+    },
+    "result": {
+      "type": "object"
+    }
+  }
+}
