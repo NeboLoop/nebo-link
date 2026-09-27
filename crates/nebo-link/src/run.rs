@@ -178,6 +178,10 @@ impl Control for Service {
         })
     }
 
+    fn oal(&self) -> Option<Arc<oal_host::OalHost>> {
+        self.oal.as_ref().map(|oal| oal.host.clone())
+    }
+
     async fn set_models(&self, enabled: bool) -> std::result::Result<serde_json::Value, String> {
         let _one_at_a_time = self.toggling.lock().await;
         match link::set_models(&self.dir, self.token.clone(), enabled).await {

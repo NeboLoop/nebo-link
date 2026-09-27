@@ -5,7 +5,8 @@
 //! - refuses anything without that stamp, so only hub-authenticated requests
 //!   reach the runtime (a local program can reach the proxy's port, never
 //!   the stamp);
-//! - serves the link's own endpoints under `/_link/`, and the chat contract
+//! - serves the link's own endpoints under `/_link/`, Open Agent Link on
+//!   `/oal` ([`crate::oal::upgrade`]), and the chat contract
 //!   ([`crate::contract`]) on `/health`, `/api/v1/*` and `/ws` when the
 //!   runtime has a backend for it;
 //! - forwards everything else to the runtime's UI with the path and headers
@@ -94,6 +95,11 @@ pub trait Control: Send + Sync + 'static {
     fn status(&self) -> serde_json::Value;
     /// `POST /_link/models {"enabled": bool}`: turn NeboAI models on or off.
     fn set_models(&self, enabled: bool) -> impl Future<Output = Result<serde_json::Value, String>> + Send;
+    /// The bot's Open Agent Link host, served on `/oal` and paired with
+    /// through `POST /_link/oal/pair`; `None` while it isn't running.
+    fn oal(&self) -> Option<Arc<oal_host::OalHost>> {
+        None
+    }
 }
 
 /// Binds `addr`, refusing anything but a loopback address.
@@ -165,6 +171,13 @@ async fn handle<C: Control>(
     if path == "/_link" || path.starts_with("/_link/") {
         return Ok(link_endpoint(req, control.as_ref()).await);
     }
+    if path == "/oal" {
+        let mut req = req;
+        return Ok(match control.oal() {
+            Some(oal) => crate::oal::upgrade(oal, &mut req),
+            None => text(StatusCode::SERVICE_UNAVAILABLE, "Open Agent Link isn't running on this computer."),
+        });
+    }
     if let Some(contract) = &contract
         && contract::routes(path)
     {
@@ -199,6 +212,13 @@ async fn link_endpoint<C: Control>(req: Request<Incoming>, control: &C) -> Respo
                 Err(error) => json(StatusCode::BAD_GATEWAY, &serde_json::json!({ "error": error })),
             }
         }
+        (&Method::POST, "/_link/oal/pair") => match control.oal() {
+            Some(oal) => crate::oal::bootstrap(&oal).await,
+            None => json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &serde_json::json!({ "error": "Open Agent Link isn't running on this computer." }),
+            ),
+        },
         _ => text(StatusCode::NOT_FOUND, "not found"),
     }
 }

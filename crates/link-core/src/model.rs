@@ -186,7 +186,8 @@ pub struct PendingRequest {
 }
 
 /// A permission request as the owner reads it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Words {
     /// The question on the card ("Hermes asks to run:\nrm -rf ./scratch").
     pub question: String,

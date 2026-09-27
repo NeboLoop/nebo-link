@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 link-core = { workspace = true }
 oal-host = { path = "../oal-host" }
+oal-secure = { path = "../oal-secure" }
 oal-relay = { path = "../oal-relay", default-features = false }
 nebo-runtimes = { workspace = true, features = ["preserve-order"] }
 nebo-comm = { workspace = true }

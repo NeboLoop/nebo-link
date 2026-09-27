@@ -161,7 +161,7 @@ pub async fn host(dir: &Path) -> Arc<OalHost> {
             host_id: "h-test".into(),
             host_name: "Test Host".into(),
             software: ("oal-host tests".into(), "0".into()),
-            keys: dir.join("keys"),
+            keys: oal_secure::KeyStore::open(dir.join("keys")).unwrap(),
             seen_file: dir.join("seen.json"),
             runtimes: Arc::new(|| {
                 vec![Runtime {

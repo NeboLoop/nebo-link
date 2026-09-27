@@ -1,7 +1,16 @@
 //! Open Agent Link beside NeboAI: the service serves the bot's agents to OAL
-//! clients (`oal_host`), end-to-end encrypted, through a relay it dials out
-//! to (a self-hosted `oal-relay`) and, when the owner turns it on, directly
-//! on the LAN. The bot's id is the host's id and its name the host's name.
+//! clients (`oal_host`), end-to-end encrypted, through NeboAI's tunnel
+//! (`/t/<botId>/oal`, [`upgrade`]), through a relay it dials out to (a
+//! self-hosted `oal-relay`) and, when the owner turns it on, directly on the
+//! LAN. The bot's id is the host's id and its name the host's name.
+//!
+//! An app of the owner's that reaches the bot through NeboAI (Nebo, for the
+//! bot's agents it hired) pairs without the owner: it asks for a code on the
+//! tunnel ([`bootstrap`], `POST /_link/oal/pair`), which only the owner's
+//! own requests reach, and pairs with it at once over `/oal`. The code is
+//! made here and used once; CPace and Noise turn it into keys that never
+//! leave the two ends, so NeboAI, which carried the code, carries only
+//! ciphertext after.
 //!
 //! The service owns the host's keys; the CLI asks it for what needs them
 //! through the bot's `oal/` folder (owner-only): `nebo-link pair` writes a
@@ -19,11 +28,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hyper::body::Incoming;
+use hyper::header::{self, HeaderValue};
+use hyper::{Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use link_core::host::Host;
-use oal_host::{Config, OalHost, Runtime as OalRuntime};
+use oal_host::{Config, OalHost, Runtime as OalRuntime, Via};
 use serde::{Deserialize, Serialize};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 
 use crate::error::{Error, Result};
+use crate::proxy::{Body, full, json, text};
 use crate::install::{runtime_key, runtime_name};
 use crate::state::{BotDir, Link, Oal, read_json, write_json};
 
@@ -153,11 +170,14 @@ fn runtimes(link: &Link) -> Vec<OalRuntime> {
 pub async fn start(bot: &BotDir, link: &Link, host: Arc<Host>, settings: Oal) -> Result<Service> {
     let folder = dir(bot);
     let links = bot.clone();
+    let keys_dir = folder.join("keys");
+    let keys = oal_secure::KeyStore::open(&keys_dir)
+        .map_err(|e| Error::Message(format!("could not open the host's keys in {}: {e}", keys_dir.display())))?;
     let config = Config {
         host_id: link.bot_id.clone(),
         host_name: link.name.clone(),
         software: ("nebo-link".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
-        keys: folder.join("keys"),
+        keys,
         seen_file: folder.join("seen.json"),
         runtimes: Arc::new(move || links.load().map(|link| runtimes(&link)).unwrap_or_default()),
     };
@@ -191,6 +211,65 @@ pub async fn start(bot: &BotDir, link: &Link, host: Arc<Host>, settings: Oal) ->
         settings,
         lan,
     })
+}
+
+/// `WS /oal` through NeboAI's tunnel: the upgrade answered (with the `oal`
+/// subprotocol when offered, spec 4.1), then the connection served as any
+/// other, end-to-end encrypted, a pairing or a session.
+pub fn upgrade(oal: Arc<OalHost>, req: &mut hyper::Request<Incoming>) -> Response<Body> {
+    let upgrading = req
+        .headers()
+        .get(header::UPGRADE)
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+    let Some(key) = req.headers().get(header::SEC_WEBSOCKET_KEY).filter(|_| upgrading) else {
+        return text(StatusCode::BAD_REQUEST, "Open Agent Link is a WebSocket at /oal.");
+    };
+    let accept = derive_accept_key(key.as_bytes());
+    let offered = req
+        .headers()
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|p| p.trim() == "oal"));
+    let upgrade = hyper::upgrade::on(req);
+    tokio::spawn(async move {
+        match upgrade.await {
+            Ok(upgraded) => {
+                let config = WebSocketConfig::default()
+                    .max_message_size(Some(oal_host::MAX_FRAME + 1024))
+                    .max_frame_size(Some(oal_host::MAX_FRAME + 1024));
+                let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config)).await;
+                oal.serve(oal_host::wire::websocket(socket), Via::Tunnel).await;
+            }
+            Err(e) => tracing::info!(error = %e, "oal: an upgrade through the tunnel failed"),
+        }
+    });
+    let mut resp = Response::new(full(""));
+    *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    let headers = resp.headers_mut();
+    headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    if let Ok(accept) = HeaderValue::from_str(&accept) {
+        headers.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
+    }
+    if offered {
+        headers.insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("oal"));
+    }
+    resp
+}
+
+/// `POST /_link/oal/pair`: a one-time pairing code for an app of the
+/// owner's that reaches this bot through NeboAI, to pair with at once over
+/// `/oal`. Only a request NeboAI authenticated as the owner's (the tunnel's
+/// stamp) gets here. The code replaces any other showing, works once and
+/// for at most [`oal_host::CODE_LIFETIME`].
+pub async fn bootstrap(oal: &OalHost) -> Response<Body> {
+    match oal.pairing_code().await {
+        Ok(code) => {
+            tracing::info!(nameplate = code.nameplate(), "oal: a pairing code was issued through NeboAI");
+            json(StatusCode::OK, &serde_json::json!({ "code": code.to_string(), "hostId": oal.host_id() }))
+        }
+        Err(e) => json(StatusCode::BAD_GATEWAY, &serde_json::json!({ "error": e })),
+    }
 }
 
 /// Answers the CLI's requests while the service runs.

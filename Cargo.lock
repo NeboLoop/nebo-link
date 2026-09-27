@@ -1466,6 +1466,7 @@ dependencies = [
  "nebo-updater",
  "oal-host",
  "oal-relay",
+ "oal-secure",
  "reqwest",
  "serde",
  "serde_json",
