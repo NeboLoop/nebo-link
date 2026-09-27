@@ -33,6 +33,11 @@ enum Command {
         /// The id the host gave the `oal-conformance agent` agent.
         #[arg(long)]
         agent: String,
+        /// The runtime the host detects `oal-conformance agent` installed as,
+        /// which `host/agents/add` adds more of (`host/info` `runtimes`, with
+        /// `addable`).
+        #[arg(long, default_value = fake_host::RUNTIME)]
+        runtime: String,
         /// The relay's pairing endpoint, `wss://<relay>/oal/pair`. The suite
         /// appends the code's nameplate (its first four characters); the rest
         /// of the code never goes in the URL. Without it, pairing goes to `url`.
@@ -82,6 +87,7 @@ async fn main() -> ExitCode {
             url,
             code,
             agent,
+            runtime,
             pair_url,
             headers,
             only,
@@ -124,6 +130,7 @@ async fn main() -> ExitCode {
                 known: vec![
                     ("code".into(), Value::String(code)),
                     ("agent".into(), Value::String(agent)),
+                    ("runtime".into(), Value::String(runtime)),
                 ],
                 e2e,
                 relay,

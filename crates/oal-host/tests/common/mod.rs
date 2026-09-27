@@ -22,6 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 
 /// The agent's id on the host.
 pub const AGENT: &str = "fake";
+/// The runtime it is installed as, which a device can add more agents of.
+pub const RUNTIME: &str = oal_conformance::fake_host::RUNTIME;
 
 /// The scripted agent over channels, speaking ACP as a process would.
 pub struct FakeAcp {
@@ -199,7 +201,7 @@ impl Keeper for TestKeeper {
 
     fn addable(&self) -> Vec<Installable> {
         vec![Installable {
-            id: "oal-fake-agent".into(),
+            id: RUNTIME.into(),
             name: "Fake Agent".into(),
             agent: AcpAgent::Other,
             command: scripted_command(),
@@ -211,7 +213,7 @@ impl Keeper for TestKeeper {
             .lock()
             .unwrap()
             .iter()
-            .map(|a| Kept { id: a.id.clone(), label: a.label.clone(), runtime: "oal-fake-agent".into(), folder: Some(a.acp.workdir.clone()) })
+            .map(|a| Kept { id: a.id.clone(), label: a.label.clone(), runtime: RUNTIME.into(), folder: Some(a.acp.workdir.clone()) })
             .collect()
     }
 
@@ -226,7 +228,7 @@ impl Keeper for TestKeeper {
             chats_file: self.dir.join("agents").join(&agent.id).join("acp-chats.json"),
             client: CLIENT,
         });
-        Ok(Member { id: agent.id.clone(), label: agent.label.clone(), runtime: "oal-fake-agent".into(), backend: Arc::new(backend) })
+        Ok(Member { id: agent.id.clone(), label: agent.label.clone(), runtime: RUNTIME.into(), backend: Arc::new(backend) })
     }
 
     fn forget(&self, id: &str) -> Result<(), String> {
@@ -246,7 +248,7 @@ pub async fn host(dir: &Path) -> Arc<OalHost> {
     let member = Member {
         id: AGENT.into(),
         label: "Fake Agent".into(),
-        runtime: "oal-fake-agent".into(),
+        runtime: RUNTIME.into(),
         backend: FakeAcp::start(),
     };
     let host = Host::new(Arc::new(Roster::new(vec![member])));
@@ -262,7 +264,7 @@ pub async fn host(dir: &Path) -> Arc<OalHost> {
             seen_file: dir.join("seen.json"),
             runtimes: Arc::new(|| {
                 vec![Runtime {
-                    id: "oal-fake-agent".into(),
+                    id: RUNTIME.into(),
                     name: "Fake Agent".into(),
                     kind: "acp".into(),
                     version: None,
