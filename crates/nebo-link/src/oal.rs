@@ -157,6 +157,7 @@ fn runtimes(link: &Link) -> Vec<OalRuntime> {
                 other => runtime_key(other).to_owned(),
             },
             version: None,
+            addable: false,
         })
         .collect();
     all.sort_by(|a, b| a.id.cmp(&b.id));

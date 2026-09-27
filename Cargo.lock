@@ -1298,9 +1298,14 @@ checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 name = "link-core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "dirs",
  "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "nebo-runtimes",
+ "oal-conformance",
  "serde",
  "serde_json",
  "tempfile",
@@ -1652,6 +1657,7 @@ dependencies = [
  "getrandom 0.2.17",
  "link-core",
  "mdns-sd",
+ "nebo-runtimes",
  "oal-conformance",
  "oal-relay",
  "oal-secure",

@@ -27,5 +27,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+nebo-runtimes = { workspace = true }
 oal-conformance = { path = "../oal-conformance" }
 oal-relay = { path = "../oal-relay" }

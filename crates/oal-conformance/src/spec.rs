@@ -20,6 +20,7 @@ macro_rules! example {
 pub const EXAMPLES: &[Example] = &[
     example!("pair"),
     example!("agents"),
+    example!("add-remove"),
     example!("prompt-permission"),
     example!("reconnect"),
     example!("turn-ended-while-away"),
@@ -48,6 +49,8 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     schema!("error.schema.json"),
     schema!("frame.schema.json"),
     schema!("host-agent-update.schema.json"),
+    schema!("host-agents-add.schema.json"),
+    schema!("host-agents-remove.schema.json"),
     schema!("host-agents.schema.json"),
     schema!("host-answer.schema.json"),
     schema!("host-devices.schema.json"),

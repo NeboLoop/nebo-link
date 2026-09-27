@@ -67,6 +67,32 @@ pub struct Runtime {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// `host/agents/add` adds an agent of it (a coding agent installed on
+    /// the host).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub addable: bool,
+}
+
+impl Runtime {
+    /// The runtimes the host runs (`hosted`) and the coding agents it can
+    /// add ([`Host::addable`]): one entry per runtime.
+    fn with_addable(hosted: Vec<Runtime>, host: &Host) -> Vec<Runtime> {
+        let mut all = hosted;
+        for addable in host.addable() {
+            match all.iter_mut().find(|r| r.id == addable.id) {
+                Some(runtime) => runtime.addable = true,
+                None => all.push(Runtime {
+                    id: addable.id.to_owned(),
+                    name: addable.name.to_owned(),
+                    kind: "acp".to_owned(),
+                    version: None,
+                    addable: true,
+                }),
+            }
+        }
+        all.sort_by(|a, b| a.id.cmp(&b.id));
+        all
+    }
 }
 
 /// Who the host is and where it keeps its state.
@@ -83,7 +109,8 @@ pub struct Config {
     pub keys: KeyStore,
     /// When each device was last seen.
     pub seen_file: PathBuf,
-    /// The runtimes the host runs, asked each time `host/info` is.
+    /// The runtimes the host runs, asked each time `host/info` is; the
+    /// coding agents it can add are listed with them.
     pub runtimes: Arc<dyn Fn() -> Vec<Runtime> + Send + Sync>,
 }
 
@@ -197,7 +224,7 @@ impl OalHost {
         if let Some(fingerprint) = &self.lock().fingerprint {
             host["tlsFingerprint"] = json!(fingerprint);
         }
-        let mut runtimes = (self.config.runtimes)();
+        let mut runtimes = Runtime::with_addable((self.config.runtimes)(), &self.host);
         runtimes.dedup_by(|a, b| a.id == b.id);
         json!({
             "host": host,

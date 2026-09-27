@@ -18,6 +18,10 @@
 //!   Nebo's clients speak Open Agent Link.
 //! - [`machine`] says who hosts this computer's agents: one host per
 //!   computer per OS user.
+//! - [`keep`]: adding and removing coding agents, each in a folder of its
+//!   own, kept by the embedder's [`keep::Keeper`].
+//! - [`tools`]: the host's own MCP server, given to every coding agent's
+//!   session (`move_to_folder`).
 //!
 //! ```no_run
 //! # async fn example(member: link_core::roster::Member) {
@@ -49,11 +53,13 @@ pub mod adapter;
 pub mod backend;
 pub mod hermes;
 pub mod host;
+pub mod keep;
 pub mod machine;
 pub mod model;
 pub mod openclaw;
 pub mod phone;
 pub mod roster;
+pub mod tools;
 pub mod turn;
 
 /// The id of a host's first agent, which Nebo's phone finds its primary

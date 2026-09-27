@@ -6,6 +6,7 @@
 //! Open Agent Link client, or the phone contract.
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -164,4 +165,34 @@ pub trait Backend: Send + Sync + 'static {
         agent: &'a str,
         session: Option<&'a str>,
     ) -> BoxFuture<'a, Result<String, Error>>;
+
+    /// Moves the conversation `session` of `agent` to work in `folder`: the
+    /// agent starts a new session there (with `mcp`, the MCP servers the
+    /// host gives it), and the conversation continues in it from its next
+    /// prompt, whose first context is `handoff`. The conversation keeps its
+    /// id: what names it reaches the new session, and what the new session
+    /// sends names it. A runtime without folders can't.
+    fn move_session<'a>(
+        &'a self,
+        agent: &'a str,
+        session: &'a str,
+        folder: &'a Path,
+        handoff: &'a str,
+        mcp: Vec<Value>,
+    ) -> BoxFuture<'a, Result<(), ErrorObject>> {
+        let _ = (agent, session, folder, handoff, mcp);
+        Box::pin(async {
+            Err(ErrorObject::new(
+                crate::model::code::NOT_PERMITTED,
+                "This agent works without a folder, so it can't move to one.",
+            ))
+        })
+    }
+
+    /// The folder the conversation `session` works in, once it moved
+    /// ([`Backend::move_session`]); `None` is the agent's own.
+    fn session_folder(&self, agent: &str, session: &str) -> Option<PathBuf> {
+        let _ = (agent, session);
+        None
+    }
 }

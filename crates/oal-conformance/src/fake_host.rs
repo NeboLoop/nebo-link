@@ -1,5 +1,8 @@
 //! A fake OAL host: one agent (`fake`, the [`crate::fake_agent`]) behind the
-//! full host layer, for testing clients. It follows `spec/oal-0.1.md`
+//! full host layer, for testing clients. A device can add more agents of the
+//! runtime `oal-fake-agent` and remove them (`host/agents/add`,
+//! `host/agents/remove`); those are listed and announced, and only `fake`
+//! takes prompts. It follows `spec/oal-0.1.md`
 //! sections 4–12: pairing and hello, the host methods, the ACP rules for
 //! many clients on one agent, turns, pending permission requests (first
 //! answer wins), heartbeat and resuming.
@@ -295,6 +298,8 @@ struct Host {
     pending: Vec<Pending>,
     resolved: HashSet<String>,
     counter: u64,
+    /// The agents a device added, by id, with their folders.
+    added: Vec<(String, String)>,
 }
 
 impl Host {
@@ -313,6 +318,7 @@ impl Host {
             pending: Vec::new(),
             resolved: HashSet::new(),
             counter: 0,
+            added: Vec::new(),
         };
         // As section 8 says: no fs, no terminal, no elicitation.
         host.send_agent(Origin::Init, "initialize", json!({
@@ -359,7 +365,7 @@ impl Host {
             "software": { "name": "oal-conformance", "version": env!("CARGO_PKG_VERSION") },
             "protocol": { "min": PROTOCOL, "max": PROTOCOL },
             "acp": { "protocolVersion": 1 },
-            "runtimes": [{ "id": "oal-fake-agent", "name": "Fake Agent", "kind": "acp", "version": env!("CARGO_PKG_VERSION") }],
+            "runtimes": [{ "id": "oal-fake-agent", "name": "Fake Agent", "kind": "acp", "version": env!("CARGO_PKG_VERSION"), "addable": true }],
             "maxFrameBytes": MAX_FRAME,
             "attachments": { "schemes": [], "maxBytes": 0 }
         })
@@ -368,6 +374,49 @@ impl Host {
     fn agent(&self) -> Value {
         json!({ "id": AGENT, "label": "Fake Agent", "runtime": "oal-fake-agent", "folder": FOLDER, "online": true,
             "capabilities": self.agent_init["agentCapabilities"], "modes": crate::fake_agent::modes("ask") })
+    }
+
+    /// Every agent: `fake`, then the ones a device added.
+    fn agents(&self) -> Vec<Value> {
+        let mut all = vec![self.agent()];
+        for (id, folder) in &self.added {
+            let mut agent = self.agent();
+            agent["id"] = json!(id);
+            agent["folder"] = json!(folder);
+            all.push(agent);
+        }
+        all
+    }
+
+    /// `host/agents/add` (section 7.4): a new agent of `oal-fake-agent` in a
+    /// folder of its own.
+    fn add_agent(&mut self, params: &Value) -> Result<Value, (i64, String)> {
+        let runtime = params["runtime"].as_str().unwrap_or("");
+        if runtime != "oal-fake-agent" {
+            return Err((code::NOT_PERMITTED, format!("{runtime} isn't a coding agent this computer can add.")));
+        }
+        let n = self.added.len() + 2;
+        let id = format!("{AGENT}-{n}");
+        self.added.push((id.clone(), format!("{FOLDER}-{n}")));
+        let agent = self.agents().pop().expect("the new agent");
+        self.notify_all("host/agent_update", json!({ "change": "added", "agent": agent }));
+        Ok(json!({ "agent": agent }))
+    }
+
+    /// `host/agents/remove` (section 7.4): an agent a device added. Its
+    /// folder stays.
+    fn remove_agent(&mut self, params: &Value) -> Result<Value, (i64, String)> {
+        let id = params["agentId"].as_str().unwrap_or("");
+        let Some(index) = self.added.iter().position(|(a, _)| a == id) else {
+            return Err(match id == AGENT {
+                true => (code::NOT_PERMITTED, "Fake Agent is removed on the computer itself.".to_owned()),
+                false => (code::UNKNOWN_AGENT, format!("There's no agent called {id} on {}.", self.config.host_name)),
+            });
+        };
+        let agent = self.agents().remove(index + 1);
+        self.added.remove(index);
+        self.notify_all("host/agent_update", json!({ "change": "removed", "agent": agent }));
+        Ok(json!({}))
     }
 
     // ---- sending ----
@@ -546,7 +595,9 @@ impl Host {
             "host/hello" => return self.hello(conn, id, params),
             "host/pair" => return self.pair(conn, id, params),
             "host/info" => Ok(self.info()),
-            "host/agents" => Ok(json!({ "agents": [self.agent()] })),
+            "host/agents" => Ok(json!({ "agents": self.agents() })),
+            "host/agents/add" => self.add_agent(params),
+            "host/agents/remove" => self.remove_agent(params),
             "host/ping" => Ok(json!({})),
             "host/pending" => Ok(
                 json!({ "requests": self.pending.iter().map(Pending::describe).collect::<Vec<_>>() }),

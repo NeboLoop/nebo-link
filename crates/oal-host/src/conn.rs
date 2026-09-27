@@ -397,6 +397,34 @@ impl Connection {
                 let agents = self.list().await;
                 Ok(json!({ "agents": agents }))
             }
+            // Only a paired device (or the app hosting this computer, in its
+            // own process) gets this far: adding and removing agents is the
+            // owner's, from any of his devices.
+            "host/agents/add" => match params["runtime"].as_str().filter(|r| !r.is_empty()) {
+                Some(runtime) => {
+                    let add = link_core::keep::Add {
+                        runtime: runtime.to_owned(),
+                        label: params["label"].as_str().map(str::to_owned),
+                        ..Default::default()
+                    };
+                    let added = self.oal.host().add_agent(add).await;
+                    if let Ok(agent) = &added {
+                        tracing::info!(device = %self.device.device_id, agent = %agent.id, "oal: a device added an agent");
+                    }
+                    added.map(|agent| json!({ "agent": agent }))
+                }
+                None => Err(ErrorObject::new(code::INVALID_PARAMS, "host/agents/add needs a runtime.")),
+            },
+            "host/agents/remove" => match params["agentId"].as_str().filter(|a| !a.is_empty()) {
+                Some(agent) => {
+                    let removed = self.oal.host().remove_agent(agent).await;
+                    if removed.is_ok() {
+                        tracing::info!(device = %self.device.device_id, agent, "oal: a device removed an agent");
+                    }
+                    removed.map(|_| json!({}))
+                }
+                None => Err(ErrorObject::new(code::INVALID_PARAMS, "host/agents/remove needs an agentId.")),
+            },
             "host/pending" => Ok(json!({ "requests": self.oal.host().pending() })),
             "host/answer" => {
                 let id = params["id"].as_str().unwrap_or("");

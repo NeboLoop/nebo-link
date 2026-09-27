@@ -271,6 +271,8 @@ impl Contract {
         match (method, segments.as_slice()) {
             ("GET", ["api", "v1", "agents"]) => self.agents().await,
             ("GET", ["api", "v1", "agents", id]) => self.agent(id).await,
+            ("DELETE", ["api", "v1", "agents", id]) => self.remove_agent(id).await,
+            ("POST", ["api", "v1", "runtimes", runtime, "agents"]) => self.add_agent(runtime).await,
             ("GET", ["api", "v1", "agents", id, "chats"]) => self.chats(id).await,
             ("POST", ["api", "v1", "agents", id, "chats"]) => self.create_chat(id).await,
             ("GET", ["api", "v1", "chats", id]) => self.chat_model(id).await,
@@ -289,11 +291,31 @@ impl Contract {
         }
     }
 
-    /// The hosted agents as employee rows, the first as `assistant`.
+    /// The hosted agents as employee rows, the first as `assistant`, and
+    /// the coding agents this computer can add (`runtimes`).
     async fn agents(&self) -> Result<Value, Refusal> {
         let agents = self.roster_agents().await?;
         let rows: Vec<Value> = agents.iter().map(|a| employee(a, &a.id)).collect();
-        Ok(json!({ "agents": rows, "primaryChristened": true }))
+        Ok(json!({ "agents": rows, "primaryChristened": true, "runtimes": self.host.addable() }))
+    }
+
+    /// `POST /api/v1/runtimes/{runtime}/agents`: a new coding agent of
+    /// `runtime`, in a folder of its own, as its employee row.
+    async fn add_agent(&self, runtime: &str) -> Result<Value, Refusal> {
+        let add = crate::keep::Add {
+            runtime: runtime.to_owned(),
+            ..Default::default()
+        };
+        let added = self.host.add_agent(add).await.map_err(|e| refuse_change(&e))?;
+        let (agent, _) = self.resolve(&added.id).await?;
+        Ok(json!({ "agent": employee(&agent, &added.id) }))
+    }
+
+    /// `DELETE /api/v1/agents/{id}`: the agent is no longer hosted; its
+    /// folder stays.
+    async fn remove_agent(&self, id: &str) -> Result<Value, Refusal> {
+        let removed = self.host.remove_agent(id).await.map_err(|e| refuse_change(&e))?;
+        Ok(json!({ "removed": removed.id }))
     }
 
     async fn agent(&self, id: &str) -> Result<Value, Refusal> {
@@ -353,7 +375,10 @@ impl Contract {
     async fn chat_model(&self, chat: &str) -> Result<Value, Refusal> {
         for (agent, session) in self.owners_of(chat).await? {
             match self.host.model(&agent.id, Some(&session)).await {
-                Ok(model) => return Ok(json!({ "id": chat, "model": model })),
+                Ok(model) => {
+                    let folder = self.host.folder(&agent.id, &session).await;
+                    return Ok(json!({ "id": chat, "model": model, "folder": folder }));
+                }
                 Err(Error::NotFound(_)) => continue,
                 Err(e) => return Err(self.refuse(e)),
             }
@@ -1184,6 +1209,17 @@ fn with(mut data: Value, fields: Value) -> Value {
 }
 
 /// An employee row as `Employee.fromJson` reads it.
+/// A refused add or removal, with its status.
+fn refuse_change(e: &ErrorObject) -> Refusal {
+    let status = match e.code {
+        code::UNKNOWN_AGENT => 404,
+        code::NOT_PERMITTED => 400,
+        code::AGENT_UNAVAILABLE => 502,
+        _ => 500,
+    };
+    Refusal::new(status, e.message.clone())
+}
+
 fn employee(agent: &Agent, id: &str) -> Value {
     json!({
         "id": id,

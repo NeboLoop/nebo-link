@@ -130,6 +130,10 @@
               },
               "version": {
                 "type": "string"
+              },
+              "addable": {
+                "type": "boolean",
+                "description": "host/agents/add adds an agent of this runtime: a coding agent installed on the host. Absent means false."
               }
             },
             "required": [

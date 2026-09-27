@@ -18,8 +18,8 @@ Open Agent Link lets a client drive agents on another computer. The client can b
 | Transport binding: ACP JSON-RPC over an authenticated WebSocket, one channel per agent, through a relay or directly on a LAN | 4 |
 | Handshake and versioning: `host/hello` | 5, 13 |
 | Pairing and device identity: `host/pair`, `host/devices`, `host/unpair` | 6 |
-| Host layer: `host/info`, `host/agents`, `host/agent_update` | 7 |
-| Host behaviour for ACP methods when many clients share one agent | 8 |
+| Host layer: `host/info`, `host/agents`, `host/agent_update`, `host/agents/add`, `host/agents/remove` | 7 |
+| Host behaviour for ACP methods when many clients share one agent, and moving a conversation to another folder | 8 |
 | Turns and usage: `host/turn` | 9 |
 | Permission requests across clients: `host/pending`, `host/answer`, `host/pending_update` | 10 |
 | Presence and heartbeat: `host/ping` | 11 |
@@ -48,7 +48,7 @@ Times are RFC 3339 strings in UTC (`2026-09-26T17:04:05Z`).
 
 ### 1.3 What OAL does not change
 
-An ACP agent does not know it is being reached over OAL. On each agent channel a client sends the requests an ACP client sends and receives what an ACP agent sends. The host adds no fields to ACP types. Where OAL needs to say something ACP has no message for, it uses the host channel (section 4.2).
+An ACP agent does not know it is being reached over OAL. On each agent channel a client sends the requests an ACP client sends and receives what an ACP agent sends. The host adds no fields to ACP types; what it says about a session beyond ACP goes in ACP's own `_meta` (section 8.1). Where OAL needs to say something ACP has no message for, it uses the host channel (section 4.2).
 
 ## 2. Overview
 
@@ -231,7 +231,7 @@ Returns HostInfo. Schema: `schemas/host-info.schema.json`; the type is `HostInfo
 | `software` | `{name, version}` of the host software, for example `{"name":"nebo-link","version":"0.4.0"}`. |
 | `protocol` | `{min, max}`: the OAL versions the host supports. |
 | `acp.protocolVersion` | The ACP protocol version spoken on agent channels (1). |
-| `runtimes` | The runtimes this host can run: `{id, name, kind, version}`. `kind` is `acp` for ACP agents, or the adapter name (`openclaw`, `hermes`). `version` is the runtime's version when known. |
+| `runtimes` | The runtimes this host can run: `{id, name, kind, version, addable}`. `kind` is `acp` for ACP agents, or the adapter name (`openclaw`, `hermes`). `version` is the runtime's version when known. `addable` is true for a runtime `host/agents/add` adds an agent of: a coding agent installed on the host (section 7.4). Absent means false. |
 | `maxFrameBytes` | Section 4.1. |
 | `attachments` | `{schemes, maxBytes}`: the URI schemes the host fetches for files, and the largest file it accepts (section 14). |
 
@@ -256,6 +256,25 @@ Agent:
 
 Sent to every authenticated connection when an agent is added, changes (`online`, `offlineReason`, `label`, `modes`, `capabilities`), or is removed. Params: `{change: "added" | "updated" | "removed", agent: Agent}`. For `removed`, `agent` is its last known state. Schema: `schemas/host-agent-update.schema.json`.
 
+### 7.4 `host/agents/add` and `host/agents/remove`
+
+A paired device can add an agent to the host and remove one. Only a connection authenticated as a paired device (section 6) may send these. A host that doesn't add agents answers `not_permitted`.
+
+`host/agents/add {runtime, label?}` adds an agent of `runtime`, a `runtimes[].id` whose `addable` is true. Schema: `schemas/host-agents-add.schema.json`.
+
+- The client never names a folder. The host gives the new agent a folder of its own that no other agent works in, and makes it. Nebo Link and Nebo use `~/NeboAI/<agent id>`.
+- The host names the agent unless `label` is given: the runtime's name for the first of it ("Claude Code"), numbered after that ("Claude Code 2").
+- The host starts the agent once in its folder, and adds it only if it answers ACP's `initialize`. One that doesn't is refused with `agent_unavailable` and the reason.
+- A runtime that isn't addable is refused with `not_permitted` ("Codex isn't installed on this computer.").
+- Result: `{agent: Agent}`, the new agent as `host/agents` lists it. Every connection receives `host/agent_update` `added`.
+
+`host/agents/remove {agentId}` stops hosting an agent: its running turns are cancelled, its sessions closed, its process ended. Schema: `schemas/host-agents-remove.schema.json`.
+
+- The host MUST NOT delete the agent's folder or anything in it.
+- A host MAY refuse, with `not_permitted`, an agent it removes only on the computer itself (an adapted runtime, or its last agent).
+- An id the host doesn't have gets `unknown_agent`.
+- Result: `{}`. Every connection receives `host/agent_update` `removed`, and every connection attached to one of its sessions is detached.
+
 ## 8. ACP on agent channels
 
 The host is the only ACP client of each agent process. Toward clients it behaves as that agent on the agent channel. Several clients can watch one session. The rules below define what happens when they do.
@@ -268,7 +287,7 @@ The host is the only ACP client of each agent process. Toward clients it behaves
 |---|---|
 | `initialize` (client to host) | The first request on each agent channel. The host answers it itself with the agent's `acp:InitializeResponse`: `protocolVersion` per ACP negotiation, the agent's `agentCapabilities` and `agentInfo`, and `authMethods: []`. The client's `clientCapabilities` are not passed to the agent. The host initializes the agent process with `fs.readTextFile`, `fs.writeTextFile` and `terminal` false and no `elicitation`. The agent then uses its own tools on its own computer, and never sends `fs/*`, `terminal/*` or `elicitation/*`. |
 | `authenticate`, `logout` | Refused with `not_permitted` ("Sign in to Claude Code on the computer itself."). The agent runs under its owner's own sign-in on the host. |
-| `session/new` | Forwarded. For an agent with a `folder`, `cwd` MUST be that folder or inside it, or the host answers `not_permitted`. For an agent without one, the client sends `"/"` and the host ignores `cwd`. The host MUST NOT pass `stdio` MCP servers from a client, because they are commands that would run on the host. It MAY pass `http` and `sse` servers, and 0.1 hosts pass none. On success the caller is attached. |
+| `session/new` | Forwarded. For an agent with a `folder`, `cwd` MUST be that folder or inside it, or the host answers `not_permitted`: a client can't choose another folder itself. A conversation moves to another folder only through the host's own tool, when the owner asks for it in the conversation (section 8.1). For an agent without a folder, the client sends `"/"` and the host ignores `cwd`. The host MUST NOT pass `stdio` MCP servers from a client, because they are commands that would run on the host. It MAY pass `http` and `sse` servers, and 0.1 hosts pass none. The host MAY add its own MCP server (section 8.1). On success the caller is attached. |
 | `session/load` | If the session is open in the agent process, the host answers from its record. It sends the record to the caller as `session/update` notifications. Then it sends the session's most recent `host/turn`: `running` if a turn is running, otherwise the `ended` notice of the last turn, if the session has had one. Then it answers with the session's current `modes` and `configOptions`. Then it sends every pending permission request of the session as a new `session/request_permission` on this channel. If the session is not open, the host forwards the request to the agent (same `cwd` and MCP rules as `session/new`). It delivers the agent's replay to the caller only, and records it. The caller is attached. |
 | `session/resume` | As `session/load`, without sending the record. The most recent `host/turn` and the pending permission requests are still sent. |
 | `session/list` | Forwarded. If `cwd` is absent, the host sets it to the agent's `folder`. For an agent without a folder the host ignores `cwd`. |
@@ -282,6 +301,16 @@ The host is the only ACP client of each agent process. Toward clients it behaves
 | Extension methods (`_…`) | The host MAY forward them unchanged, or answer `-32601`. |
 
 A host answers a request on an agent channel whose agent is not running and cannot be started with `agent_unavailable`, including the agent's plain reason. `session/prompt`, `session/set_mode`, `session/set_config_option` and `session/cancel` for a session the connection is not attached to get ACP `-32002` (resource not found); the client loads the session first.
+
+### 8.1 The host's own tools: moving to another folder
+
+The owner may ask a coding agent, in the conversation, to work somewhere else ("work in ~/workspaces/foo"). ACP fixes a session's folder when the session starts (`session/new` `cwd`), so the host moves the conversation for the agent.
+
+- **The tool.** The host gives every session of an agent that has a folder and takes HTTP MCP servers (`agentCapabilities.mcpCapabilities.http`) an MCP server of its own, in `session/new`, `session/load` and `session/resume`: `{"type": "http", "name": "host", "url": …}`. It is the host's, never a client's, so the rule against client MCP servers (section 8) doesn't apply to it. It serves on loopback only, and its URL carries a secret that names the one conversation it was given to. It offers the tool `move_to_folder {path, handoff, create?}`: `path` as the owner said it (absolute, or starting with `~`), `handoff` the agent's note to itself about what it was doing, `create` true only when the owner asked for a new folder.
+- **Consent.** The agent calls the tool only when the owner asks, in the conversation. That request is the owner's consent; no client can move a conversation by itself.
+- **Where.** The folder must exist, unless `create` is true (then the host makes it). It must be inside the owner's home folder, unless the session runs in a mode that lets the agent act without asking (Full access), which may go anywhere. Otherwise the tool answers with an error in plain words, which the agent relays.
+- **The move.** The host starts a new ACP session of the agent in the folder, in the conversation's current mode, and sends the owner's following prompts to it. The first of them starts with the handoff. The conversation keeps its `sessionId`: clients keep using it, and the new session's updates and permission requests are sent under it.
+- **What clients see.** In the turn that moved, the host sends `session_info_update` with `_meta: {"oal/cwd": "<folder>"}` and an `agent_message_chunk` "Now working in <folder>." Afterwards `session/load` and `session/resume` answer with the same `_meta."oal/cwd"`, and `session/list` lists the conversation with the folder it works in now as its `cwd`.
 
 ## 9. Turns and usage: `host/turn`
 
@@ -408,7 +437,8 @@ OAL codes (schema `schemas/error.schema.json`):
 - **Transport.** Each hop uses TLS (`wss`). In 0.1 the relay terminates the client's TLS connection. **A relay can read and alter OAL traffic in 0.1**, including prompts, replies, tool output, file URLs and device tokens. Section 17 removes this, and is required for 1.0. A self-hosted relay or LAN direct avoids a third party in the meantime.
 - **No inbound ports.** Hosts dial out to relays. LAN direct is opt-in.
 - **Agents run as the local user, under the local user's own sign-in to each agent.** The host never stores an agent's credentials and never runs an agent for another person.
-- **Folder and MCP rules** (section 8) keep a remote client from choosing where an agent works, or from starting commands through MCP configuration.
+- **Folder and MCP rules** (section 8) keep a remote client from choosing where an agent works, or from starting commands through MCP configuration. A conversation moves to another folder only through the host's own tool, on the owner's request in the conversation, inside the home folder unless the session has Full access (section 8.1). The tool's server listens on loopback only, behind a secret URL per conversation.
+- **Adding and removing agents** (section 7.4) is for paired devices only. The client never chooses a new agent's folder, and removing an agent never deletes its folder.
 - **Permission modes.** A client can change a session's mode (`session/set_mode`). A host SHOULD let the owner refuse remote changes to modes that let the agent act without asking. It SHOULD label such modes plainly: "Runs anything on this computer without asking."
 - **Audit.** A host SHOULD keep a local log of who prompted, which device answered which permission request with which option, mode changes, pairings and unpairings. The log records device ids and never message content.
 - **Revocation.** `host/unpair`, or removing the device on the host, closes its connections (4003) and invalidates its token.
@@ -501,7 +531,7 @@ The reference implementation is `crates/oal-secure` in nebo-link.
 - Files produced by agents: a host method that publishes a file inside the agent's folder to a URL the client can fetch.
 - Sending to a running turn (steering, or queueing a message for after the turn), instead of `turn_in_progress`.
 - Replay from a cursor (`session/load` since the last update seen), so a reconnect doesn't resend the whole record. Until then clients de-duplicate (section 12).
-- Owner-level agent management over OAL: adding and removing agents, and setting an agent's default mode.
+- Setting an agent's default mode over OAL. (Adding and removing agents moved into 0.1, section 7.4.)
 - ACP `elicitation` and client-side `fs`/`terminal` over OAL.
 - A defined interface between relay and host for push notifications.
 - ACP v2. Its current alphas remove `session/load` and `session/set_mode`. OAL will follow ACP v2 when it is released, with a deprecation window per section 13.
@@ -571,6 +601,8 @@ Nebo Link first served Nebo's own phone API (the "chat contract": `/api/v1/agent
 | `GET /api/v1/agents` → `{agents, primaryChristened}`; the default agent exposed as `id:"assistant"` | `host/agents`. Ids are the host's own; there is no "primary" agent and no `assistant` alias. |
 | Nebo employee fields (`displayName`, `color`, `handle`, `isEnabled`, `editable`, `isApp`, `nameLocked`) | `label`, `runtime`, `folder`, `online`, `capabilities`, `modes`. Presentation is the client's business. |
 | `GET /agents/{id}/chats`, `POST /agents/{id}/chats` | ACP `session/list`, `session/new` |
+| `runtimes` on `GET /api/v1/agents`; `POST /api/v1/runtimes/{runtime}/agents`, `DELETE /api/v1/agents/{id}` | `host/info` `runtimes[].addable`; `host/agents/add`, `host/agents/remove` |
+| `folder` on `GET /chats/{id}` | `_meta."oal/cwd"` on `session/load` and `session/resume`, and `session/list` `cwd` |
 | `session_id` = `agent:<agentId>:thread:<chatId>` | ACP `sessionId`, the agent's own id, scoped by the channel's agent. |
 | `GET /chats/{id}/messages` → `{messages, hasMore, activeRun, pendingAsk}` | ACP `session/load` (replay), `host/turn` `running`, and the re-sent `session/request_permission`. |
 | WS `chat {prompt, agent_id, session_id?, attachments?}`, with `chat_created` when no session | ACP `session/prompt` after `session/new`. |
@@ -589,7 +621,7 @@ Nebo Link first served Nebo's own phone API (the "chat contract": `/api/v1/agent
 
 ## Appendix C. Message index
 
-Host channel, client to host (requests): `host/hello`, `host/pair`, `host/info`, `host/agents`, `host/pending`, `host/answer`, `host/ping`, `host/devices`, `host/unpair`.
+Host channel, client to host (requests): `host/hello`, `host/pair`, `host/info`, `host/agents`, `host/agents/add`, `host/agents/remove`, `host/pending`, `host/answer`, `host/ping`, `host/devices`, `host/unpair`.
 
 Host channel, host to client (notifications): `host/agent_update`, `host/turn`, `host/pending_update`.
 
@@ -597,6 +629,9 @@ Agent channels: ACP v1, unchanged. The host serves `initialize`, `session/new`, 
 
 ## Changes
 
+- **0.1, amended 2026-09-26, third time**:
+  - Paired devices add and remove agents: `host/agents/add {runtime, label?}` and `host/agents/remove {agentId}`, with `addable` on `host/info` `runtimes`. The host chooses a new agent's folder, and removing an agent never deletes its folder (section 7.4, `schemas/host-agents-add.schema.json`, `schemas/host-agents-remove.schema.json`, `examples/add-remove.json`). This was deferred to 0.2.
+  - A conversation moves to another folder through the host's own MCP tool `move_to_folder`, when the owner asks in the conversation; it keeps its `sessionId`, and clients learn the folder from `_meta."oal/cwd"`. A client still can't choose another folder itself (sections 8, 8.1, 16).
 - **0.1, amended 2026-09-26, second time**: message 2 of the encrypted handshake carries the device's name, or the `version_mismatch` error before a 4002 close (section 17.2). Nebo Link implements section 17 and requires it on every connection.
 - **0.1, amended 2026-09-26** (still a draft; implementation work on the client SDKs found these gaps):
   - `session/load` and `session/resume` re-send the session's most recent `host/turn` after the replay, including the `ended` notice of a turn that finished while the client was away (sections 8, 9, 12).

@@ -7,12 +7,13 @@
 //! that bot and is its own employee on the roster.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use link_core::acp::Client;
 use link_core::adapter::Adapted;
 use link_core::backend::Backend;
 use link_core::host::Host;
+use link_core::keep::{Add, CodingAgent, Kept};
 use link_core::phone::Contract;
 use link_core::roster::{Member, Roster};
 use nebo_runtimes::{
@@ -160,11 +161,42 @@ pub async fn pair(root: &Root, code: &str, wanted: Wanted, name: Option<String>,
 }
 
 /// Adds the agent `wanted` names to the linked bot (`bot`, or the only
-/// one). A coding agent joins the running service as it is (no new code,
-/// no new service); an OpenClaw or Hermes install restarts it, to open the
-/// install to NeboAI.
+/// one). A coding agent is added the way every client adds one
+/// ([`Host::add_agent`], into the link's file through [`Keeper`]), and joins
+/// the running service as it is (no new code, no new service); an OpenClaw
+/// or Hermes install restarts it, to open the install to NeboAI.
 pub async fn add(root: &Root, bot: Option<&str>, wanted: Wanted) -> Result<Added> {
     let mut link = root.select(bot)?;
+    if wanted.acp_command.is_some() || wanted.runtime.is_some_and(|r| r.acp().is_some()) {
+        let dir = root.bot(&link.bot_id);
+        let env = Environment::current();
+        let command = match &wanted.acp_command {
+            Some(command) => Some(acp::custom(command, &env).map_err(Error::Message)?.restart),
+            None => None,
+        };
+        let folder = match wanted.dir {
+            Some(dir) if dir.is_absolute() => Some(dir),
+            Some(dir) => Some(std::env::current_dir().map_err(|e| Error::Message(e.to_string()))?.join(dir)),
+            None => None,
+        };
+        let add = Add {
+            runtime: wanted.runtime.map(|r| runtime_key(r).to_owned()).unwrap_or_else(|| "acp".to_owned()),
+            command,
+            folder,
+            label: wanted.label,
+        };
+        let added = here(&dir).add_agent(add).await.map_err(|e| Error::Message(e.message))?;
+        let agent = dir
+            .load()?
+            .agent(&added.id)
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("{} was added but not recorded.", added.label)))?;
+        return Ok(Added {
+            agent,
+            started: Vec::new(),
+            restart_failed: None,
+        });
+    }
     let chosen = choose(Some(&link), wanted).await?;
     let dir = root.bot(&link.bot_id);
     let added = attach(&dir, &mut link, chosen).await?;
@@ -198,6 +230,12 @@ pub async fn remove(root: &Root, bot: Option<&str>, agent_id: &str) -> Result<Re
         )));
     }
     let dir = root.bot(&link.bot_id);
+    // A coding agent is removed the way every client removes one
+    // ([`Host::remove_agent`]); its folder stays.
+    if agent.acp().is_some() {
+        here(&dir).remove_agent(&agent.id).await.map_err(|e| Error::Message(e.message))?;
+        return Ok(Removal { agent, released: None });
+    }
     let released = match agent.install() {
         Some(install) => Some(release(&dir.agent(&agent.id), agent.runtime, install).await?),
         None => None,
@@ -209,6 +247,104 @@ pub async fn remove(root: &Root, bot: Option<&str>, agent_id: &str) -> Result<Re
         service::restart(&link.bot_id)?;
     }
     Ok(Removal { agent, released })
+}
+
+/// This computer's host as the CLI holds it: none of the agents running,
+/// the link's file its keeper. What it adds or removes, the running service
+/// reads from the file.
+fn here(dir: &BotDir) -> Arc<Host> {
+    let host = Host::new(Arc::new(Roster::default()));
+    host.set_keeper(Arc::new(Keeper::new(dir, None)));
+    host
+}
+
+/// The link's file as the host's keeper ([`link_core::keep::Keeper`]): a
+/// coding agent the host adds is recorded in the bot's `link.json`, and one
+/// it removes taken out, its folder left. An OpenClaw or Hermes install is
+/// added and removed on the computer (`nebo-link add`, `nebo-link remove`),
+/// and the bot's last agent stays: that is `nebo-link unlink`.
+pub struct Keeper {
+    dir: BotDir,
+    /// The running service's copy of the link, told of each change the host
+    /// made, so its next read of the file finds nothing new to do.
+    seen: Option<Arc<Mutex<Link>>>,
+}
+
+impl Keeper {
+    pub fn new(dir: &BotDir, seen: Option<Arc<Mutex<Link>>>) -> Self {
+        Self { dir: dir.clone(), seen }
+    }
+
+    fn saved(&self, link: &Link) {
+        if let Some(seen) = &self.seen {
+            *seen.lock().expect("link lock") = link.clone();
+        }
+    }
+}
+
+impl link_core::keep::Keeper for Keeper {
+    fn client(&self) -> Client {
+        CLIENT
+    }
+
+    fn agents(&self) -> Vec<Kept> {
+        self.dir
+            .load()
+            .map(|link| {
+                link.agents
+                    .iter()
+                    .map(|a| Kept {
+                        id: a.id.clone(),
+                        label: a.label.clone(),
+                        runtime: runtime_key(a.runtime).to_owned(),
+                        folder: a.acp().map(|acp| acp.workdir.clone()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn keep(&self, agent: &CodingAgent) -> std::result::Result<Member, String> {
+        let mut link = self.dir.load().map_err(|e| e.to_string())?;
+        let hosted = Hosted {
+            id: agent.id.clone(),
+            label: agent.label.clone(),
+            runtime: Runtime::Acp(agent.agent),
+            via: Via::Acp(agent.acp.clone()),
+        };
+        link.agents.push(hosted.clone());
+        self.dir.save(&link).map_err(|e| e.to_string())?;
+        self.dir.agent(&hosted.id).create().map_err(|e| e.to_string())?;
+        self.saved(&link);
+        acp_member(&self.dir, &hosted).ok_or_else(|| format!("{} has no command to start it.", hosted.label))
+    }
+
+    fn forget(&self, id: &str) -> std::result::Result<(), String> {
+        let mut link = self.dir.load().map_err(|e| e.to_string())?;
+        let agent = link
+            .agent(id)
+            .cloned()
+            .ok_or_else(|| format!("{} hosts no agent {id}. `nebo-link status` lists them.", link.name))?;
+        if agent.install().is_some() {
+            return Err(format!(
+                "{} is removed on the computer itself: run `nebo-link remove {}` there.",
+                agent.label, agent.id
+            ));
+        }
+        if link.agents.len() == 1 {
+            return Err(format!(
+                "{} is the only agent of {}. To unlink the bot, run `nebo-link unlink`.",
+                agent.label, link.name
+            ));
+        }
+        link.agents.retain(|a| a.id != id);
+        self.dir.save(&link).map_err(|e| e.to_string())?;
+        self.saved(&link);
+        // The agent's own state (its log, its chats record) goes; the folder
+        // it worked in stays.
+        self.dir.agent(id).remove().map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 /// Finds the agent `wanted` names and proves it can run: a coding agent is
@@ -454,7 +590,8 @@ pub fn acp_member(dir: &BotDir, agent: &Hosted) -> Option<Member> {
 /// The roster's members once the link changed from `before` to `after`:
 /// an agent that stays as it was keeps its member (its running process and
 /// its sessions), a coding agent added or changed gets a new one, and one
-/// removed is dropped. An install keeps the member it started with: adding
+/// removed is dropped. A new agent the host already runs (the host added it)
+/// keeps that member. An install keeps the member it started with: adding
 /// or removing one restarts the service.
 pub fn reconcile(dir: &BotDir, before: &Link, after: &Link, current: &[Member]) -> Vec<Member> {
     after
@@ -462,8 +599,9 @@ pub fn reconcile(dir: &BotDir, before: &Link, after: &Link, current: &[Member]) 
         .iter()
         .filter_map(|agent| {
             let kept = current.iter().find(|m| m.id == agent.id);
+            let unchanged = before.agent(&agent.id).is_none_or(|b| b == agent);
             match kept {
-                Some(member) if before.agent(&agent.id) == Some(agent) || agent.install().is_some() => {
+                Some(member) if unchanged || agent.install().is_some() => {
                     Some(member.clone())
                 }
                 _ => acp_member(dir, agent),
@@ -847,6 +985,55 @@ mod tests {
         assert_eq!(new_id(&two, "Site"), "site-2");
         assert_eq!(new_id(&two, "Assistant"), "assistant-2");
         assert_eq!(new_id(&two, "···"), "agent");
+    }
+
+    fn linked(root: &tempfile::TempDir) -> (BotDir, Link) {
+        let dir = Root::at(root.path()).bot("b1");
+        dir.create().unwrap();
+        let link = Link {
+            bot_id: "b1".into(),
+            name: "Mac".into(),
+            owner_id: "o".into(),
+            endpoints: Endpoints::from_env(),
+            agents: vec![acp_agent(PRIMARY, Runtime::Acp(Agent::ClaudeCode), "/w/claude-code")],
+            oal: Default::default(),
+        };
+        dir.save(&link).unwrap();
+        (dir, link)
+    }
+
+    /// The host's agents go into the link's file: one it adds is recorded
+    /// (and the service's copy told), one it removes taken out; the bot's
+    /// last agent and an install are removed on the computer.
+    #[test]
+    fn the_links_file_keeps_what_the_host_adds_and_removes() {
+        use link_core::keep::Keeper as _;
+        let root = tempfile::tempdir().unwrap();
+        let (dir, link) = linked(&root);
+        let seen = Arc::new(Mutex::new(link.clone()));
+        let keeper = Keeper::new(&dir, Some(seen.clone()));
+        assert_eq!(keeper.agents().iter().map(|k| k.id.as_str()).collect::<Vec<_>>(), [PRIMARY]);
+        let refused = keeper.forget(PRIMARY).unwrap_err();
+        assert_eq!(refused, "Claude Code is the only agent of Mac. To unlink the bot, run `nebo-link unlink`.");
+
+        let codex = CodingAgent {
+            id: "codex".into(),
+            label: "Codex".into(),
+            agent: Agent::Codex,
+            acp: AcpLink { program: "codex-acp".into(), args: vec![], env: vec![], workdir: "/home/me/NeboAI/codex".into() },
+        };
+        let member = keeper.keep(&codex).unwrap();
+        assert_eq!((member.id.as_str(), member.runtime.as_str()), ("codex", "codex"));
+        let saved = dir.load().unwrap();
+        assert_eq!(saved.agent("codex").and_then(Hosted::acp).map(|a| a.workdir.clone()), Some(PathBuf::from("/home/me/NeboAI/codex")));
+        assert_eq!(*seen.lock().unwrap(), saved, "the service's copy is the file");
+        // The service reading the file again keeps the member the host runs.
+        let kept = reconcile(&dir, &link, &saved, std::slice::from_ref(&member));
+        assert!(Arc::ptr_eq(&kept.iter().find(|m| m.id == "codex").unwrap().backend, &member.backend));
+
+        keeper.forget("codex").unwrap();
+        assert!(dir.load().unwrap().agent("codex").is_none());
+        assert_eq!(keeper.forget("codex").unwrap_err(), "Mac hosts no agent codex. `nebo-link status` lists them.");
     }
 
     #[test]
