@@ -86,6 +86,7 @@ When it failed, say what failed and what to do next, in one or two sentences, ba
 |---|---|
 | `invalid or expired code` | "That code has expired. Codes last 5 minutes. Send me a new one from the NeboAI app." |
 | `Nebo Link isn't available yet.` | "Nebo Link isn't available to install yet, so I couldn't connect." |
+| `Nebo Link isn't available on Windows yet.` | "Nebo Link doesn't run on Windows yet, so I couldn't connect. It runs on macOS and Linux." |
 | `Could not verify the download` | "The download didn't pass its signature check, so nothing was installed. Try again in a few minutes." |
 | `No OpenClaw or Hermes install found for this user.` | "Nebo Link couldn't find me under this user account. It needs to run as the same user I run as." |
 | `This computer is already linked as "<name>"` | Nothing to tell yet: this computer's bot already exists and the code isn't needed. Run `nebo-link add openclaw` (or `hermes`, the runtime you are), then check `nebo-link status` as in step 4; you are one more agent of that bot. |

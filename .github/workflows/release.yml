@@ -1,4 +1,4 @@
-# Release: build, sign and publish the five nebo-link binaries.
+# Release: build, sign and publish the nebo-link binaries.
 #
 # Builds run on NeboAI's own machines, never on GitHub-hosted runners (the
 # same rule as Nebo's releases; scripts/check-release-runners.py enforces it):
@@ -9,9 +9,19 @@
 # The ubuntu-latest jobs only orchestrate (key checks, droplet lifecycle,
 # checksums, uploads); nothing is compiled there.
 #
+# Windows is switched by the repo variable WINDOWS_BUILD_ENABLED (the same
+# switch Nebo's release uses). Unless it is "true", build-windows and
+# sign-windows are skipped, the release ships macOS and Linux only, and
+# version.json names no Windows release, so neboai.com/link.ps1 says Windows
+# isn't available yet. Turning Windows on is one change:
+#   gh variable set WINDOWS_BUILD_ENABLED --body true -R NeboLoop/nebo-link
+# (Windows signing then needs AZURE_TENANT_ID, AZURE_CLIENT_ID and
+# AZURE_CLIENT_SECRET, plus the AZURE_SIGNING_* variables.)
+#
 # Output per tag (CDN https://cdn.neboai.com/nebo-link/releases/<tag>/ and the
 # GitHub Release): nebo-link-{darwin,linux}-{arm64,amd64},
-# nebo-link-windows-amd64.exe, SHA256SUMS and SHA256SUMS.sig (base64 ed25519
+# nebo-link-windows-amd64.exe when Windows is on, SHA256SUMS and
+# SHA256SUMS.sig (base64 ed25519
 # signature over SHA256SUMS, made with NEBO_LINK_SIGNING_KEY). The public half
 # of that key is compiled into every binary as NEBO_LINK_RELEASE_KEY so the
 # self-updater can verify the next release.
@@ -48,8 +58,21 @@ jobs:
     outputs:
       dry_run: ${{ steps.mode.outputs.dry_run }}
       release_key: ${{ steps.key.outputs.release_key }}
+      windows: ${{ steps.platforms.outputs.windows }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Platforms in this release
+        id: platforms
+        env:
+          WINDOWS: ${{ vars.WINDOWS_BUILD_ENABLED == 'true' && 'true' || 'false' }}
+        run: |
+          echo "windows=$WINDOWS" >> "$GITHUB_OUTPUT"
+          if [ "$WINDOWS" = true ]; then
+            echo "This release ships macOS, Linux and Windows."
+          else
+            echo "::notice::This release ships macOS and Linux. Windows is off (repo variable WINDOWS_BUILD_ENABLED is not \"true\")."
+          fi
 
       - name: Release mode and version
         id: mode
@@ -435,8 +458,10 @@ jobs:
           [ -n "$id" ] && gh api -X DELETE "orgs/${{ github.repository_owner }}/actions/runners/$id" || true
 
   # ─── Windows build (house Windows box) ───────────────────────────────
+  # Only when WINDOWS_BUILD_ENABLED is "true"; sign-windows follows it.
   build-windows:
     needs: prepare
+    if: ${{ needs.prepare.outputs.windows == 'true' }}
     runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box — see nebo CLAUDE.md "Release builds"
     env:
       RUSTC_WRAPPER: ""
@@ -574,15 +599,25 @@ jobs:
           if-no-files-found: error
 
   # ─── Checksums, signature, CDN + GitHub Release ─────────────────────
-  # Needs every platform: SHA256SUMS always covers exactly the five binaries.
+  # Needs every platform in this release: SHA256SUMS covers exactly its
+  # binaries. Windows counts only when it is on; off, sign-windows is skipped
+  # and that is the one skip allowed.
   release:
     needs: [prepare, notarize-macos, build-linux, sign-windows]
+    if: >-
+      ${{ !cancelled()
+        && needs.prepare.result == 'success'
+        && needs.notarize-macos.result == 'success'
+        && needs.build-linux.result == 'success'
+        && (needs.prepare.outputs.windows == 'true' && needs.sign-windows.result == 'success'
+            || needs.prepare.outputs.windows != 'true' && needs.sign-windows.result == 'skipped') }}
     runs-on: ubuntu-latest # orchestration only — no build happens here (OpenSSL 3 for ed25519)
     permissions:
       contents: write
     env:
       DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
       RELEASE_KEY: ${{ needs.prepare.outputs.release_key }}
+      WINDOWS: ${{ needs.prepare.outputs.windows }}
       TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
@@ -593,14 +628,17 @@ jobs:
           path: artifacts/
           merge-multiple: true
 
-      - name: Check the five binaries
+      - name: Check the binaries
         working-directory: artifacts
         run: |
           ls -la
-          for f in nebo-link-darwin-amd64 nebo-link-darwin-arm64 nebo-link-linux-amd64 nebo-link-linux-arm64 nebo-link-windows-amd64.exe; do
+          want="nebo-link-darwin-amd64 nebo-link-darwin-arm64 nebo-link-linux-amd64 nebo-link-linux-arm64"
+          [ "$WINDOWS" = true ] && want="$want nebo-link-windows-amd64.exe"
+          for f in $want; do
             [ -s "$f" ] || { echo "::error::$f is missing"; exit 1; }
           done
-          [ "$(find . -maxdepth 1 -type f | wc -l)" -eq 5 ] || { echo "::error::expected exactly five binaries"; exit 1; }
+          n=$(echo $want | wc -w)
+          [ "$(find . -maxdepth 1 -type f | wc -l)" -eq "$n" ] || { echo "::error::expected exactly $n binaries: $want"; exit 1; }
           chmod +x nebo-link-*
 
       - name: Write SHA256SUMS
@@ -699,7 +737,7 @@ jobs:
           # re-run of an older tag must not move the pointer backwards.
           PREV=$(aws s3 cp s3://neboloop/nebo-link/releases/version.json - --endpoint-url "$S3_ENDPOINT" 2>/dev/null || echo '{}')
           rc=0
-          PREV="$PREV" TAG="$TAG" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" python3 - > version.json <<'EOF' || rc=$?
+          PREV="$PREV" TAG="$TAG" WINDOWS="$WINDOWS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" python3 - > version.json <<'EOF' || rc=$?
           import datetime, json, os, re, sys
           def ver(t):
               m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", t or "")
@@ -712,11 +750,18 @@ jobs:
           if ver(prev.get("version")) > ver(tag):
               print(f"version.json already points at {prev['version']}, newer than {tag}; leaving it", file=sys.stderr)
               sys.exit(3)
+          # "platforms" names the newest release each platform can install. A
+          # platform this release skips keeps the release it had, if any; one
+          # that never shipped is left out, and the installers and updater
+          # read that as "not available on this platform yet".
+          shipped = ["darwin", "linux"] + (["windows"] if os.environ["WINDOWS"] == "true" else [])
+          platforms = {p: v for p, v in (prev.get("platforms") or {}).items() if p not in shipped}
+          platforms.update({p: tag for p in shipped})
           print(json.dumps({
               "version": tag,
               "release_url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/tag/{tag}",
               "published_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "platforms": {"darwin": tag, "linux": tag, "windows": tag},
+              "platforms": dict(sorted(platforms.items())),
           }, indent=2))
           EOF
           if [ "$rc" = 3 ]; then
