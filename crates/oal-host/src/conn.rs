@@ -37,9 +37,10 @@ pub(crate) async fn serve(oal: Arc<OalHost>, wire: Wire, via: Via) {
     };
     let pairing = match &via {
         Via::Relay { nameplate, .. } => nameplate.is_some(),
-        // On the LAN a pairing starts with CPace's 34-byte MSGa; a session
-        // with Noise IK's first message, longer than that.
-        Via::Lan => first.len() == 34 && first[0] == 0x20 && first[33] == 0x00,
+        // On the LAN and through a tunnel a pairing starts with CPace's
+        // 34-byte MSGa; a session with Noise IK's first message, longer than
+        // that.
+        Via::Lan | Via::Tunnel => first.len() == 34 && first[0] == 0x20 && first[33] == 0x00,
     };
     let transport = Transport::new(first, rx, tx.clone());
     let opened = if pairing { pair(&oal, transport, &via).await } else { handshake(&oal, transport).await };
@@ -48,20 +49,56 @@ pub(crate) async fn serve(oal: Arc<OalHost>, wire: Wire, via: Via) {
         Err(end) => return close(&tx, end),
     };
     let (reader, writer) = session.split();
-    let conn = Connection {
-        me: oal.host().client(),
-        oal,
-        device,
-        writer,
-        attached: HashMap::new(),
-        copies: HashMap::new(),
-        prompts: HashMap::new(),
-        next_id: 0,
-        seen: false,
-        agents: Vec::new(),
-    };
-    let end = conn.run(reader).await;
+    let conn = Connection::new(oal, device, Writer::Session(writer), false);
+    let end = conn.run(Reader::Session(reader)).await;
     close(&tx, end);
+}
+
+/// Serves a client in this process (spec 4.3 after authentication): its
+/// frames arrive on `rx` and go out on `tx` as they are, with no encryption
+/// to add and no handshake, since nothing carries them. It is authenticated
+/// as `device`; the connection is over when either channel closes.
+pub(crate) async fn serve_local(oal: Arc<OalHost>, device: DeviceRef, rx: mpsc::UnboundedReceiver<Vec<u8>>, tx: mpsc::UnboundedSender<Vec<u8>>) {
+    let conn = Connection::new(oal, device, Writer::Local(tx), true);
+    let (code, reason) = conn.run(Reader::Local(rx)).await;
+    tracing::debug!(code, reason, "oal: an in-process connection closed");
+}
+
+/// Where a connection's frames come from: a device's encrypted session, or a
+/// client in this process.
+enum Reader {
+    Session(SessionReader<Transport>),
+    Local(mpsc::UnboundedReceiver<Vec<u8>>),
+}
+
+impl Reader {
+    fn set_max_frame(&mut self, bytes: usize) {
+        if let Reader::Session(reader) = self {
+            reader.set_max_frame(bytes);
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>, End> {
+        match self {
+            Reader::Session(reader) => reader.recv().await.map_err(ended),
+            Reader::Local(rx) => Ok(rx.recv().await),
+        }
+    }
+}
+
+/// Where a connection's frames go.
+enum Writer {
+    Session(SessionWriter<Transport>),
+    Local(mpsc::UnboundedSender<Vec<u8>>),
+}
+
+impl Writer {
+    async fn send(&mut self, frame: &[u8]) -> Result<(), End> {
+        match self {
+            Writer::Session(writer) => writer.send(frame).await.map_err(ended),
+            Writer::Local(tx) => tx.send(frame.to_vec()).map_err(|_| (1000, String::new())),
+        }
+    }
 }
 
 fn close(tx: &mpsc::UnboundedSender<Outgoing>, (code, reason): End) {
@@ -202,7 +239,7 @@ struct Connection {
     oal: Arc<OalHost>,
     device: DeviceRef,
     me: ClientId,
-    writer: SessionWriter<Transport>,
+    writer: Writer,
     /// The sessions this connection is attached to, with the host's
     /// sequence number its snapshot was taken at.
     attached: HashMap<(String, String), u64>,
@@ -222,7 +259,24 @@ struct Connection {
 }
 
 impl Connection {
-    async fn run(mut self, mut reader: SessionReader<Transport>) -> End {
+    /// A connection authenticated as `device`; `seen` when its device is
+    /// not one whose presence is recorded (a client in this process).
+    fn new(oal: Arc<OalHost>, device: DeviceRef, writer: Writer, seen: bool) -> Self {
+        Connection {
+            me: oal.host().client(),
+            oal,
+            device,
+            writer,
+            attached: HashMap::new(),
+            copies: HashMap::new(),
+            prompts: HashMap::new(),
+            next_id: 0,
+            seen,
+            agents: Vec::new(),
+        }
+    }
+
+    async fn run(mut self, mut reader: Reader) -> End {
         let mut events = self.oal.host().subscribe();
         let mut closing = self.oal.closing();
         reader.set_max_frame(crate::MAX_FRAME);
@@ -237,7 +291,7 @@ impl Connection {
                         }
                     }
                     Ok(None) => return (1000, String::new()),
-                    Err(e) => return ended(e),
+                    Err(end) => return end,
                 },
                 event = events.recv() => match event {
                     Ok(stamped) => {
@@ -257,7 +311,7 @@ impl Connection {
     }
 
     async fn send(&mut self, frame: Value) -> Result<(), End> {
-        self.writer.send(frame.to_string().as_bytes()).await.map_err(ended)
+        self.writer.send(frame.to_string().as_bytes()).await
     }
 
     async fn reply(&mut self, agent: Option<&str>, id: &Value, result: Result<Value, ErrorObject>) -> Result<(), End> {

@@ -399,7 +399,12 @@ impl<R: Runtime> Adapted<R> {
                             let runtime_id = ask.request_id.clone();
                             asks.push((id, runtime_id.clone()));
                             answers.push(Box::pin(async move { (id, runtime_id, rx.await) }));
-                            let params = json!({ "sessionId": session, "toolCall": ask.tool_call, "options": ask.options });
+                            // The runtime's own words ride along, so a client
+                            // across Open Agent Link shows the card it wrote.
+                            let params = crate::turn::with_words(
+                                json!({ "sessionId": session, "toolCall": ask.tool_call, "options": ask.options }),
+                                &ask.words,
+                            );
                             self.shared.send(agent, AgentMessage::Permission {
                                 session_id: session.to_owned(),
                                 params,

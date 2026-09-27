@@ -589,6 +589,147 @@ async fn owner_requests_flow_from_the_hub_through_the_tunnel() {
     websocket_echo(open(&hub).await, "/", None).await;
 }
 
+/// The link's endpoints with an Open Agent Link host.
+struct OalControl {
+    oal: Arc<oal_host::OalHost>,
+}
+
+impl Control for OalControl {
+    fn status(&self) -> serde_json::Value {
+        serde_json::json!({ "online": true })
+    }
+    async fn set_models(&self, enabled: bool) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({ "enabled": enabled }))
+    }
+    fn oal(&self) -> Option<Arc<oal_host::OalHost>> {
+        Some(self.oal.clone())
+    }
+}
+
+/// A WebSocket's binary messages as `oal_secure`'s transport.
+struct Binary<S>(tokio_tungstenite::WebSocketStream<S>);
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> futures::Stream for Binary<S> {
+    type Item = std::io::Result<Vec<u8>>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            return Poll::Ready(match futures::ready!(self.0.poll_next_unpin(cx)) {
+                Some(Ok(Message::Binary(b))) => Some(Ok(b.to_vec())),
+                Some(Ok(Message::Close(_))) | None => None,
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => Some(Err(std::io::Error::other(e))),
+            });
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> futures::Sink<Vec<u8>> for Binary<S> {
+    type Error = std::io::Error;
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.0.poll_ready_unpin(cx).map_err(std::io::Error::other)
+    }
+    fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> std::io::Result<()> {
+        self.0.start_send_unpin(Message::Binary(item.into())).map_err(std::io::Error::other)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.0.poll_flush_unpin(cx).map_err(std::io::Error::other)
+    }
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.0.poll_close_unpin(cx).map_err(std::io::Error::other)
+    }
+}
+
+/// Nebo's way to a linked bot: through the hub's tunnel it asks the link for
+/// a pairing code, pairs with it over `/oal` (CPace and Noise; the code works
+/// once), and every later connection is a Noise session keyed by the device
+/// key it pinned. The tunnel carries binary WebSocket messages it can't read.
+#[tokio::test]
+async fn open_agent_link_pairs_and_connects_through_the_hub_tunnel() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = link_core::host::Host::new(Arc::new(link_core::roster::Roster::new(Vec::new())));
+    let oal = oal_host::OalHost::new(
+        oal_host::Config {
+            host_id: "test-bot".into(),
+            host_name: "Studio Mac".into(),
+            software: ("nebo-link".into(), "0".into()),
+            keys: oal_secure::KeyStore::open(dir.path().join("keys")).unwrap(),
+            seen_file: dir.path().join("seen.json"),
+            runtimes: Arc::new(Vec::new),
+        },
+        host,
+    )
+    .unwrap();
+    let listener = proxy::bind_loopback("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let secret = nebo_comm::tunnel::tunnel_auth_secret();
+    let (upstream, _) = fake_runtime().await;
+    let control = Arc::new(OalControl { oal: oal.clone() });
+    tokio::spawn(proxy::serve(listener, target("hermes", upstream), secret.into(), control, None));
+    let (hub_url, mut ready) = fake_hub().await;
+    let online = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(async move {
+        let _ = nebo_comm::tunnel::run(&hub_url, "test-token", &proxy_addr.to_string(), &online).await;
+    });
+    let hub = tokio::time::timeout(Duration::from_secs(5), ready.recv()).await.unwrap().unwrap();
+
+    // Nebo asks for a code; only the owner's requests reach this endpoint.
+    let resp = send(open(&hub).await, "POST", "/_link/oal/pair", None, "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let answer: serde_json::Value = serde_json::from_str(&text(resp).await).unwrap();
+    assert_eq!(answer["hostId"], "test-bot");
+    let code = oal_secure::PairingCode::parse(answer["code"].as_str().unwrap()).unwrap();
+
+    // It pairs with it over `/oal`, through the tunnel.
+    let nebo = oal_secure::KeyStore::open(dir.path().join("nebo")).unwrap();
+    let (ws, response) = tokio_tungstenite::client_async(
+        Request::builder()
+            .uri("ws://neboai.com/oal")
+            .header("host", "neboai.com")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            .header("sec-websocket-protocol", "oal")
+            .body(())
+            .unwrap(),
+        open(&hub).await,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.headers()["sec-websocket-protocol"], "oal");
+    let mut pairing = oal_secure::pair(Binary(ws), &code, &nebo, oal_secure::Side::Client).await.unwrap();
+    let request = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "host/pair", "params": {
+        "protocol": { "min": "0.1", "max": "0.1" }, "client": { "name": "nebo", "version": "0" },
+        "code": code.to_string(), "device": { "name": "Nebo", "publicKey": nebo.public_key().to_string() } } });
+    pairing.send(request.to_string().as_bytes()).await.unwrap();
+    let paired: serde_json::Value = serde_json::from_slice(&pairing.recv().await.unwrap().unwrap()).unwrap();
+    let info = &paired["result"]["info"]["host"];
+    assert_eq!(info["id"], "test-bot");
+    let key: oal_secure::PublicKey = info["publicKey"].as_str().unwrap().parse().unwrap();
+    let device = paired["result"]["device"]["id"].as_str().unwrap().to_owned();
+    drop(pairing.finish(&key, "test-bot", "Studio Mac", &device).unwrap());
+    assert_eq!(oal.devices().iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Nebo"]);
+
+    // The code worked once: asking again gives a new one.
+    let resp = send(open(&hub).await, "POST", "/_link/oal/pair", None, "").await;
+    let again: serde_json::Value = serde_json::from_str(&text(resp).await).unwrap();
+    assert_ne!(again["code"], answer["code"]);
+
+    // Every later connection is a session with the pinned keys.
+    let (ws, _) = tokio_tungstenite::client_async("ws://neboai.com/oal", open(&hub).await).await.unwrap();
+    let peer = nebo.peers().into_iter().find(|p| p.side == oal_secure::Side::Host).unwrap();
+    let hello = serde_json::json!({ "protocol": { "min": "0.1", "max": "0.1" }, "client": { "name": "nebo", "version": "0" } });
+    let (mut session, reply) = oal_secure::connect(Binary(ws), &nebo, &peer, hello.to_string().as_bytes()).await.unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(reply["device"]["id"], device.as_str());
+    session
+        .send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "host/info", "params": {} }).to_string().as_bytes())
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&session.recv().await.unwrap().unwrap()).unwrap();
+    assert_eq!(info["result"]["host"]["name"], "Studio Mac");
+}
+
 /// Bytes over WebSocket binary frames (the hub side of `nebo_comm`'s WsIo).
 struct WsBytes {
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,

@@ -12,6 +12,8 @@
 //!   with its own [`backend::Backend`]: [`acp::Acp`] (which starts and
 //!   restarts its agent process), or a runtime adapted into ACP
 //!   ([`adapter::Adapted`]: [`openclaw::Openclaw`], [`hermes::Hermes`]).
+//! - [`turn`] reads a turn as the owner does (permission modes, cards,
+//!   plain errors), the same for every client that shows one.
 //! - [`phone::Contract`] serves Nebo's phone contract over a host, until
 //!   Nebo's clients speak Open Agent Link.
 //! - [`machine`] says who hosts this computer's agents: one host per
@@ -52,6 +54,7 @@ pub mod model;
 pub mod openclaw;
 pub mod phone;
 pub mod roster;
+pub mod turn;
 
 /// The id of a host's first agent, which Nebo's phone finds its primary
 /// employee by.
