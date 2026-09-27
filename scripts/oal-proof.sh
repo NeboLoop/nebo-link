@@ -2,6 +2,9 @@
 # The proof that nebo-link is an Open Agent Link host: a real nebo-link, with
 # the conformance suite's scripted agent (`oal-conformance agent`) linked as
 # an ACP agent, behind a relay on this machine (oal-relay) and on the LAN.
+# The scripted agent is also installed the way a coding agent is (its program
+# on PATH, as `opencode`, which nebo-link detects and starts as `opencode
+# acp`), so `host/agents/add` adds more of it (`add-remove.json`).
 #
 #   1. `oal-conformance host --e2e --relay`: every example, through the relay.
 #   2. `oal-conformance host --e2e --tls-fingerprint`: every example, on the LAN.
@@ -69,8 +72,17 @@ EOF
 printf 'placeholder-not-a-neboai-token' >"$home/$bot/token"
 chmod 600 "$home/$bot/token" "$home/$bot/link.json"
 
+# The scripted agent installed as a coding agent: `opencode` on PATH, run by
+# nebo-link as `opencode acp`. The service's own home is the proof's, so an
+# agent it adds gets its folder there (~/NeboAI/<id>), and the coding agents
+# installed for the user running the proof stay out of it.
+mkdir -p "$work/installed" "$work/user"
+printf '#!/bin/sh\nexec "%s" agent\n' "$bin/oal-conformance" >"$work/installed/opencode"
+chmod +x "$work/installed/opencode"
+
 export NEBO_LINK_HOME="$home"
-"$bin/nebo-link" run --bot "$bot" --relay "$relay" --lan "127.0.0.1:$lan_port" >"$work/nebo-link.log" 2>&1 &
+HOME="$work/user" PATH="$work/installed:$PATH" \
+  "$bin/nebo-link" run --bot "$bot" --relay "$relay" --lan "127.0.0.1:$lan_port" >"$work/nebo-link.log" 2>&1 &
 pids+=($!)
 
 # Up: the relay's tunnel and LAN direct, as the service's status says.
@@ -101,10 +113,10 @@ code() {
 }
 
 echo "== conformance, through the relay"
-"$bin/oal-conformance" host "$relay" --relay --e2e --code "$(code)" --agent assistant
+"$bin/oal-conformance" host "$relay" --relay --e2e --code "$(code)" --agent assistant --runtime opencode
 
 echo "== conformance, on the LAN"
-"$bin/oal-conformance" host "wss://127.0.0.1:$lan_port/oal" --e2e --tls-fingerprint "$fingerprint" --code "$(code)" --agent assistant
+"$bin/oal-conformance" host "wss://127.0.0.1:$lan_port/oal" --e2e --tls-fingerprint "$fingerprint" --code "$(code)" --agent assistant --runtime opencode
 
 if [ "${OAL_PROOF_SKIP_SDKS:-}" = "" ]; then
   echo "== TypeScript SDK, live, through the relay"

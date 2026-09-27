@@ -35,6 +35,9 @@ use crate::{PROTOCOL, now};
 /// The agent's id, label and folder.
 pub const AGENT: &str = "fake";
 pub const FOLDER: &str = "/tmp/oal-fake-agent";
+/// The runtime the fake agent is installed as, and the one a device can add
+/// more agents of.
+pub const RUNTIME: &str = "oal-fake-agent";
 const MAX_FRAME: usize = 4 << 20;
 /// A client that sends nothing for this long is closed with 4008.
 const SILENCE: Duration = Duration::from_secs(60);
@@ -365,14 +368,14 @@ impl Host {
             "software": { "name": "oal-conformance", "version": env!("CARGO_PKG_VERSION") },
             "protocol": { "min": PROTOCOL, "max": PROTOCOL },
             "acp": { "protocolVersion": 1 },
-            "runtimes": [{ "id": "oal-fake-agent", "name": "Fake Agent", "kind": "acp", "version": env!("CARGO_PKG_VERSION"), "addable": true }],
+            "runtimes": [{ "id": RUNTIME, "name": "Fake Agent", "kind": "acp", "version": env!("CARGO_PKG_VERSION"), "addable": true }],
             "maxFrameBytes": MAX_FRAME,
             "attachments": { "schemes": [], "maxBytes": 0 }
         })
     }
 
     fn agent(&self) -> Value {
-        json!({ "id": AGENT, "label": "Fake Agent", "runtime": "oal-fake-agent", "folder": FOLDER, "online": true,
+        json!({ "id": AGENT, "label": "Fake Agent", "runtime": RUNTIME, "folder": FOLDER, "online": true,
             "capabilities": self.agent_init["agentCapabilities"], "modes": crate::fake_agent::modes("ask") })
     }
 
@@ -392,7 +395,7 @@ impl Host {
     /// folder of its own.
     fn add_agent(&mut self, params: &Value) -> Result<Value, (i64, String)> {
         let runtime = params["runtime"].as_str().unwrap_or("");
-        if runtime != "oal-fake-agent" {
+        if runtime != RUNTIME {
             return Err((code::NOT_PERMITTED, format!("{runtime} isn't a coding agent this computer can add.")));
         }
         let n = self.added.len() + 2;

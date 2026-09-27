@@ -22,6 +22,7 @@ async fn target() -> Target {
         known: vec![
             ("code".into(), json!("K7QM-3XRD")),
             ("agent".into(), json!(fake_host::AGENT)),
+            ("runtime".into(), json!(fake_host::RUNTIME)),
         ],
         e2e: false,
         relay: false,

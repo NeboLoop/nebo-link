@@ -82,6 +82,7 @@ async fn every_example_passes_through_the_relay() {
         known: vec![
             ("code".into(), json!(code)),
             ("agent".into(), json!(fake_host::AGENT)),
+            ("runtime".into(), json!(fake_host::RUNTIME)),
         ],
         e2e: false,
         relay: false,
