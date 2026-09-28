@@ -48,7 +48,10 @@ fn command(store: Option<&Path>, starts_work: bool) -> RuntimeCommand {
         false => RuntimeCommand { program: exe, args, env },
         true => RuntimeCommand {
             program: "sh".into(),
-            args: [vec!["-c".to_owned(), r#"(sleep 1; sleep 30) & exec "$0" "$@""#.to_owned(), exe], args].concat(),
+            // A new process a second in: `sleep 30` in the background of the
+            // subshell, never the subshell itself (dash runs a subshell's last
+            // command in its own pid).
+            args: [vec!["-c".to_owned(), r#"(sleep 1; sleep 30 & wait) & exec "$0" "$@""#.to_owned(), exe], args].concat(),
             env,
         },
     }
@@ -219,6 +222,25 @@ async fn a_long_silent_prompt_is_never_paused() {
     assert_eq!(a.prompt(&session, "hello").await.unwrap().unwrap()["stopReason"], "end_turn");
 }
 
+/// A prompt after a cancel goes to a fresh process (the cancel may have left
+/// the agent wedged), in the same session, before any pause would.
+#[tokio::test]
+async fn a_prompt_after_a_cancel_starts_the_agent_afresh() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("sessions");
+    let a = agent(root.path(), command(Some(&store), false), IDLE_WINDOW);
+    let session = a.new_session().await;
+    let wedged = a.pid();
+    let turn = a.prompt(&session, "wait");
+    until("the prompt runs", || async { a.acp.busy().await.why.contains(&Working::Prompt) }).await;
+    a.acp.notify(AGENT, "session/cancel", json!({ "sessionId": session }));
+    assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "cancelled");
+    assert_eq!(a.prompt(&session, "hello").await.unwrap().unwrap()["stopReason"], "end_turn");
+    assert_ne!(a.pid(), wedged, "a fresh process");
+    assert!(!process::alive(wedged));
+    assert_eq!(a.status().await.sessions[0].session_id, session);
+}
+
 /// An agent that can't load a paused session says so, in plain words; the
 /// host never starts a blank session in its place.
 #[tokio::test]
@@ -251,7 +273,14 @@ async fn shutdown_lets_a_prompt_finish_then_leaves_nothing_running() {
         reply.send(allow());
     });
     let began = Instant::now();
-    a.acp.shutdown(Duration::from_secs(20)).await;
+    let stopping = {
+        let acp = a.acp.clone();
+        tokio::spawn(async move { acp.shutdown(Duration::from_secs(20)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let refused = a.prompt(&session, "hello").await.unwrap().unwrap_err();
+    assert_eq!(refused.message, "Could not connect to Fake Agent. Try again.", "no new prompt while it shuts down");
+    stopping.await.unwrap();
     assert!(began.elapsed() >= Duration::from_millis(700), "it waited for the prompt");
     assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "end_turn", "the prompt finished");
     assert_eq!(a.status().await.state, Life::Paused);
@@ -260,6 +289,7 @@ async fn shutdown_lets_a_prompt_finish_then_leaves_nothing_running() {
     }
 
     // A prompt that outlasts the grace period is stopped with the rest.
+    let a = agent(root.path(), command(Some(&store), true), IDLE_WINDOW);
     let turn = a.prompt(&session, "wait");
     until("the prompt runs", || async { a.acp.busy().await.why.contains(&Working::Prompt) }).await;
     let pid = a.pid();

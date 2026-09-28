@@ -9,6 +9,7 @@
 //!   systemd user unit, so it sees the owner's runtimes and files.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::error::{Error, Result};
 
@@ -21,6 +22,47 @@ pub const OUTPUT_LOG: &str = "service.log";
 /// time for a running prompt to finish ([`crate::run::AGENT_GRACE`]) and for
 /// its agents to stop.
 const STOP_TIMEOUT_SECS: u64 = crate::run::AGENT_GRACE.as_secs() + 30;
+
+/// What stopping takes besides a prompt's grace: the agents' processes
+/// asked to end, then made to, and the rest of the service.
+const STOP_MARGIN: Duration = Duration::from_secs(10);
+
+/// Makes the installed definition of this service the one this version
+/// writes, when the service runs from it (an update changes what it
+/// should say: its log, how long it may take to stop), and says how long a
+/// running prompt may take to finish when this run stops. A definition the
+/// service manager loaded holds until it next loads the service, so an
+/// outdated one bounds this run by the manager's default stop timeout.
+pub fn refresh(spec: &Spec) -> Duration {
+    let full = crate::run::AGENT_GRACE;
+    if !platform::running_as_service(&spec.bot_id) {
+        return full;
+    }
+    let (Some(path), Some(current)) = (platform::definition(&spec.bot_id), platform::text(spec)) else {
+        return full;
+    };
+    let installed = std::fs::read_to_string(&path).ok();
+    let grace = grace_under(installed.as_deref(), &current, platform::DEFAULT_STOP_TIMEOUT);
+    if installed.as_deref().is_some_and(|text| text != current) {
+        match write(&path, &current).and_then(|()| platform::reread()) {
+            Ok(()) => tracing::info!(path = %path.display(), "the service's definition was out of date; rewritten, it takes effect when the service is next loaded"),
+            Err(e) => tracing::warn!(error = %e, "could not rewrite the service's out-of-date definition"),
+        }
+    }
+    grace
+}
+
+/// A running prompt's grace for a service started from `installed` when
+/// this version writes `current`: the full grace under the current
+/// definition, and what fits the manager's `default_timeout` under an older
+/// one.
+fn grace_under(installed: Option<&str>, current: &str, default_timeout: Duration) -> Duration {
+    let full = crate::run::AGENT_GRACE;
+    match installed {
+        Some(text) if text != current => default_timeout.saturating_sub(STOP_MARGIN).min(full),
+        _ => full,
+    }
+}
 
 /// What the service runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +291,23 @@ mod platform {
         dirs::home_dir().map(|h| h.join("Library/LaunchAgents").join(format!("{}.plist", name(bot_id))))
     }
 
+    /// launchd's `ExitTimeOut` when a definition doesn't say.
+    pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(20);
+
+    pub fn text(spec: &Spec) -> Option<String> {
+        Some(launchd_plist(spec))
+    }
+
+    /// launchd names the job it runs in `XPC_SERVICE_NAME`.
+    pub fn running_as_service(bot_id: &str) -> bool {
+        std::env::var("XPC_SERVICE_NAME").is_ok_and(|n| n == name(bot_id))
+    }
+
+    /// launchd reads a definition when it loads the service.
+    pub fn reread() -> Result<()> {
+        Ok(())
+    }
+
     pub fn install(spec: &Spec) -> Result<()> {
         let plist = definition(&spec.bot_id).ok_or_else(|| Error::Service("no home directory".into()))?;
         let _ = run("launchctl", &["bootout", &format!("{}/{}", domain(), name(&spec.bot_id))]);
@@ -288,6 +347,25 @@ mod platform {
 
     pub fn definition(bot_id: &str) -> Option<PathBuf> {
         if is_root() { Some(system_unit(bot_id)) } else { user_unit(bot_id) }
+    }
+
+    /// systemd's `DefaultTimeoutStopSec`.
+    pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(90);
+
+    pub fn text(spec: &Spec) -> Option<String> {
+        Some(systemd_unit(spec, is_root()))
+    }
+
+    /// systemd marks every process it starts with `INVOCATION_ID`, and the
+    /// unit it runs in `/proc/self/cgroup`.
+    pub fn running_as_service(bot_id: &str) -> bool {
+        std::env::var_os("INVOCATION_ID").is_some()
+            && std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|c| c.contains(&name(bot_id)))
+    }
+
+    /// systemd takes a changed unit once told to read it again.
+    pub fn reread() -> Result<()> {
+        if is_root() { run("systemctl", &["daemon-reload"]) } else { run("systemctl", &["--user", "daemon-reload"]) }
     }
 
     pub fn install(spec: &Spec) -> Result<()> {
@@ -347,6 +425,23 @@ mod platform {
 
     pub fn definition(bot_id: &str) -> Option<PathBuf> {
         dirs::data_local_dir().map(|d| d.join("nebo-link").join(format!("{}.xml", name(bot_id))))
+    }
+
+    /// Task Scheduler ends a task at once.
+    pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::ZERO;
+
+    /// The task Task Scheduler runs is the one it registered, not this file:
+    /// nothing to refresh.
+    pub fn text(_spec: &Spec) -> Option<String> {
+        None
+    }
+
+    pub fn running_as_service(_bot_id: &str) -> bool {
+        false
+    }
+
+    pub fn reread() -> Result<()> {
+        Ok(())
     }
 
     pub fn install(spec: &Spec) -> Result<()> {
@@ -440,6 +535,20 @@ mod tests {
         assert!(user.contains("StandardError=append:/srv/link state/b1/logs/service.log\n"));
         assert!(user.contains("TimeoutStopSec=90\n"));
         assert!(systemd_unit(&spec(), true).contains("WantedBy=multi-user.target"));
+    }
+
+    /// A service started from an older definition stops within the service
+    /// manager's default timeout; one started from this version's has the
+    /// whole grace.
+    #[test]
+    fn a_prompts_grace_fits_the_definition_the_service_runs_under() {
+        let full = crate::run::AGENT_GRACE;
+        let launchd = Duration::from_secs(20);
+        assert_eq!(grace_under(Some("old"), "new", launchd), Duration::from_secs(10));
+        assert_eq!(grace_under(Some("new"), "new", launchd), full);
+        assert_eq!(grace_under(None, "new", launchd), full, "run by hand, not as a service");
+        assert_eq!(grace_under(Some("old"), "new", Duration::from_secs(90)), full);
+        assert_eq!(grace_under(Some("old"), "new", Duration::ZERO), Duration::ZERO);
     }
 
     #[test]

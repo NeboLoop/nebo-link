@@ -41,6 +41,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use crate::{MAX_FRAME, OalHost, PROTOCOL, Via, wire};
 
 const CERT_FILE: &str = "lan-cert.pem";
+/// The most connections one listener holds at once, handshakes included: a
+/// local program that opens connections and never finishes them can't take
+/// the host's file descriptors.
+const MAX_CONNECTIONS: usize = 128;
 const KEY_FILE: &str = "lan-key.pem";
 const SERVICE: &str = "_oal._tcp.local.";
 
@@ -92,6 +96,7 @@ pub async fn serve(oal: Arc<OalHost>, listen: SocketAddr, dir: &Path, reach: Rea
     };
     let mut closing = oal.closing();
     let host = oal.clone();
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
@@ -99,17 +104,26 @@ pub async fn serve(oal: Arc<OalHost>, listen: SocketAddr, dir: &Path, reach: Rea
                 _ = crate::stopped(&mut closing) => break,
             };
             let Ok((tcp, peer)) = accepted else { continue };
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                tracing::info!(%peer, "oal: too many connections at once; one refused");
+                continue;
+            };
             let acceptor = acceptor.clone();
             let oal = host.clone();
             tokio::spawn(async move {
-                let Ok(tls) = acceptor.accept(tcp).await else {
-                    tracing::debug!(%peer, "oal: a LAN connection failed its TLS handshake");
-                    return;
-                };
-                let config = WebSocketConfig::default()
-                    .max_message_size(Some(MAX_FRAME + 1024))
-                    .max_frame_size(Some(MAX_FRAME + 1024));
-                let Ok(ws) = tokio_tungstenite::accept_hdr_async_with_config(tls, Upgrade, Some(config)).await else {
+                let _slot = slot;
+                // TLS and the upgrade finish within the time a first message
+                // has (spec 4.3), or the connection is closed.
+                let opened = tokio::time::timeout(crate::conn::FIRST, async {
+                    let tls = acceptor.accept(tcp).await.ok()?;
+                    let config = WebSocketConfig::default()
+                        .max_message_size(Some(MAX_FRAME + 1024))
+                        .max_frame_size(Some(MAX_FRAME + 1024));
+                    tokio_tungstenite::accept_hdr_async_with_config(tls, Upgrade, Some(config)).await.ok()
+                })
+                .await;
+                let Ok(Some(ws)) = opened else {
+                    tracing::debug!(%peer, "oal: a direct connection did not finish its handshake");
                     return;
                 };
                 oal.serve(wire::websocket(ws), Via::Lan).await;

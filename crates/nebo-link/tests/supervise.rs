@@ -150,6 +150,12 @@ impl Fixture {
             .collect()
     }
 
+    /// The process the link recorded it started, as recorded.
+    fn started(&self) -> Option<link_core::process::Started> {
+        let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(self.dir.processes_file()).ok()?).ok()?;
+        serde_json::from_value(file["gateway"].clone()).ok()
+    }
+
     fn started_pid(&self) -> Option<u32> {
         let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(self.dir.processes_file()).ok()?).ok()?;
         file["gateway"]["pid"].as_u64().map(|pid| pid as u32)
@@ -206,13 +212,14 @@ async fn a_process_that_is_down_is_started_and_started_again_when_it_ends() {
         state(&supervisor) == Some(ProcessState::Running { by: StartedBy::Link })
     })
     .await;
-    let pid = fx.started_pid().expect("the started process is recorded");
+    let first = fx.started().expect("the started process is recorded");
+    let pid = first.pid;
     assert!(supervise::alive(pid));
     assert!(fx.dir.log(Some("gateway")).exists(), "its output goes to the bot's logs");
 
     // It ends: started again, after the first backoff.
     let ended = Instant::now();
-    supervise::stop(pid).await;
+    assert!(link_core::process::stop_recorded(&first, Duration::from_secs(10)).await);
     wait_for("the end to be noticed", || {
         matches!(state(&supervisor), Some(ProcessState::Down { ref why }) if why.contains("fake-http") && why.contains("ended"))
     })
@@ -221,13 +228,13 @@ async fn a_process_that_is_down_is_started_and_started_again_when_it_ends() {
         state(&supervisor) == Some(ProcessState::Running { by: StartedBy::Link })
     })
     .await;
-    let again = fx.started_pid().expect("recorded again");
-    assert_ne!(again, pid);
+    let again = fx.started().expect("recorded again");
+    assert_ne!(again.pid, pid);
     assert!(ended.elapsed() >= supervise::FIRST_BACKOFF, "started again only after the backoff");
 
     running.abort();
-    supervise::stop(again).await;
-    assert!(!supervise::alive(again));
+    assert!(link_core::process::stop_recorded(&again, Duration::from_secs(10)).await);
+    assert!(!supervise::alive(again.pid));
 }
 
 #[tokio::test]
@@ -333,6 +340,20 @@ async fn what_pairing_started_is_adopted_and_stopped_by_unlink() {
     assert_eq!(released.stopped, ["gateway"]);
     assert!(!supervise::alive(pid));
     assert!(!fx.dir.processes_file().exists());
+}
+
+/// A recorded pid the operating system has given to another process since
+/// (it started at another time) is neither adopted nor stopped.
+#[tokio::test]
+async fn a_recorded_pid_now_another_process_is_left_alone() {
+    let fx = Fixture::new();
+    let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    std::fs::write(fx.dir.processes_file(), format!(r#"{{"gateway": {{"pid": {}, "started": 1}}}}"#, other.id())).unwrap();
+    let released = supervise::release(&fx.dir, &[], &[fx.process(None)]).await;
+    assert!(released.stopped.is_empty());
+    assert!(supervise::alive(other.id()), "another process keeps running");
+    let _ = other.kill();
+    let _ = other.wait();
 }
 
 #[test]

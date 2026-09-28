@@ -17,7 +17,7 @@ use crate::{OalHost, PROTOCOL, Via, Wire, select_version, token};
 
 /// How long a client has for its first message and each handshake step
 /// (spec 4.3).
-const FIRST: Duration = Duration::from_secs(10);
+pub(crate) const FIRST: Duration = Duration::from_secs(10);
 /// A client that sends nothing for this long is closed with 4008 (spec 11).
 const SILENCE: Duration = Duration::from_secs(60);
 

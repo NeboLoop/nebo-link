@@ -32,6 +32,7 @@ use crate::error::Result;
 use crate::install::{self, runtime_name};
 use crate::state::{AgentDir, read_json, write_json};
 pub use link_core::process::alive;
+use link_core::process::{self, Started};
 
 /// How often a process that answers is checked again.
 pub const POLL: Duration = Duration::from_secs(30);
@@ -78,15 +79,9 @@ pub enum StartedBy {
     LinkService,
 }
 
-/// A foreground process the link started, as `processes.json` records it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Started {
-    pid: u32,
-    /// Unix seconds.
-    started: u64,
-}
-
+/// The foreground processes the link started, as `processes.json` records
+/// them: each with when it started and on which boot, so a pid the
+/// operating system gave to another process since is never taken for it.
 type StartedFile = BTreeMap<String, Started>;
 
 /// The processes of one linked installation.
@@ -208,21 +203,17 @@ impl Supervisor {
         read_json(&self.dir.processes_file()).unwrap_or_default()
     }
 
-    fn record_started(&self, name: &str, pid: u32) {
+    fn record_started(&self, name: &str, pid: u32) -> Started {
         if let Err(e) = self.dir.create() {
             tracing::warn!(error = %e, "could not make the agent's directory");
         }
+        let record = Started::now(pid);
         let mut file = self.started_file();
-        file.insert(
-            name.to_owned(),
-            Started {
-                pid,
-                started: unix_now(),
-            },
-        );
+        file.insert(name.to_owned(), record.clone());
         if let Err(e) = write_json(&self.dir.processes_file(), &file) {
             tracing::warn!(error = %e, "could not record the started process");
         }
+        record
     }
 
     fn forget_started(&self, name: &str) {
@@ -238,7 +229,9 @@ impl Supervisor {
 /// A foreground process the link started (or adopted from the link process
 /// before it).
 struct Own {
-    pid: u32,
+    /// The process, as recorded: it is stopped only while it is still that
+    /// process.
+    record: Started,
     /// Present when this link process spawned it.
     child: Option<tokio::process::Child>,
     started: Instant,
@@ -248,7 +241,7 @@ impl Own {
     fn alive(&mut self) -> bool {
         match &mut self.child {
             Some(child) => matches!(child.try_wait(), Ok(None)),
-            None => alive(self.pid),
+            None => self.record.running(),
         }
     }
 
@@ -296,10 +289,10 @@ impl<S: std::ops::Deref<Target = Supervisor>> Worker<S> {
         let Some(record) = self.sup.started_file().remove(&self.process.name) else {
             return;
         };
-        if alive(record.pid) {
+        if record.running() {
             let age = Duration::from_secs(unix_now().saturating_sub(record.started));
             self.own = Some(Own {
-                pid: record.pid,
+                record,
                 child: None,
                 started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
             });
@@ -336,7 +329,7 @@ impl<S: std::ops::Deref<Target = Supervisor>> Worker<S> {
                     self.sup.set(&name, ProcessState::Starting);
                     return STARTING_POLL;
                 }
-                stop(own.pid).await;
+                process::stop_recorded(&own.record, STOP_GRACE).await;
                 format!("did not answer within {} s", STARTUP_GRACE.as_secs())
             } else {
                 match own.exit_status() {
@@ -430,10 +423,9 @@ impl<S: std::ops::Deref<Target = Supervisor>> Worker<S> {
         });
         match spawned {
             Ok(child) => {
-                let pid = child.id().unwrap_or_default();
-                self.sup.record_started(&name, pid);
+                let record = self.sup.record_started(&name, child.id().unwrap_or_default());
                 self.own = Some(Own {
-                    pid,
+                    record,
                     child: Some(child),
                     started: Instant::now(),
                 });
@@ -492,8 +484,7 @@ pub async fn release(dir: &AgentDir, services: &[String], processes: &[ManagedPr
     let mut released = Released::default();
     let started: StartedFile = read_json(&dir.processes_file()).unwrap_or_default();
     for (name, record) in started {
-        if alive(record.pid) {
-            stop(record.pid).await;
+        if process::stop_recorded(&record, STOP_GRACE).await {
             released.stopped.push(name);
         }
     }
@@ -561,14 +552,10 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// How long a process the link started gets to end when asked.
+/// How long a process the link started gets to end when asked, before it
+/// is made to.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
-/// Stops a process the link started: its whole process group is asked to
-/// end, and made to after [`STOP_GRACE`].
-pub async fn stop(pid: u32) {
-    link_core::process::stop(pid, STOP_GRACE).await;
-}
 
 #[cfg(test)]
 mod tests {

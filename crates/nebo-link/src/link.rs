@@ -928,7 +928,7 @@ pub fn host_label() -> String {
 
 /// The `--home` the service must be given: set only when the state root is
 /// not the default one.
-fn root_override(root: &Root) -> Option<PathBuf> {
+pub(crate) fn root_override(root: &Root) -> Option<PathBuf> {
     let default = link_core::machine::default_daemon_home();
     (default.as_deref() != Some(root.path())).then(|| root.path().to_path_buf())
 }

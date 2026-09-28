@@ -157,6 +157,7 @@ impl Acp {
                 mcp: Mutex::new(HashMap::new()),
                 in_use: AtomicUsize::new(0),
                 starting: AtomicBool::new(false),
+                closing: AtomicBool::new(false),
                 settings,
             }),
         }
@@ -169,7 +170,7 @@ impl Acp {
         match live {
             Some(live) => {
                 self.shared.look(&live).await;
-                self.shared.busy_of(&live)
+                self.shared.busy_of(&live, 0)
             }
             None => self.shared.requests(0),
         }
@@ -208,6 +209,8 @@ struct Shared {
     in_use: AtomicUsize,
     /// Its process is starting.
     starting: AtomicBool,
+    /// The host is shutting down: no prompt is taken, nothing started.
+    closing: AtomicBool,
 }
 
 /// Where a conversation that moved works now.
@@ -287,21 +290,23 @@ impl Busy {
 }
 
 /// Since when an agent has been idle, looked at every so often: it is due to
-/// pause once idle for its window, counted from the first look that found
-/// it idle, never while it works.
+/// pause once idle for its window, counted from the later of the first look
+/// that found it idle and the last thing it did (a prompt that ran and ended
+/// between two looks counts), never while it works.
 #[derive(Debug, Default)]
 struct Idle {
     since: Option<Instant>,
 }
 
 impl Idle {
-    fn due(&mut self, now: Instant, idle: bool, window: Duration) -> bool {
+    fn due(&mut self, now: Instant, idle: bool, active: Option<Instant>, window: Duration) -> bool {
         if !idle {
             self.since = None;
             return false;
         }
-        let since = *self.since.get_or_insert(now);
-        now.duration_since(since) >= window
+        let first = *self.since.get_or_insert(now);
+        let from = active.map_or(first, |active| active.max(first));
+        now.saturating_duration_since(from) >= window
     }
 }
 
@@ -331,9 +336,16 @@ struct Sessions {
     /// The agent's own processes, as they were while it worked on nothing:
     /// any other one under it is work.
     baseline: BTreeSet<u32>,
-    /// No prompt since a session last opened: every process under it now is
-    /// the agent's own.
+    /// Processes a turn started (seen under it while it worked, or left
+    /// running when a session opened): work until they exit, never taken
+    /// for the agent's own.
+    work: BTreeSet<u32>,
+    /// No prompt since a session last opened: every process under it now,
+    /// but what a turn started, is the agent's own.
     settled: bool,
+    /// When it last did anything: a request to it, a prompt started or
+    /// ended, anything it sent.
+    active: Option<Instant>,
     /// Its processes' CPU time at the last look, and whether they worked
     /// then.
     cpu: Option<Duration>,
@@ -389,10 +401,13 @@ impl Sessions {
             self.processes_work = cfg!(not(unix));
             return;
         };
-        if self.settled {
-            self.baseline.extend(tree.descendants.iter().copied());
-        }
+        self.work.retain(|pid| tree.descendants.contains(pid));
         self.baseline.retain(|pid| tree.descendants.contains(pid));
+        if self.settled {
+            self.baseline.extend(tree.descendants.iter().copied().filter(|pid| !self.work.contains(pid)));
+        } else {
+            self.work.extend(tree.descendants.iter().copied().filter(|pid| !self.baseline.contains(pid)));
+        }
         let started = tree.descendants.iter().any(|pid| !self.baseline.contains(pid));
         let used = self.cpu.is_some_and(|before| tree.cpu.saturating_sub(before) >= CPU_WORK);
         self.cpu = Some(tree.cpu);
@@ -434,8 +449,36 @@ impl Sessions {
         }
     }
 
+    /// A session is about to open: what runs under the agent now that isn't
+    /// its own was left by a turn, and stays work until it exits.
+    fn opening(&mut self, tree: Option<&process::Tree>) {
+        if let Some(tree) = tree {
+            let left: Vec<u32> = tree.descendants.iter().copied().filter(|pid| !self.baseline.contains(pid)).collect();
+            self.work.extend(left);
+        }
+    }
+
+    /// A prompt in `session` starts: a cancel from before it is not its.
+    fn prompt_started(&mut self, session: &str, now: Instant) {
+        *self.prompts.entry(session.to_owned()).or_default() += 1;
+        self.cancelled.remove(session);
+        self.tools.remove(session);
+        self.plans.remove(session);
+        self.settled = false;
+        self.active = Some(now);
+    }
+
+    /// A cancel for `session`: noted only while a prompt of its runs, so a
+    /// cancel that came after its turn ended never touches the next one.
+    fn cancel(&mut self, session: &str, now: Instant) {
+        if self.prompts.get(session).is_some_and(|n| *n > 0) {
+            self.cancelled.insert(session.to_owned(), now);
+        }
+    }
+
     /// A turn in `session` ended: its tool calls and plan with it.
     fn turn_ended(&mut self, session: &str) {
+        self.active = Some(Instant::now());
         if let Some(n) = self.prompts.get_mut(session) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -515,6 +558,9 @@ impl Shared {
         {
             return Ok(live.clone());
         }
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(Error::Unavailable(format!("could not connect to {}. Try again.", self.name())));
+        }
         // A process that ended by itself: its sessions are paused, and
         // reopened in the next one when asked for.
         if let Some(ended) = slot.take() {
@@ -563,36 +609,51 @@ impl Shared {
     }
 
     /// Why the running agent works now ([`Sessions::busy`]), requests in
-    /// flight with it.
-    fn busy_of(&self, live: &Live) -> Busy {
+    /// flight with it but the caller's `own`.
+    fn busy_of(&self, live: &Live, own: usize) -> Busy {
         let mut state = live.state.lock().expect("sessions");
         let prompts: usize = state.prompts.values().sum();
         let mut busy = state.busy(Instant::now());
         drop(state);
-        let requests = self.requests(prompts);
+        let requests = self.requests(prompts + own);
         busy.why.extend(requests.why);
         busy
     }
 
     /// Looks at the running agent's processes ([`Sessions::looked`]).
     async fn look(&self, live: &Live) {
-        let pid = live.pid;
-        let tree = tokio::task::spawn_blocking(move || process::tree(pid)).await.ok().flatten();
+        let tree = Self::tree(live).await;
         live.state.lock().expect("sessions").looked(tree.as_ref());
+    }
+
+    /// Before a session opens: what a turn left running stays work
+    /// ([`Sessions::opening`]).
+    async fn opening(&self, live: &Live) {
+        let tree = Self::tree(live).await;
+        live.state.lock().expect("sessions").opening(tree.as_ref());
+    }
+
+    async fn tree(live: &Live) -> Option<process::Tree> {
+        let pid = live.pid;
+        tokio::task::spawn_blocking(move || process::tree(pid)).await.ok().flatten()
     }
 
     /// Pauses the running agent `live`: its processes stop (asked, then made
     /// to) and free their memory; its sessions are kept, and the next
-    /// request for one resumes it in a new process. Never while it works,
-    /// unless `force`d (shutting down). Holding the agent while it stops, so
-    /// a request that comes meanwhile starts it afresh after. Returns whether
-    /// it paused.
-    async fn pause(self: &Arc<Self>, live: &Arc<Live>, why: &str, force: bool) -> bool {
+    /// request for one resumes it in a new process. Never while it works
+    /// ([`Pause`]). Holding the agent while it stops, so a request that
+    /// comes meanwhile starts it afresh after. Returns whether it paused.
+    async fn pause(self: &Arc<Self>, live: &Arc<Live>, why: &str, when: Pause) -> bool {
         let mut slot = self.live.lock().await;
         if !slot.as_ref().is_some_and(|l| Arc::ptr_eq(l, live)) {
             return false;
         }
-        if !force && !self.busy_of(live).is_idle() {
+        let allowed = match when {
+            Pause::WhenIdle => self.busy_of(live, 0).is_idle(),
+            Pause::ForThisRequest => self.busy_of(live, 1).is_idle(),
+            Pause::Now => true,
+        };
+        if !allowed {
             return false;
         }
         slot.take();
@@ -635,7 +696,7 @@ impl Shared {
         let mut sessions: BTreeMap<String, Life> = paused;
         let (busy, idle_since, heard) = match &live {
             Some(live) => {
-                let busy = self.busy_of(live);
+                let busy = self.busy_of(live, 0);
                 let state = live.state.lock().expect("sessions");
                 for session in &state.open {
                     sessions.insert(self.conversation(session), Life::Running);
@@ -680,9 +741,10 @@ impl Shared {
         }
     }
 
-    /// Shutting down: a prompt still running gets up to `grace` to finish;
-    /// then the agent pauses, whatever it does.
+    /// Shutting down: no prompt is taken from now on; one still running
+    /// gets up to `grace` to finish; then the agent pauses, whatever it does.
     async fn shutdown(self: &Arc<Self>, grace: Duration) {
+        self.closing.store(true, Ordering::SeqCst);
         let Some(live) = self.current().await else {
             return;
         };
@@ -694,7 +756,7 @@ impl Shared {
         if unfinished > 0 {
             tracing::info!(agent = self.key(), prompts = unfinished, "acp: shutting down with prompts still running; their sessions resume when asked for");
         }
-        self.pause(&live, "shutting down", true).await;
+        self.pause(&live, "shutting down", Pause::Now).await;
     }
 
     /// The agent started, and the capabilities it answered `initialize` with.
@@ -713,7 +775,7 @@ impl Shared {
         // was killed before it could stop it) goes before another starts.
         let record = process_file(&settings.chats_file);
         if let Some(left) = read_json::<process::Started>(&record)
-            && process::stop_left_behind(&left, STOP_GRACE).await
+            && process::stop_recorded(&left, STOP_GRACE).await
         {
             tracing::info!(agent = settings.agent.key(), pid = left.pid, "acp: stopped what an earlier run of the agent left running");
         }
@@ -730,13 +792,8 @@ impl Shared {
         .map_err(|e| Error::Unavailable(format!("could not start {}: {e}", self.name())))?;
         let pid = child.id().unwrap_or_default();
         let group = Group(pid);
-        match process::Started::now(pid) {
-            Some(started) => {
-                if let Err(e) = write_private_json(&record, &started) {
-                    tracing::info!(error = %e, "acp: could not record the agent's process");
-                }
-            }
-            None => tracing::info!(pid, "acp: could not tell when the agent's process started; it is not recorded"),
+        if let Err(e) = write_private_json(&record, &process::Started::now(pid)) {
+            tracing::info!(error = %e, "acp: could not record the agent's process");
         }
         tracing::info!(agent = settings.agent.key(), pid, command = %shown(&settings.command), "acp: the agent's process started");
         let answered = tokio::time::timeout(
@@ -843,6 +900,7 @@ impl Shared {
                 format!("{} can't reopen a conversation after it restarts. Start a new chat.", self.name()),
             ));
         };
+        self.opening(live).await;
         live.state.lock().expect("sessions").reopening.insert(session.to_owned());
         let answered = self
             .call(
@@ -881,7 +939,9 @@ impl Shared {
         let call = self.next_reply.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::info!(agent, method, session, call, "acp: request");
         let began = Instant::now();
+        live.state.lock().expect("sessions").active = Some(began);
         let answered = live.conn.request(method, params).await;
+        live.state.lock().expect("sessions").active = Some(Instant::now());
         let ms = began.elapsed().as_millis() as u64;
         match &answered {
             Ok(result) => {
@@ -897,9 +957,21 @@ impl Shared {
         // Taken before the agent is: a pause looks at this holding the agent,
         // so it never stops a request under way.
         let _using = Using::new(&self.in_use);
-        let live = self.live().await.map_err(|e| {
-            ErrorObject::new(code::AGENT_UNAVAILABLE, sentence(&e, self.name()))
-        })?;
+        if method == "session/prompt" && self.closing.load(Ordering::SeqCst) {
+            return Err(ErrorObject::new(code::AGENT_UNAVAILABLE, format!("Could not connect to {}. Try again.", self.name())));
+        }
+        let unavailable = |e: Error| ErrorObject::new(code::AGENT_UNAVAILABLE, sentence(&e, self.name()));
+        let mut live = self.live().await.map_err(unavailable)?;
+        // A cancelled prompt may have left the agent wedged: a prompt goes to
+        // a fresh process, its session reopened there, unless the agent
+        // works on something else.
+        let suspect = live.state.lock().expect("sessions").suspect;
+        if method == "session/prompt"
+            && suspect
+            && self.pause(&live, "a cancelled prompt may have left it wedged; a new prompt starts it afresh", Pause::ForThisRequest).await
+        {
+            live = self.live().await.map_err(unavailable)?;
+        }
         // The conversation the host names, and the agent's session it
         // continues in (another, once it moved).
         let session = params["sessionId"].as_str().map(str::to_owned);
@@ -915,8 +987,9 @@ impl Shared {
                     params["cwd"] = json!(self.settings.workdir);
                 }
             }
-            "session/new" => {}
+            "session/new" => self.opening(&live).await,
             "session/load" | "session/resume" => {
+                self.opening(&live).await;
                 if let (Some(session), Some(target)) = (&session, &target)
                     && session != target
                 {
@@ -941,11 +1014,7 @@ impl Shared {
         let servers = params.get("mcpServers").cloned();
         let prompted = session.clone().filter(|_| method == "session/prompt");
         if let Some(session) = &prompted {
-            let mut state = live.state.lock().expect("sessions");
-            *state.prompts.entry(session.clone()).or_default() += 1;
-            state.tools.remove(session);
-            state.plans.remove(session);
-            state.settled = false;
+            live.state.lock().expect("sessions").prompt_started(session, Instant::now());
         }
         let answered = self.call(&live, &method, params).await;
         if let Some(session) = &prompted {
@@ -1032,6 +1101,7 @@ impl Shared {
             ErrorObject::new(code::AGENT_UNAVAILABLE, sentence(&e, self.name()))
         })?;
         let servers = json!(mcp);
+        self.opening(&live).await;
         let created = self
             .call(&live, "session/new", json!({ "cwd": folder, "mcpServers": servers }))
             .await
@@ -1137,6 +1207,7 @@ fn handle(shared: &Weak<Shared>, state: &Arc<Mutex<Sessions>>, incoming: Incomin
                 let mut state = state.lock().expect("sessions");
                 state.track(&session, update);
                 state.heard.insert(session.clone(), SystemTime::now());
+                state.active = Some(Instant::now());
                 match protocol::update(&params).map(|(_, update)| update) {
                     Some(protocol::Update::Model(model)) => {
                         state.models.insert(session.clone(), model.clone());
@@ -1173,6 +1244,7 @@ fn handle(shared: &Weak<Shared>, state: &Arc<Mutex<Sessions>>, incoming: Incomin
                 let mut state = state.lock().expect("sessions");
                 state.asks.insert(id.to_string(), (reply_id, session.clone()));
                 state.heard.insert(session.clone(), SystemTime::now());
+                state.active = Some(Instant::now());
             }
             tracing::info!(session = %session, tool = %params["toolCall"]["toolCallId"], "acp: permission requested; asking the owner");
             let id = id.clone();
@@ -1278,7 +1350,7 @@ impl Backend for Acp {
                 && let Some(session) = params["sessionId"].as_str()
             {
                 tracing::info!(agent = shared.key(), session, "acp: cancel");
-                live.state.lock().expect("sessions").cancelled.insert(session.to_owned(), Instant::now());
+                live.state.lock().expect("sessions").cancel(session, Instant::now());
             }
             // A conversation that moved may still be finishing its turn in
             // the session it moved from: a cancel reaches each of them.
@@ -1348,6 +1420,17 @@ impl Backend for Acp {
     }
 }
 
+/// When an agent may pause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pause {
+    /// Only while it works on nothing.
+    WhenIdle,
+    /// While it works on nothing but the request asking.
+    ForThisRequest,
+    /// Whatever it does (the host shuts down).
+    Now,
+}
+
 /// A request in flight ([`Shared::in_use`]), until dropped.
 struct Using<'a>(&'a AtomicUsize);
 
@@ -1384,22 +1467,22 @@ async fn watch(shared: Weak<Shared>, live: Weak<Live>) {
             return;
         }
         shared.look(&live).await;
-        let busy = shared.busy_of(&live);
-        let due = idle.due(Instant::now(), busy.is_idle(), shared.settings.idle);
-        let suspect = {
+        let busy = shared.busy_of(&live, 0);
+        let (suspect, active) = {
             let mut state = live.state.lock().expect("sessions");
             state.idle_since = match busy.is_idle() {
                 true => state.idle_since.or(Some(SystemTime::now())),
                 false => None,
             };
-            state.suspect
+            (state.suspect, state.active)
         };
+        let due = idle.due(Instant::now(), busy.is_idle(), active, shared.settings.idle);
         let why = match (due, suspect && busy.is_idle()) {
             (true, _) => "idle",
             (false, true) => "a cancelled prompt may have left it wedged",
             (false, false) => continue,
         };
-        if shared.pause(&live, why, false).await {
+        if shared.pause(&live, why, Pause::WhenIdle).await {
             return;
         }
     }
@@ -1598,25 +1681,66 @@ mod tests {
     #[test]
     fn an_hour_long_silent_prompt_is_work_the_whole_hour() {
         let mut sessions = Sessions::default();
-        *sessions.prompts.entry("s1".into()).or_default() += 1;
-        let mut idle = Idle::default();
         let start = Instant::now();
+        sessions.prompt_started("s1", start);
+        let mut idle = Idle::default();
         for look in 0..=120u64 {
             let now = start + Duration::from_secs(30 * look);
             let busy = sessions.busy(now);
             assert_eq!(why(&busy), [Working::Prompt], "at {} min", look / 2);
-            assert!(!idle.due(now, busy.is_idle(), IDLE_WINDOW), "paused at {} min", look / 2);
+            assert!(!idle.due(now, busy.is_idle(), sessions.active, IDLE_WINDOW), "paused at {} min", look / 2);
         }
         // It ends: the window starts only now, and runs its whole length.
-        sessions.turn_ended("s1");
         let ended = start + Duration::from_secs(3600);
+        sessions.turn_ended("s1");
+        sessions.active = Some(ended);
         assert!(sessions.busy(ended).is_idle());
-        assert!(!idle.due(ended, true, IDLE_WINDOW));
-        assert!(!idle.due(ended + IDLE_WINDOW - Duration::from_secs(1), true, IDLE_WINDOW));
-        assert!(idle.due(ended + IDLE_WINDOW, true, IDLE_WINDOW));
+        assert!(!idle.due(ended, true, sessions.active, IDLE_WINDOW));
+        assert!(!idle.due(ended + IDLE_WINDOW - Duration::from_secs(1), true, sessions.active, IDLE_WINDOW));
+        assert!(idle.due(ended + IDLE_WINDOW, true, sessions.active, IDLE_WINDOW));
         // Work again starts it over.
-        assert!(!idle.due(ended + IDLE_WINDOW, false, IDLE_WINDOW));
-        assert!(!idle.due(ended + IDLE_WINDOW * 2 - Duration::from_secs(1), true, IDLE_WINDOW));
+        assert!(!idle.due(ended + IDLE_WINDOW, false, sessions.active, IDLE_WINDOW));
+        assert!(!idle.due(ended + IDLE_WINDOW * 2 - Duration::from_secs(1), true, sessions.active, IDLE_WINDOW));
+    }
+
+    /// A short prompt that runs and ends between two looks still starts the
+    /// window over: the window counts from the last thing the agent did.
+    #[test]
+    fn a_prompt_between_two_looks_starts_the_window_over() {
+        let start = Instant::now();
+        let mut idle = Idle::default();
+        assert!(!idle.due(start, true, None, IDLE_WINDOW));
+        let prompted = start + IDLE_WINDOW - Duration::from_secs(60);
+        let later = start + IDLE_WINDOW;
+        assert!(!idle.due(later, true, Some(prompted), IDLE_WINDOW), "not due right after a prompt");
+        assert!(idle.due(prompted + IDLE_WINDOW, true, Some(prompted), IDLE_WINDOW));
+    }
+
+    /// A cancel that arrived after its turn ended is nobody's: a later
+    /// prompt, silent however long, is still work and leaves the agent
+    /// trusted.
+    #[test]
+    fn a_stale_cancel_never_touches_a_later_prompt() {
+        let mut sessions = Sessions::default();
+        let now = Instant::now();
+        sessions.prompt_started("s1", now);
+        sessions.turn_ended("s1");
+        // Stop, just after the turn ended.
+        sessions.cancel("s1", now);
+        assert!(sessions.cancelled.is_empty());
+        let later = now + Duration::from_secs(3 * 3600);
+        sessions.prompt_started("s1", later);
+        assert_eq!(why(&sessions.busy(later + CANCEL_GRACE * 10)), [Working::Prompt]);
+        assert!(!sessions.suspect);
+        // A cancel of a previous prompt, still noted, is cleared by the next.
+        sessions.cancel("s1", later);
+        sessions.turn_ended("s1");
+        sessions.prompt_started("s1", later);
+        sessions.cancelled.insert("s1".into(), later);
+        sessions.prompt_started("s1", later + Duration::from_secs(1));
+        assert!(sessions.cancelled.is_empty());
+        assert_eq!(why(&sessions.busy(later + CANCEL_GRACE * 10)), [Working::Prompt]);
+        assert!(!sessions.suspect);
     }
 
     #[test]
@@ -1681,6 +1805,27 @@ mod tests {
         assert_eq!(why(&sessions.busy(now)), [Working::Processes]);
     }
 
+    /// What a turn left running in the background stays work until it
+    /// exits, even once another session opens and settles the agent.
+    #[test]
+    fn what_a_turn_left_running_is_work_until_it_exits() {
+        let tree = |pids: &[u32]| process::Tree { descendants: pids.iter().copied().collect(), cpu: Duration::ZERO };
+        let now = Instant::now();
+        let mut sessions = Sessions { settled: true, ..Sessions::default() };
+        sessions.looked(Some(&tree(&[10])));
+        // A turn starts a background shell, and ends before any look.
+        sessions.prompt_started("s1", now);
+        sessions.turn_ended("s1");
+        // Another session opens: the shell was there before it.
+        sessions.opening(Some(&tree(&[10, 20])));
+        sessions.settled = true;
+        // The session's own process starts as it opens.
+        sessions.looked(Some(&tree(&[10, 20, 30])));
+        assert_eq!(why(&sessions.busy(now)), [Working::Processes], "the shell still works");
+        sessions.looked(Some(&tree(&[10, 30])));
+        assert!(sessions.busy(now).is_idle(), "the shell exited; the session's process is its own");
+    }
+
     /// A cancelled prompt the agent never ends is work for a grace period;
     /// after it the agent is wedged, and suspect: it pauses and resumes
     /// fresh.
@@ -1688,8 +1833,8 @@ mod tests {
     fn a_cancelled_prompt_that_never_ends_leaves_the_agent_suspect() {
         let mut sessions = Sessions::default();
         let now = Instant::now();
-        *sessions.prompts.entry("s1".into()).or_default() += 1;
-        sessions.cancelled.insert("s1".into(), now);
+        sessions.prompt_started("s1", now);
+        sessions.cancel("s1", now);
         assert_eq!(why(&sessions.busy(now + CANCEL_GRACE)), [Working::Prompt]);
         assert!(!sessions.suspect);
         assert!(sessions.busy(now + CANCEL_GRACE + Duration::from_secs(1)).is_idle());

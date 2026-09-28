@@ -36,3 +36,19 @@ async fn this_computer_is_served_on_loopback_and_named_nowhere() {
     .await;
     assert!(closed.is_ok(), "the listener stops with the host");
 }
+
+/// A connection that never finishes its handshake is closed once the time a
+/// first message has is up: a local program can't hold the listener's file
+/// descriptors by opening connections and saying nothing.
+#[tokio::test]
+async fn a_connection_that_never_handshakes_is_closed() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let oal = common::host(dir.path()).await;
+    let machine = lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), Reach::Machine).await.unwrap();
+    let mut silent = tokio::net::TcpStream::connect(machine.addr).await.unwrap();
+    let began = std::time::Instant::now();
+    let read = tokio::time::timeout(std::time::Duration::from_secs(15), silent.read(&mut [0u8; 16])).await;
+    assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "closed: {read:?}");
+    assert!(began.elapsed() >= std::time::Duration::from_secs(9));
+}

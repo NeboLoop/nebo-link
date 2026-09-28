@@ -86,15 +86,20 @@ struct Service {
     supervisors: Vec<Arc<Supervisor>>,
     /// The bot's Open Agent Link host, when it could start.
     oal: Option<crate::oal::Service>,
+    /// How long a running prompt gets to finish when this run of the service
+    /// stops ([`crate::service::refresh`]).
+    grace: Duration,
 }
 
 impl Service {
-    /// Stops the agents as the service stops or restarts: a prompt still
-    /// running gets [`AGENT_GRACE`] to finish, then every agent pauses, its
-    /// sessions kept for the next start. Nothing they started outlives the
-    /// service.
-    async fn stop_agents(&self) {
-        self.host.shutdown(AGENT_GRACE).await;
+    /// Stops the service's work as it stops or restarts: Open Agent Link
+    /// first (its connections and listeners close, so no prompt comes in),
+    /// then the agents: a prompt still running gets the service's grace to
+    /// finish, then every agent pauses, its sessions kept for the next start.
+    /// Nothing they started outlives the service.
+    async fn stop(&self) {
+        self.close_oal();
+        self.host.shutdown(self.grace).await;
     }
 
     /// Closes every Open Agent Link connection with 1001: clients reconnect
@@ -220,6 +225,16 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
         .and_then(|p| p.canonicalize())
         .map_err(|e| Error::Message(format!("could not locate the nebo-link binary: {e}")))?;
     let dir = root.bot(bot_id);
+    // The service's definition as this version writes it; how long a
+    // running prompt may take when this run stops follows from the one it
+    // was started with.
+    let grace = crate::service::refresh(&crate::service::Spec {
+        bot_id: bot_id.to_owned(),
+        exe: exe.clone(),
+        home: link::root_override(root),
+        path: std::env::var("PATH").ok(),
+        logs: dir.logs_dir(),
+    });
     let link = dir.load()?;
     let credentials = Credentials::open(&dir);
     let (token_tx, token_rx) = watch::channel(credentials.load()?);
@@ -332,6 +347,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
         announced: AtomicBool::new(false),
         supervisors: supervisors.clone(),
         oal,
+        grace,
     });
 
     tokio::spawn(proxy::serve(
@@ -459,18 +475,15 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
                     Ended::Shutdown => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
-                        service.stop_agents().await;
-                        service.close_oal();
+                        service.stop().await;
                         return stopped(&dir);
                     }
                     Ended::Revoked => break,
                     Ended::Update(next) => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
-                        service.stop_agents().await;
-                        let e = update::restart(next, root, &exe);
-                        tracing::error!(error = %e, "could not restart as the new version");
-                        Duration::ZERO
+                        service.stop().await;
+                        return Err(restart_failed(update::restart(next, root, &exe)));
                     }
                 }
             }
@@ -489,14 +502,12 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = &mut shutdown => {
-                service.stop_agents().await;
-                service.close_oal();
+                service.stop().await;
                 return stopped(&dir);
             }
             Some(next) = staged.recv() => {
-                service.stop_agents().await;
-                let e = update::restart(next, root, &exe);
-                tracing::error!(error = %e, "could not restart as the new version");
+                service.stop().await;
+                return Err(restart_failed(update::restart(next, root, &exe)));
             }
         }
     }
@@ -504,7 +515,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     tracing::warn!("NeboAI removed this bot; unlinking it");
     status_writer.abort();
     let _ = plugin.disconnect().await;
-    service.stop_agents().await;
+    service.stop().await;
     let link = service.link.lock().expect("link lock").clone();
     let unlinked = link::unlink(root, &link, By::Revocation).await?;
     for (agent, released) in unlinked.installs {
@@ -639,6 +650,14 @@ fn connect_config(link: &Link, token: &str, chat: bool) -> HashMap<String, Strin
         config.insert("chat".to_string(), "true".to_string());
     }
     config
+}
+
+/// An update that could not restart the service into the new version: its
+/// work already stopped, the service exits, and its service manager starts
+/// it again (as the version on disk).
+fn restart_failed(e: Error) -> Error {
+    tracing::error!(error = %e, "could not restart as the new version; exiting for the service manager to start it again");
+    e
 }
 
 fn stopped(dir: &BotDir) -> Result<()> {
