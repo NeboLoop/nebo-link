@@ -48,6 +48,7 @@ impl Home {
         Environment {
             home: Some(self.dir.path().to_path_buf()),
             vars: self.vars.clone(),
+            system_dirs: Vec::new(),
         }
     }
 

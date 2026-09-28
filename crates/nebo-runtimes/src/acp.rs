@@ -1,7 +1,11 @@
 //! ACP agents: coding agents that speak the Agent Client Protocol
 //! (<https://agentclientprotocol.com>, protocol version 1) as JSON-RPC over
 //! stdio. One adapter drives them all; what differs per agent is only how it
-//! is started in ACP mode and how its owner signs in.
+//! is found, how it is started in ACP mode, and how its owner signs in and
+//! updates it. That is data: the [`catalog`] of agent programs.
+//!
+//! The four this crate knows by name ([`Agent`]) are in the built-in
+//! catalog, so a computer without Nebo's hub still finds them:
 //!
 //! | Agent | Detected by | Started as |
 //! |---|---|---|
@@ -9,7 +13,7 @@
 //! | Codex | `codex` | `codex-acp`, else `npx --yes @agentclientprotocol/codex-acp` |
 //! | Gemini CLI | `gemini` | `gemini --acp` |
 //! | OpenCode | `opencode` | `opencode acp` |
-//! | any other | the command the owner gives | that command |
+//! | any other | the catalog's entry, or the command the owner gives | that command |
 //!
 //! The Claude Code and Codex adapters were published by Zed as
 //! `@zed-industries/claude-code-acp` and `@zed-industries/codex-acp`; both are
@@ -22,12 +26,14 @@
 //! JSON-RPC error `-32000` "Authentication required"
 //! ([`client::AUTH_REQUIRED`]); [`Agent::sign_in`] says what to do.
 //!
-//! Detection finds the agent's program on `PATH` and in the per-user
-//! folders installers use (`~/.local/bin`, nvm, Volta, Bun, npm's global
-//! prefix), and records the command with absolute paths and the `PATH` its
-//! launcher needs (`npx` runs `node` from its own folder), so a background
-//! service with a bare `PATH` starts it the same way.
+//! Detection finds the agent's program on `PATH` and in the folders
+//! installers use ([`which`]: `~/.local/bin`, nvm, Volta, Bun, npm's global
+//! prefix, Homebrew, and the entry's own), and records the command with
+//! absolute paths and the `PATH` its launcher needs (`npx` runs `node` from
+//! its own folder), so a background service with a bare `PATH` starts it
+//! the same way.
 
+pub mod catalog;
 pub mod client;
 pub mod protocol;
 
@@ -37,8 +43,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Environment, Installation, Runtime, RuntimeCommand};
 
-/// The ACP agents Nebo Link knows by name, and `Other` for any command that
-/// speaks ACP.
+/// The ACP agents Nebo Link knows by name, and `Other` for any other agent
+/// program that speaks ACP (one the catalog names, or a command the owner
+/// gives).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Agent {
@@ -49,19 +56,8 @@ pub enum Agent {
     Other,
 }
 
-/// How an agent is started in ACP mode.
-enum Start {
-    /// The agent's own program with these arguments.
-    Native(&'static [&'static str]),
-    /// An adapter package: its program when installed, else through `npx`.
-    Adapter {
-        program: &'static str,
-        package: &'static str,
-    },
-}
-
 impl Agent {
-    /// The agents detected by name.
+    /// The agents known by name, each an entry of the built-in catalog.
     pub const KNOWN: [Agent; 4] = [
         Agent::ClaudeCode,
         Agent::Codex,
@@ -69,7 +65,8 @@ impl Agent {
         Agent::Opencode,
     ];
 
-    /// The key the hub stores in `bots.runtime`.
+    /// The key the hub stores in `bots.runtime`; the known agents' is their
+    /// catalog id.
     pub fn key(self) -> &'static str {
         match self {
             Agent::ClaudeCode => "claude-code",
@@ -80,44 +77,16 @@ impl Agent {
         }
     }
 
+    /// The agent a catalog id names: a known one, else `Other`.
+    pub fn from_key(key: &str) -> Agent {
+        Agent::KNOWN.into_iter().find(|a| a.key() == key).unwrap_or(Agent::Other)
+    }
+
     /// The agent's name as its owner knows it.
     pub fn name(self) -> &'static str {
-        match self {
-            Agent::ClaudeCode => "Claude Code",
-            Agent::Codex => "Codex",
-            Agent::Gemini => "Gemini CLI",
-            Agent::Opencode => "OpenCode",
-            Agent::Other => "ACP agent",
-        }
-    }
-
-    /// The agent's own program, whose presence means it is installed.
-    fn program(self) -> Option<&'static str> {
-        match self {
-            Agent::ClaudeCode => Some("claude"),
-            Agent::Codex => Some("codex"),
-            Agent::Gemini => Some("gemini"),
-            Agent::Opencode => Some("opencode"),
-            Agent::Other => None,
-        }
-    }
-
-    fn start(self) -> Start {
-        match self {
-            Agent::ClaudeCode => Start::Adapter {
-                program: "claude-agent-acp",
-                package: "@agentclientprotocol/claude-agent-acp",
-            },
-            Agent::Codex => Start::Adapter {
-                program: "codex-acp",
-                package: "@agentclientprotocol/codex-acp",
-            },
-            // `packages/cli/src/config/config.ts`: `--acp`
-            // (`--experimental-acp` is its deprecated spelling).
-            Agent::Gemini => Start::Native(&["--acp"]),
-            // `packages/opencode/src/cli/cmd/acp.ts`.
-            Agent::Opencode => Start::Native(&["acp"]),
-            Agent::Other => Start::Native(&[]),
+        match catalog::Catalog::builtin().get(self.key()) {
+            Some(program) => program.name.as_str(),
+            None => "ACP agent",
         }
     }
 
@@ -125,44 +94,25 @@ impl Agent {
     /// after the fact: "Claude Code isn't signed in on this computer. Run
     /// `claude` once to sign in."
     pub fn sign_in(self, name: &str) -> String {
-        let how = match self {
-            Agent::ClaudeCode => "Run `claude` once to sign in.",
-            Agent::Codex => "Run `codex login` to sign in.",
-            Agent::Gemini => "Run `gemini` once to sign in.",
-            Agent::Opencode => "Run `opencode auth login` to sign in.",
-            Agent::Other => "Sign in to it in a terminal, then try again.",
-        };
+        let how = catalog::Catalog::builtin()
+            .get(self.key())
+            .and_then(|p| p.sign_in.as_ref()?.hint.as_deref())
+            .unwrap_or("Sign in to it in a terminal, then try again.");
         format!("{name} isn't signed in on this computer. {how}")
     }
 }
 
-/// The installed ACP agents of the user `env` describes, one installation
-/// each: `home` is the agent's program (what identifies it among the linked
-/// ones), `restart` the command that starts it in ACP mode (starting it again
-/// is how it is restarted). An agent that is installed but can't be started
-/// in ACP mode (no adapter and no `npx`) carries the reason in
-/// `config_error`.
+/// The known ACP agents installed for the user `env` describes, one
+/// installation each: `home` is the agent's program (what identifies it
+/// among the linked ones), `restart` the command that starts it in ACP mode
+/// (starting it again is how it is restarted). An agent that is installed
+/// but can't be started in ACP mode (no adapter and no `npx`) carries the
+/// reason in `config_error`.
 pub(crate) fn detect(env: &Environment) -> Vec<Installation> {
-    Agent::KNOWN
-        .iter()
-        .filter_map(|&agent| {
-            let program = which(agent.program()?, env)?;
-            let (start, problem) = match agent.start() {
-                Start::Native(args) => (Some(command(&program, args, &[], env)), None),
-                Start::Adapter { program: adapter, package } => match (which(adapter, env), which("npx", env)) {
-                    (Some(adapter), _) => (Some(command(&adapter, &[], &[&program], env)), None),
-                    (None, Some(npx)) => (Some(command(&npx, &["--yes", package], &[&program], env)), None),
-                    (None, None) => (
-                        None,
-                        Some(format!(
-                            "{} needs Node.js to run for NeboAI: install Node.js (it includes npx), or `npm install -g {package}`, then try again.",
-                            agent.name()
-                        )),
-                    ),
-                },
-            };
-            Some(installation(agent, program, start, problem))
-        })
+    catalog::Catalog::builtin()
+        .find(env)
+        .into_iter()
+        .map(|found| installation(Agent::from_key(&found.program.id), found.path, found.command, found.problem))
         .collect()
 }
 
@@ -211,7 +161,7 @@ fn installation(
 
 /// `program args…`, with `PATH` led by the folders of the program and of
 /// `beside` (a launcher's interpreter, the agent an adapter wraps).
-fn command(program: &Path, args: &[&str], beside: &[&Path], env: &Environment) -> RuntimeCommand {
+pub(crate) fn command(program: &Path, args: &[&str], beside: &[&Path], env: &Environment) -> RuntimeCommand {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for path in std::iter::once(program).chain(beside.iter().copied()) {
         if let Some(dir) = path.parent().map(Path::to_path_buf)
@@ -235,13 +185,21 @@ fn command(program: &Path, args: &[&str], beside: &[&Path], env: &Environment) -
     }
 }
 
-/// Finds `name` on `PATH`, then in the per-user folders installers put
-/// programs in (a service's `PATH` often lacks them).
+/// Finds `name` on `PATH`, then in the per-user and Homebrew folders
+/// installers put programs in (a service's `PATH` often lacks them).
 pub fn which(name: &str, env: &Environment) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = env
-        .var("PATH")
-        .map(|p| std::env::split_paths(p).collect())
-        .unwrap_or_default();
+    candidates(name, &[], env).next()
+}
+
+/// Every executable called `name` in `first`, on `PATH`, then in the
+/// folders installers use, in that order.
+pub(crate) fn candidates<'a>(name: &'a str, first: &[PathBuf], env: &Environment) -> impl Iterator<Item = PathBuf> + 'a {
+    let mut dirs: Vec<PathBuf> = first.to_vec();
+    dirs.extend(
+        env.var("PATH")
+            .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     if let Some(home) = &env.home {
         for dir in [
             ".local/bin",
@@ -250,11 +208,25 @@ pub fn which(name: &str, env: &Environment) -> Option<PathBuf> {
             ".volta/bin",
             ".bun/bin",
             ".asdf/shims",
+            ".cargo/bin",
+            "Library/pnpm",
+            ".local/share/pnpm",
         ] {
             dirs.push(home.join(dir));
         }
         dirs.extend(newest_nvm_bin(home));
+        dirs.extend(npm_prefix_bin(home));
     }
+    if let Some(pnpm) = env.var("PNPM_HOME") {
+        dirs.push(PathBuf::from(pnpm));
+    }
+    dirs.extend(env.system_dirs.iter().cloned());
+    let mut seen: Vec<PathBuf> = Vec::new();
+    dirs.retain(|d| {
+        let new = !seen.contains(d);
+        seen.push(d.clone());
+        new
+    });
     let names: Vec<String> = if cfg!(windows) {
         ["", ".exe", ".cmd"]
             .iter()
@@ -263,9 +235,21 @@ pub fn which(name: &str, env: &Environment) -> Option<PathBuf> {
     } else {
         vec![name.to_owned()]
     };
-    dirs.iter()
-        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
-        .find(|path| is_executable(path))
+    dirs.into_iter()
+        .flat_map(move |dir| names.clone().into_iter().map(move |n| dir.join(n)))
+        .filter(|path| is_executable(path))
+}
+
+/// `<prefix>/bin` for the global prefix `~/.npmrc` sets (`npm config set
+/// prefix`).
+fn npm_prefix_bin(home: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(home.join(".npmrc")).ok()?;
+    let prefix = text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "prefix").then(|| value.trim().to_owned())
+    })?;
+    let prefix = crate::environment::expand_tilde(&prefix, home);
+    Some(if cfg!(windows) { prefix } else { prefix.join("bin") })
 }
 
 /// `~/.nvm/versions/node/<newest>/bin`.
@@ -317,7 +301,7 @@ mod tests {
     fn env(home: &Path, path: &[&Path]) -> Environment {
         let mut env = Environment {
             home: Some(home.to_path_buf()),
-            vars: Default::default(),
+            ..Default::default()
         };
         let joined = std::env::join_paths(path).unwrap();
         env.vars

@@ -10,7 +10,13 @@ pub struct Environment {
     pub home: Option<PathBuf>,
     /// Environment variables, e.g. `OPENCLAW_STATE_DIR` or `HERMES_HOME`.
     pub vars: BTreeMap<String, String>,
+    /// Folders programs are installed in for every user, looked in after
+    /// `PATH` and the user's own: Homebrew's.
+    pub system_dirs: Vec<PathBuf>,
 }
+
+/// Homebrew's program folders: Apple silicon, Intel, Linux.
+const HOMEBREW: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"];
 
 impl Environment {
     /// The current process's home directory and environment variables.
@@ -18,6 +24,7 @@ impl Environment {
         Self {
             home: dirs::home_dir(),
             vars: std::env::vars().collect(),
+            system_dirs: HOMEBREW.iter().map(PathBuf::from).collect(),
         }
     }
 

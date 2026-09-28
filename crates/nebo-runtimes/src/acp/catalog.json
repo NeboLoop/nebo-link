@@ -1,0 +1,67 @@
+{
+  "programs": [
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "find": [{ "program": "claude" }],
+      "acp": { "adapter": { "program": "claude-agent-acp", "package": "@agentclientprotocol/claude-agent-acp" } },
+      "version": { "args": ["--version"] },
+      "signIn": { "command": ["{program}"], "hint": "Run `claude` once to sign in." },
+      "update": {
+        "latest": { "npm": "@anthropic-ai/claude-code" },
+        "commands": [{ "command": ["{program}", "update"] }]
+      }
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "find": [{ "program": "codex" }],
+      "acp": { "adapter": { "program": "codex-acp", "package": "@agentclientprotocol/codex-acp" } },
+      "version": { "args": ["--version"] },
+      "signIn": {
+        "files": ["~/.codex/auth.json"],
+        "env": ["OPENAI_API_KEY", "CODEX_API_KEY"],
+        "command": ["{program}", "login"],
+        "hint": "Run `codex login` to sign in."
+      },
+      "update": {
+        "latest": { "npm": "@openai/codex" },
+        "commands": [
+          { "pathContains": "/Caskroom/", "command": ["brew", "upgrade", "codex"] },
+          { "pathContains": "/Cellar/", "command": ["brew", "upgrade", "codex"] },
+          { "pathContains": "/node_modules/", "command": ["npm", "install", "-g", "@openai/codex@latest"] }
+        ]
+      }
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "find": [{ "program": "gemini" }],
+      "acp": { "args": ["--acp"] },
+      "signIn": {
+        "files": ["~/.gemini/oauth_creds.json"],
+        "env": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"],
+        "command": ["{program}"],
+        "hint": "Run `gemini` once to sign in."
+      },
+      "update": {
+        "latest": { "npm": "@google/gemini-cli" },
+        "commands": [
+          { "pathContains": "/Cellar/", "command": ["brew", "upgrade", "gemini-cli"] },
+          { "pathContains": "/node_modules/", "command": ["npm", "install", "-g", "@google/gemini-cli@latest"] }
+        ]
+      }
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "find": [{ "program": "opencode" }],
+      "acp": { "args": ["acp"] },
+      "signIn": { "command": ["{program}", "auth", "login"], "hint": "Run `opencode auth login` to sign in." },
+      "update": {
+        "latest": { "npm": "opencode-ai" },
+        "commands": [{ "command": ["{program}", "upgrade"] }]
+      }
+    }
+  ]
+}
