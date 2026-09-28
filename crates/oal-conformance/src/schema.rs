@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn schemas_build_and_catch_a_bad_frame() {
         let schemas = Schemas::load();
-        assert_eq!(schemas.methods.len(), 14, "one schema per host method");
+        assert_eq!(schemas.methods.len(), 15, "one schema per host method");
         let turn = json!({ "jsonrpc": "2.0", "method": "host/turn", "params": {
             "agent": "app", "sessionId": "s", "turnId": "t1", "state": "running", "startedAt": "2026-09-26T17:04:05Z" } });
         schemas.check(&turn, None).unwrap();

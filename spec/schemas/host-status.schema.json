@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagent.link/schemas/0.1/host-status.schema.json",
+  "title": "host/status",
+  "description": "Where each agent is in its life and whether it works now, with each session it holds. Request, client to host.",
+  "$defs": {
+    "params": {
+      "type": "object"
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentStatus"
+          }
+        }
+      },
+      "required": [
+        "agents"
+      ]
+    },
+    "Life": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "paused",
+        "resuming"
+      ]
+    },
+    "Working": {
+      "type": "string",
+      "enum": [
+        "prompt",
+        "tool",
+        "permission",
+        "plan",
+        "request",
+        "processes"
+      ]
+    },
+    "AgentStatus": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/Life"
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "why": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Working"
+          }
+        },
+        "idleSince": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionStatus"
+          }
+        }
+      },
+      "required": [
+        "agent",
+        "state",
+        "busy",
+        "sessions"
+      ]
+    },
+    "SessionStatus": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/Life"
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "why": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Working"
+          }
+        },
+        "lastUpdate": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "sessionId",
+        "state",
+        "busy"
+      ]
+    }
+  }
+}

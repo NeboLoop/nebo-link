@@ -25,7 +25,7 @@ async fn passes(target: &Target) {
 async fn every_example_passes_on_the_lan() {
     let dir = tempfile::tempdir().unwrap();
     let oal = common::host(dir.path()).await;
-    let lan = oal_host::lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), false)
+    let lan = oal_host::lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), oal_host::lan::Reach::Lan { advertise: false })
         .await
         .unwrap();
     assert_eq!(oal.info()["host"]["tlsFingerprint"], lan.fingerprint.as_str());

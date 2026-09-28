@@ -7,24 +7,44 @@
 //!
 //! Every connection is end-to-end encrypted as through a relay: TLS here is
 //! the transport the spec fixes, not what the host trusts.
+//!
+//! The same listener serves this computer alone ([`Reach::Machine`]): on
+//! loopback, never announced or named in `host/info`, for an app of the
+//! host's own OS user, which reads where it is and its fingerprint in the
+//! host's state (`link_core::machine::direct`). An app on the same computer
+//! then never depends on a relay to reach it.
+//!
+//! The client's side is here too: [`dial`] opens the pinned connection, and
+//! a [`Browser`] finds hosts on the LAN by their id.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::{MAX_FRAME, OalHost, PROTOCOL, Via, wire};
 
 const CERT_FILE: &str = "lan-cert.pem";
+/// The most connections one listener holds at once, handshakes included: a
+/// local program that opens connections and never finishes them can't take
+/// the host's file descriptors.
+const MAX_CONNECTIONS: usize = 128;
 const KEY_FILE: &str = "lan-key.pem";
 const SERVICE: &str = "_oal._tcp.local.";
 
@@ -36,10 +56,23 @@ pub struct Lan {
     pub fingerprint: String,
 }
 
+/// Who a listener serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// The local network: `host/info` names the fingerprint, and with
+    /// `advertise`, DNS-SD announces the host.
+    Lan { advertise: bool },
+    /// This computer alone, on loopback: its apps read where it is in the
+    /// host's state, so nothing names or announces it.
+    Machine,
+}
+
 /// Serves `/oal` on `listen` over TLS with the certificate kept in `dir`
-/// (made on first use), until the host shuts down; with `advertise`, DNS-SD
-/// announces it.
-pub async fn serve(oal: Arc<OalHost>, listen: SocketAddr, dir: &Path, advertise: bool) -> Result<Lan, String> {
+/// (made on first use), to `reach`, until the host shuts down.
+pub async fn serve(oal: Arc<OalHost>, listen: SocketAddr, dir: &Path, reach: Reach) -> Result<Lan, String> {
+    if reach == Reach::Machine && !listen.ip().is_loopback() {
+        return Err(format!("{listen} isn't on loopback: this computer alone is served there"));
+    }
     let (certs, key) = certificate(dir)?;
     let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(certs[0].as_ref()));
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -53,10 +86,17 @@ pub async fn serve(oal: Arc<OalHost>, listen: SocketAddr, dir: &Path, advertise:
         .await
         .map_err(|e| format!("could not listen on {listen}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    oal.set_fingerprint(Some(fingerprint.clone()));
-    let mdns = if advertise { announce(&oal, addr.port()) } else { None };
+    let lan = matches!(reach, Reach::Lan { .. });
+    if lan {
+        oal.set_fingerprint(Some(fingerprint.clone()));
+    }
+    let mdns = match reach {
+        Reach::Lan { advertise: true } => announce(&oal, addr.port()),
+        _ => None,
+    };
     let mut closing = oal.closing();
     let host = oal.clone();
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
@@ -64,28 +104,42 @@ pub async fn serve(oal: Arc<OalHost>, listen: SocketAddr, dir: &Path, advertise:
                 _ = crate::stopped(&mut closing) => break,
             };
             let Ok((tcp, peer)) = accepted else { continue };
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                tracing::info!(%peer, "oal: too many connections at once; one refused");
+                continue;
+            };
             let acceptor = acceptor.clone();
             let oal = host.clone();
             tokio::spawn(async move {
-                let Ok(tls) = acceptor.accept(tcp).await else {
-                    tracing::debug!(%peer, "oal: a LAN connection failed its TLS handshake");
-                    return;
-                };
-                let config = WebSocketConfig::default()
-                    .max_message_size(Some(MAX_FRAME + 1024))
-                    .max_frame_size(Some(MAX_FRAME + 1024));
-                let Ok(ws) = tokio_tungstenite::accept_hdr_async_with_config(tls, Upgrade, Some(config)).await else {
+                let _slot = slot;
+                // TLS and the upgrade finish within the time a first message
+                // has (spec 4.3), or the connection is closed.
+                let opened = tokio::time::timeout(crate::conn::FIRST, async {
+                    let tls = acceptor.accept(tcp).await.ok()?;
+                    let config = WebSocketConfig::default()
+                        .max_message_size(Some(MAX_FRAME + 1024))
+                        .max_frame_size(Some(MAX_FRAME + 1024));
+                    tokio_tungstenite::accept_hdr_async_with_config(tls, Upgrade, Some(config)).await.ok()
+                })
+                .await;
+                let Ok(Some(ws)) = opened else {
+                    tracing::debug!(%peer, "oal: a direct connection did not finish its handshake");
                     return;
                 };
                 oal.serve(wire::websocket(ws), Via::Lan).await;
             });
         }
-        oal.set_fingerprint(None);
+        if lan {
+            oal.set_fingerprint(None);
+        }
         if let Some(mdns) = mdns {
             let _ = mdns.shutdown();
         }
     });
-    tracing::info!(%addr, "oal: LAN direct is on");
+    match reach {
+        Reach::Lan { .. } => tracing::info!(%addr, "oal: LAN direct is on"),
+        Reach::Machine => tracing::info!(%addr, "oal: this computer's apps reach the host directly"),
+    }
     Ok(Lan { addr, fingerprint })
 }
 
@@ -161,5 +215,166 @@ impl Callback for Upgrade {
             resp.headers_mut().insert("sec-websocket-protocol", "oal".parse().expect("header"));
         }
         Ok(resp)
+    }
+}
+
+/// A client's connection to a host's own listener.
+pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Opens `wss://<addr>/oal`, accepting only the certificate with
+/// `fingerprint` (spec 4.5: learned from an authenticated `host/info`, or
+/// on this computer from the host's state), and offering the `oal`
+/// subprotocol.
+pub async fn dial(addr: SocketAddr, fingerprint: &str) -> Result<Socket, String> {
+    let mut request = format!("wss://{addr}/oal").into_client_request().map_err(|e| e.to_string())?;
+    request.headers_mut().insert("sec-websocket-protocol", "oal".parse().expect("header"));
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_FRAME + 1024))
+        .max_frame_size(Some(MAX_FRAME + 1024));
+    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(pinned(fingerprint)));
+    let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(request, Some(config), false, Some(connector))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(socket)
+}
+
+/// TLS that accepts only the certificate with `fingerprint`.
+fn pinned(fingerprint: &str) -> rustls::ClientConfig {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports the default versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Pinned {
+            fingerprint: fingerprint.to_owned(),
+            provider,
+        }))
+        .with_no_client_auth()
+}
+
+#[derive(Debug)]
+struct Pinned {
+    fingerprint: String,
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for Pinned {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let fingerprint = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(end_entity.as_ref()));
+        if fingerprint == self.fingerprint {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("the host's certificate isn't the one it named".into()))
+        }
+    }
+
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Each host a [`Browser`] heard, by its DNS-SD name: its id and where it
+/// listens.
+type Heard = Arc<Mutex<HashMap<String, (String, Vec<SocketAddr>)>>>;
+
+/// Finds hosts that serve LAN direct, by DNS-SD (`_oal._tcp`, `id=<hostId>`),
+/// for as long as it lives: what it has heard is at hand at once.
+pub struct Browser {
+    daemon: mdns_sd::ServiceDaemon,
+    started: Instant,
+    heard: Heard,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+impl Browser {
+    /// Starts listening for hosts; `Err` when DNS-SD isn't available here.
+    pub fn start() -> Result<Self, String> {
+        let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
+        let events = daemon.browse(SERVICE).map_err(|e| e.to_string())?;
+        let heard: Heard = Arc::default();
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let (hosts, notify) = (heard.clone(), changed.clone());
+        std::thread::spawn(move || {
+            while let Ok(event) = events.recv() {
+                match event {
+                    mdns_sd::ServiceEvent::ServiceResolved(info) => {
+                        let Some(id) = info.get_property_val_str("id").map(str::to_owned) else { continue };
+                        let mut addrs: Vec<SocketAddr> = info
+                            .get_addresses()
+                            .iter()
+                            .filter(|ip| dialable(ip))
+                            .map(|ip| SocketAddr::new(*ip, info.get_port()))
+                            .collect();
+                        addrs.sort_by_key(|a| (a.is_ipv6(), *a));
+                        hosts.lock().expect("hosts heard").insert(info.get_fullname().to_owned(), (id, addrs));
+                        notify.notify_waiters();
+                    }
+                    mdns_sd::ServiceEvent::ServiceRemoved(_, fullname) => {
+                        hosts.lock().expect("hosts heard").remove(&fullname);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(Self {
+            daemon,
+            started: Instant::now(),
+            heard,
+            changed,
+        })
+    }
+
+    /// Where the host `host_id` listens on the LAN, as last heard. Until the
+    /// browser has listened for `wait`, waits for it to be heard; after, a
+    /// host not heard is not on this network.
+    pub async fn find(&self, host_id: &str, wait: Duration) -> Vec<SocketAddr> {
+        let deadline = tokio::time::Instant::from_std(self.started + wait);
+        loop {
+            let changed = self.changed.notified();
+            let found: Vec<SocketAddr> = self
+                .heard
+                .lock()
+                .expect("hosts heard")
+                .values()
+                .filter(|(id, _)| id == host_id)
+                .flat_map(|(_, addrs)| addrs.iter().copied())
+                .collect();
+            if !found.is_empty() || tokio::time::Instant::now() >= deadline {
+                return found;
+            }
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                return Vec::new();
+            }
+        }
+    }
+}
+
+/// An address a client can dial as DNS-SD gives it: a link-local IPv6
+/// address comes without the interface it is on.
+fn dialable(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(_) => true,
+        std::net::IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 != 0xfe80,
+    }
+}
+
+impl Drop for Browser {
+    fn drop(&mut self) {
+        let _ = self.daemon.shutdown();
     }
 }

@@ -227,6 +227,7 @@ impl Keeper for TestKeeper {
             log: self.dir.join("logs").join(format!("{}.log", agent.id)),
             chats_file: self.dir.join("agents").join(&agent.id).join("acp-chats.json"),
             client: CLIENT,
+            idle: link_core::acp::IDLE_WINDOW,
         });
         Ok(Member { id: agent.id.clone(), label: agent.label.clone(), runtime: RUNTIME.into(), backend: Arc::new(backend) })
     }

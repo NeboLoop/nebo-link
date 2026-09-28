@@ -58,6 +58,7 @@ pub mod machine;
 pub mod model;
 pub mod openclaw;
 pub mod phone;
+pub mod process;
 pub mod roster;
 pub mod tools;
 pub mod turn;

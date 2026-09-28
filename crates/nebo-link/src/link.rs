@@ -146,6 +146,7 @@ pub async fn pair(root: &Root, code: &str, wanted: Wanted, name: Option<String>,
             exe,
             home: root_override(root),
             path: std::env::var("PATH").ok(),
+            logs: dir.logs_dir(),
         })?;
         Ok::<_, Error>(added)
     };
@@ -578,6 +579,7 @@ pub fn acp_member(dir: &BotDir, agent: &Hosted) -> Option<Member> {
         log: agent_dir.log(None),
         chats_file: agent_dir.acp_chats_file(),
         client: CLIENT,
+        idle: link_core::acp::IDLE_WINDOW,
     });
     Some(Member {
         id: agent.id.clone(),
@@ -926,7 +928,7 @@ pub fn host_label() -> String {
 
 /// The `--home` the service must be given: set only when the state root is
 /// not the default one.
-fn root_override(root: &Root) -> Option<PathBuf> {
+pub(crate) fn root_override(root: &Root) -> Option<PathBuf> {
     let default = link_core::machine::default_daemon_home();
     (default.as_deref() != Some(root.path())).then(|| root.path().to_path_buf())
 }

@@ -12,8 +12,13 @@
 //! usage `{inputTokens: 12, outputTokens: 5, totalTokens: 17}`. Sessions are
 //! `sess-1`, `sess-2`, … and start in mode `ask`; the other modes are
 //! `folder` and `full` (kind `full_access`). It takes HTTP MCP servers.
+//!
+//! With `OAL_FAKE_AGENT_SESSIONS` set to a folder, its sessions outlive it
+//! there, as a real agent's do: another process of it loads one (its folder
+//! and mode; the record starts empty).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -55,6 +60,7 @@ pub async fn run(mut input: mpsc::UnboundedReceiver<Value>, out: mpsc::Unbounded
         sessions: BTreeMap::new(),
         next_request: 0,
         done,
+        store: std::env::var_os("OAL_FAKE_AGENT_SESSIONS").map(PathBuf::from),
     };
     loop {
         tokio::select! {
@@ -108,6 +114,8 @@ struct Agent {
     sessions: BTreeMap<String, Session>,
     next_request: u64,
     done: mpsc::UnboundedSender<Called>,
+    /// Where its sessions outlive it (`OAL_FAKE_AGENT_SESSIONS`).
+    store: Option<PathBuf>,
 }
 
 /// The host's MCP server among `params`' `mcpServers`: the HTTP one named
@@ -144,6 +152,31 @@ fn usage() -> Value {
 impl Agent {
     fn send(&self, msg: Value) {
         let _ = self.out.send(msg);
+    }
+
+    /// Keeps the session `id` where it outlives this process, when it has
+    /// such a place.
+    fn keep(&self, id: &str) {
+        let (Some(store), Some(session)) = (&self.store, self.sessions.get(id)) else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(store);
+        let kept = json!({ "cwd": session.cwd, "mode": session.mode });
+        let _ = std::fs::write(store.join(format!("{id}.json")), kept.to_string());
+    }
+
+    /// The session `id` an earlier process of this agent kept.
+    fn kept(&self, id: &str) -> Option<Session> {
+        let text = std::fs::read_to_string(self.store.as_ref()?.join(format!("{id}.json"))).ok()?;
+        let kept: Value = serde_json::from_str(&text).ok()?;
+        Some(Session {
+            cwd: kept["cwd"].as_str().unwrap_or("").to_owned(),
+            host_tools: None,
+            mode: kept["mode"].as_str().unwrap_or("ask").to_owned(),
+            log: Vec::new(),
+            calls: 0,
+            turn: None,
+        })
     }
 
     fn respond(&self, id: &Value, result: Result<Value, (i64, &str)>) {
@@ -207,7 +240,8 @@ impl Agent {
                 "authMethods": []
             }))),
             "session/new" => {
-                let id_text = format!("sess-{}", self.sessions.len() + 1);
+                let kept = self.store.as_ref().and_then(|s| std::fs::read_dir(s).ok()).map_or(0, |d| d.count());
+                let id_text = format!("sess-{}", self.sessions.len().max(kept) + 1);
                 self.sessions.insert(id_text.clone(), Session {
                     cwd: params["cwd"].as_str().unwrap_or("").to_owned(),
                     host_tools: host_tools(&params),
@@ -216,9 +250,15 @@ impl Agent {
                     calls: 0,
                     turn: None,
                 });
+                self.keep(&id_text);
                 self.respond(&id, Ok(json!({ "sessionId": id_text, "modes": modes("ask") })));
             }
             "session/load" | "session/resume" => {
+                if !self.sessions.contains_key(&session_id)
+                    && let Some(kept) = self.kept(&session_id)
+                {
+                    self.sessions.insert(session_id.clone(), kept);
+                }
                 let Some(session) = self.sessions.get_mut(&session_id) else {
                     return self.respond(&id, Err((-32002, "Resource not found")));
                 };
@@ -247,6 +287,7 @@ impl Agent {
                 match self.sessions.get_mut(&session_id) {
                     Some(s) if ["ask", "folder", "full"].contains(&mode) => {
                         s.mode = mode.to_owned();
+                        self.keep(&session_id);
                         self.respond(&id, Ok(json!({})));
                     }
                     Some(_) => self.respond(&id, Err((-32602, "Invalid params"))),

@@ -17,7 +17,7 @@ use crate::{OalHost, PROTOCOL, Via, Wire, select_version, token};
 
 /// How long a client has for its first message and each handshake step
 /// (spec 4.3).
-const FIRST: Duration = Duration::from_secs(10);
+pub(crate) const FIRST: Duration = Duration::from_secs(10);
 /// A client that sends nothing for this long is closed with 4008 (spec 11).
 const SILENCE: Duration = Duration::from_secs(60);
 
@@ -426,6 +426,7 @@ impl Connection {
                 None => Err(ErrorObject::new(code::INVALID_PARAMS, "host/agents/remove needs an agentId.")),
             },
             "host/pending" => Ok(json!({ "requests": self.oal.host().pending() })),
+            "host/status" => Ok(json!({ "agents": self.oal.host().status().await })),
             "host/answer" => {
                 let id = params["id"].as_str().unwrap_or("");
                 match params["optionId"].as_str() {

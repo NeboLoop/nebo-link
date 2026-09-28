@@ -22,6 +22,10 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Process groups and signals, to stop an agent and everything it started.
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # The conformance suite's scripted ACP agent, run as a process in the tests.

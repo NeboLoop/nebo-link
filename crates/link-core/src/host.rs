@@ -42,7 +42,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use nebo_runtimes::acp::protocol;
 use serde_json::{Value, json};
@@ -50,11 +50,11 @@ use tokio::sync::broadcast;
 
 use crate::backend::{AgentMessage, Error, FromAgent, Inbox, Reply};
 use crate::model::{
-    self, Agent, AgentChange, AgentUpdate, DeviceRef, ErrorObject, Outcome, PendingChange,
-    PendingRequest, PendingUpdate, StopReason, ToolCallUpdate, TurnState, TurnUpdate, Usage, code,
+    self, Agent, AgentChange, AgentStatus, AgentUpdate, DeviceRef, ErrorObject, Life, Outcome, PendingChange,
+    PendingRequest, PendingUpdate, SessionStatus, StopReason, ToolCallUpdate, TurnState, TurnUpdate, Usage, Working, code,
 };
 use crate::keep::{Add, Addable, CodingAgent, Keeper, Kept};
-use crate::roster::{Member, Roster, member_agents};
+use crate::roster::{Member, Roster, agent_ids, member_agents};
 use crate::tools::Tools;
 
 /// Where a session's `_meta` says the folder it works in, once it moved
@@ -1082,6 +1082,68 @@ impl Host {
             .sessions
             .get(&(agent.to_owned(), session.to_owned()))
             .and_then(|s| s.turn.as_ref().map(|r| r.turn.clone()))
+    }
+
+    // -- Life -----------------------------------------------------------------
+
+    /// Where each agent is in its life and whether it works now
+    /// (`host/status`), by the host's agent ids. A runtime that doesn't say
+    /// ([`Backend::status`](crate::backend::Backend::status)) runs on its
+    /// own: its agents run, and work while a turn of theirs runs.
+    pub async fn status(&self) -> Vec<AgentStatus> {
+        let members = self.roster.members();
+        let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
+        let mut all = Vec::new();
+        for member in &members {
+            let Ok(agents) = member.backend.agents().await else {
+                continue;
+            };
+            let named = agent_ids(member, &agents, &ids);
+            let reported = member.backend.status().await;
+            for (agent, id) in agents.iter().zip(named) {
+                let status = match reported.as_ref().and_then(|r| r.iter().find(|s| s.agent == agent.id)) {
+                    Some(status) => AgentStatus { agent: id, ..status.clone() },
+                    None => self.status_from_turns(id),
+                };
+                all.push(status);
+            }
+        }
+        all
+    }
+
+    /// An agent the host doesn't run itself: running, and working while a
+    /// turn of its runs.
+    fn status_from_turns(&self, agent: String) -> AgentStatus {
+        let sessions: Vec<SessionStatus> = self
+            .lock()
+            .sessions
+            .iter()
+            .filter(|((a, _), s)| *a == agent && s.turn.is_some())
+            .map(|((_, session), _)| SessionStatus {
+                session_id: session.clone(),
+                state: Life::Running,
+                busy: true,
+                why: vec![Working::Prompt],
+                last_update: None,
+            })
+            .collect();
+        let busy = !sessions.is_empty();
+        AgentStatus {
+            agent,
+            state: Life::Running,
+            busy,
+            why: if busy { vec![Working::Prompt] } else { Vec::new() },
+            idle_since: None,
+            sessions,
+        }
+    }
+
+    /// Stops what the host runs as it shuts down: a prompt still running
+    /// gets up to `grace` to finish, then every agent it runs is stopped, its
+    /// sessions kept for the next start. Nothing it started outlives it.
+    pub async fn shutdown(&self, grace: Duration) {
+        let members = self.roster.members();
+        futures::future::join_all(members.iter().map(|m| m.backend.shutdown(grace))).await;
     }
 
     /// Every running turn.

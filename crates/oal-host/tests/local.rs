@@ -55,6 +55,15 @@ async fn an_in_process_client_runs_a_turn_through_a_permission_request() {
 
     let asked = until(&mut conn, &mut seen, |f| f["acp"]["method"] == "session/request_permission").await;
     assert_eq!(asked["acp"]["params"]["toolCall"]["title"], "echo hi");
+    // `host/status`: the agent works, in this session, while its turn runs.
+    send(&conn, json!({ "jsonrpc": "2.0", "id": 6, "method": "host/status", "params": {} }));
+    let status = until(&mut conn, &mut seen, |f| f["id"] == 6).await;
+    oal_conformance::schema::Schemas::load().check(&status, Some("host/status")).unwrap();
+    assert_eq!(
+        status["result"]["agents"],
+        json!([{ "agent": common::AGENT, "state": "running", "busy": true, "why": ["prompt"],
+            "sessions": [{ "sessionId": session, "state": "running", "busy": true, "why": ["prompt"] }] }])
+    );
     let answer = json!({ "agent": common::AGENT, "acp": { "jsonrpc": "2.0", "id": asked["acp"]["id"], "result": { "outcome": { "outcome": "selected", "optionId": "allow-once" } } } });
     send(&conn, answer);
     let ended = until(&mut conn, &mut seen, |f| f["method"] == "host/turn" && f["params"]["state"] == "ended").await;
@@ -67,6 +76,9 @@ async fn an_in_process_client_runs_a_turn_through_a_permission_request() {
         .filter_map(|f| f["acp"]["params"]["update"]["content"]["text"].as_str())
         .collect();
     assert_eq!(text, "Done.");
+    send(&conn, json!({ "jsonrpc": "2.0", "id": 7, "method": "host/status", "params": {} }));
+    let status = until(&mut conn, &mut seen, |f| f["id"] == 7).await;
+    assert_eq!(status["result"]["agents"], json!([{ "agent": common::AGENT, "state": "running", "busy": false, "sessions": [] }]));
     assert!(seen.iter().any(|f| f["acp"]["id"] == 5 && f["acp"]["result"]["stopReason"] == "end_turn"), "the prompt's answer came before the end");
     assert!(oal.devices().is_empty(), "an in-process client is no paired device");
 

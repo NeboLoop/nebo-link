@@ -52,8 +52,10 @@ relay="http://127.0.0.1:$relay_port"
 "$bin/oal-relay" serve --listen "127.0.0.1:$relay_port" --data-dir "$work/relay" >"$work/relay.log" 2>&1 &
 pids+=($!)
 
-# The link: one bot hosting the scripted agent, in its own folder.
-mkdir -p "$home/$bot" "$work/agent"
+# The link: one bot hosting the scripted agent, in its own folder. Its
+# sessions outlive its process, as a real agent's do: the host restarts an
+# agent (after a cancel, after it paused) and reopens them.
+mkdir -p "$home/$bot" "$work/agent" "$work/sessions"
 chmod 700 "$home" "$home/$bot"
 cat >"$home/$bot/link.json" <<EOF
 {
@@ -65,7 +67,7 @@ cat >"$home/$bot/link.json" <<EOF
     "id": "assistant",
     "label": "Fake Agent",
     "runtime": { "acp": "other" },
-    "via": { "acp": { "program": "$bin/oal-conformance", "args": ["agent"], "env": [], "workdir": "$work/agent" } }
+    "via": { "acp": { "program": "$bin/oal-conformance", "args": ["agent"], "env": [["OAL_FAKE_AGENT_SESSIONS", "$work/sessions/assistant"]], "workdir": "$work/agent" } }
   }]
 }
 EOF
@@ -77,7 +79,7 @@ chmod 600 "$home/$bot/token" "$home/$bot/link.json"
 # agent it adds gets its folder there (~/NeboAI/<id>), and the coding agents
 # installed for the user running the proof stay out of it.
 mkdir -p "$work/installed" "$work/user"
-printf '#!/bin/sh\nexec "%s" agent\n' "$bin/oal-conformance" >"$work/installed/opencode"
+printf '#!/bin/sh\nexport OAL_FAKE_AGENT_SESSIONS="%s/$(basename "$PWD")"\nexec "%s" agent\n' "$work/sessions" "$bin/oal-conformance" >"$work/installed/opencode"
 chmod +x "$work/installed/opencode"
 
 export NEBO_LINK_HOME="$home"

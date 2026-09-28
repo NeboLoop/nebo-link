@@ -239,8 +239,10 @@ impl Connection {
     }
 }
 
-/// Starts `command` in `cwd` as an ACP agent on its stdin/stdout. Its stderr
-/// goes to `stderr` (a log file). The child is killed when dropped.
+/// Starts `command` in `cwd` as an ACP agent on its stdin/stdout, leading a
+/// process group of its own (so everything it starts can be stopped with
+/// it). Its stderr goes to `stderr` (a log file). The child is killed when
+/// dropped.
 pub fn spawn(
     command: &RuntimeCommand,
     cwd: &Path,
@@ -255,6 +257,8 @@ pub fn spawn(
         .stdout(Stdio::piped())
         .stderr(stderr)
         .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = cmd.spawn()?;
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
