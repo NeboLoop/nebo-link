@@ -89,7 +89,7 @@ impl Service {
     /// once the service is back.
     fn close_oal(&self) {
         if let Some(oal) = &self.oal {
-            oal.host.shutdown();
+            oal.shutdown();
         }
     }
 

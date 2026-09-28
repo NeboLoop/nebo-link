@@ -99,7 +99,7 @@ async fn pair(port: u16, fingerprint: &str, store: &KeyStore, code: &str) -> Res
 async fn plaintext_is_refused_in_words_then_closed() {
     let dir = tempfile::tempdir().unwrap();
     let oal = common::host(dir.path()).await;
-    let lan = oal_host::lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), false).await.unwrap();
+    let lan = oal_host::lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), oal_host::lan::Reach::Lan { advertise: false }).await.unwrap();
     let mut ws = dial(lan.addr.port(), &lan.fingerprint).await;
     let hello = json!({ "jsonrpc": "2.0", "id": 1, "method": "host/hello", "params": { "protocol": { "min": "0.1", "max": "0.1" } } });
     ws.send(Message::text(hello.to_string())).await.unwrap();
@@ -119,7 +119,7 @@ async fn plaintext_is_refused_in_words_then_closed() {
 async fn a_code_pairs_once_and_an_unpaired_device_is_gone() {
     let dir = tempfile::tempdir().unwrap();
     let oal = common::host(dir.path()).await;
-    let lan = oal_host::lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), false).await.unwrap();
+    let lan = oal_host::lan::serve(oal.clone(), "127.0.0.1:0".parse().unwrap(), dir.path(), oal_host::lan::Reach::Lan { advertise: false }).await.unwrap();
     let port = lan.addr.port();
     let code = oal.pairing_code().await.unwrap().to_string();
 

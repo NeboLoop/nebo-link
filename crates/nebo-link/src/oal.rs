@@ -1,8 +1,10 @@
 //! Open Agent Link beside NeboAI: the service serves the bot's agents to OAL
 //! clients (`oal_host`), end-to-end encrypted, through NeboAI's tunnel
 //! (`/t/<botId>/oal`, [`upgrade`]), through a relay it dials out to (a
-//! self-hosted `oal-relay`) and, when the owner turns it on, directly on the
-//! LAN. The bot's id is the host's id and its name the host's name.
+//! self-hosted `oal-relay`), directly to the owner's apps on this computer
+//! (on loopback, where `link_core::machine::direct` finds it), and, when the
+//! owner turns it on, directly on the LAN. The bot's id is the host's id and
+//! its name the host's name.
 //!
 //! An app of the owner's that reaches the bot through NeboAI (Nebo, for the
 //! bot's agents it hired) pairs without the owner: it asks for a code on the
@@ -20,7 +22,9 @@
 //! ```text
 //! oal/keys/         the host's X25519 key and its paired devices
 //! oal/seen.json     when each device was last seen
-//! oal/lan-*.pem     LAN direct's self-signed certificate
+//! oal/lan-*.pem     the direct listeners' self-signed certificate
+//! oal/direct.json   where this computer's apps reach the host directly,
+//!                   while the service runs (link_core::machine)
 //! oal/request.json  the CLI's request; oal/answer.json the service's answer
 //! ```
 
@@ -130,9 +134,25 @@ pub struct Service {
     pub host: Arc<OalHost>,
     settings: Oal,
     lan: Option<oal_host::lan::Lan>,
+    /// The bot's folder.
+    bot: BotDir,
+    /// Where this computer's apps reach the host directly.
+    direct: Option<link_core::machine::Direct>,
 }
 
 impl Service {
+    /// Closes every connection with 1001 (clients reconnect once the service
+    /// is back), and takes away the record of where this computer's apps
+    /// reach it.
+    pub fn shutdown(&self) {
+        self.host.shutdown();
+        if let Some(direct) = &self.direct
+            && let Err(e) = link_core::machine::record_direct(self.bot.path(), direct, false)
+        {
+            tracing::info!(error = %e, "oal: could not take away where this computer's apps reach the host");
+        }
+    }
+
     pub fn status(&self) -> Status {
         Status {
             relay: self.settings.relay.clone(),
@@ -191,7 +211,7 @@ pub async fn start(bot: &BotDir, link: &Link, host: Arc<Host>, settings: Oal) ->
     // LAN direct that can't start (its port taken) leaves the relay serving.
     let lan = match &settings.lan {
         Some(listen) => match listen.parse() {
-            Ok(addr) => match oal_host::lan::serve(oal.clone(), addr, &folder, true).await {
+            Ok(addr) => match oal_host::lan::serve(oal.clone(), addr, &folder, oal_host::lan::Reach::Lan { advertise: true }).await {
                 Ok(lan) => Some(lan),
                 Err(e) => {
                     tracing::error!(error = %e, "oal: LAN direct could not start");
@@ -205,13 +225,41 @@ pub async fn start(bot: &BotDir, link: &Link, host: Arc<Host>, settings: Oal) ->
         },
         None => None,
     };
+    let direct = machine(&oal, bot, &folder).await;
     tokio::spawn(requests(bot.clone(), oal.clone()));
-    tracing::info!(relay = ?settings.relay, lan = ?lan.as_ref().map(|l| l.addr), "open agent link is serving");
+    tracing::info!(relay = ?settings.relay, lan = ?lan.as_ref().map(|l| l.addr), direct = ?direct.as_ref().map(|d| d.addr), "open agent link is serving");
     Ok(Service {
         host: oal,
         settings,
         lan,
+        bot: bot.clone(),
+        direct,
     })
+}
+
+/// Serves the host to this computer's apps of the owner's OS user, on
+/// loopback, and records where (`link_core::machine::direct`): Nebo on this
+/// computer reaches the bot's agents there first, so a relay that fails
+/// never strands its turns. One that can't start leaves the relay serving.
+async fn machine(oal: &Arc<OalHost>, bot: &BotDir, folder: &std::path::Path) -> Option<link_core::machine::Direct> {
+    let serving = match oal_host::lan::serve(oal.clone(), ([127, 0, 0, 1], 0).into(), folder, oal_host::lan::Reach::Machine).await {
+        Ok(serving) => serving,
+        Err(e) => {
+            tracing::error!(error = %e, "oal: this computer's apps can't reach the host directly");
+            return None;
+        }
+    };
+    let direct = link_core::machine::Direct {
+        addr: serving.addr,
+        fingerprint: serving.fingerprint,
+    };
+    match link_core::machine::record_direct(bot.path(), &direct, true) {
+        Ok(()) => Some(direct),
+        Err(e) => {
+            tracing::error!(error = %e, "oal: could not record where this computer's apps reach the host");
+            None
+        }
+    }
 }
 
 /// `WS /oal` through NeboAI's tunnel: the upgrade answered (with the `oal`

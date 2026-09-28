@@ -19,7 +19,9 @@
 //! - [`relay`]: the host's tunnel to a relay (self-hosted `oal-relay`, or
 //!   NeboAI's), kept up with backoff; client connections arrive through it.
 //! - [`lan`]: the host's own `wss://…/oal` on the local network, with a
-//!   self-signed certificate and DNS-SD. Off unless the owner turns it on.
+//!   self-signed certificate and DNS-SD, off unless the owner turns it on;
+//!   and on loopback for this computer's apps. With the client's side:
+//!   dialing it pinned, and finding hosts on the LAN.
 //! - [`wire`]: how a connection reaches [`OalHost::serve`].
 //!
 //! On an encrypted connection the handshake replaces `host/hello` (spec
@@ -117,7 +119,8 @@ pub struct Config {
 /// How a connection reached the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Via {
-    /// The host's own listener on the LAN.
+    /// The host's own listener: on the LAN, or on loopback for this
+    /// computer's apps.
     Lan,
     /// A tunnel that carries whole WebSocket connections to the host
     /// (NeboAI's, at `/t/<botId>/oal`): pairings and sessions are told apart

@@ -14,7 +14,13 @@
 //! The other way round: while an app hosts agents for this OS user, it says
 //! so in the daemon's home ([`record_app_host`]), and nebo-link refuses to
 //! link or pair ([`hosting_app`]) until the app hosts none.
+//!
+//! While the daemon runs, it also says in its state where it serves its host
+//! on this computer ([`record_direct`]), so an app of the same OS user
+//! reaches this computer's agents directly ([`direct`]), with no relay
+//! between them to fail.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 /// The file inside a linked bot's folder that makes it linked.
@@ -23,6 +29,22 @@ pub const LINK_FILE: &str = "link.json";
 /// The file in the daemon's home an app that embeds link-core writes while
 /// it hosts this OS user's agents.
 pub const APP_HOST_FILE: &str = "app-host.json";
+
+/// The file in a linked bot's `oal/` folder where its running service says
+/// where it serves its host on this computer.
+pub const DIRECT_FILE: &str = "direct.json";
+
+/// Where a running daemon serves its host on this computer: Open Agent Link
+/// at `wss://<addr>/oal` on loopback, with a self-signed certificate. Every
+/// connection is end-to-end encrypted as through a relay; the certificate's
+/// fingerprint is what a client pins, read here as it would be from
+/// `host/info` on the LAN.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Direct {
+    pub addr: SocketAddr,
+    /// SHA-256 of the certificate's DER, base64url.
+    pub fingerprint: String,
+}
 
 /// An app hosting this OS user's agents, as it recorded itself.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -91,6 +113,43 @@ pub fn linked_daemon(home: &Path) -> Option<String> {
     names.into_iter().next()
 }
 
+/// The bot `bot_dir` names' record of where it serves its host on this
+/// computer.
+fn direct_file(bot_dir: &Path) -> PathBuf {
+    bot_dir.join("oal").join(DIRECT_FILE)
+}
+
+/// Records, in the bot's folder `bot_dir`, that its running service serves
+/// its host on this computer as `serving`; with `on` false (the service
+/// stops), takes the record away if it is still `serving` (a service that
+/// started since keeps its own).
+pub fn record_direct(bot_dir: &Path, serving: &Direct, on: bool) -> std::io::Result<()> {
+    let file = direct_file(bot_dir);
+    if !on {
+        let ours = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Direct>(&text).ok())
+            .is_some_and(|recorded| recorded == *serving);
+        return match ours.then(|| std::fs::remove_file(&file)) {
+            Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    std::fs::create_dir_all(file.parent().expect("oal folder"))?;
+    let tmp = file.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(serving).expect("serializes"))?;
+    std::fs::rename(&tmp, &file)
+}
+
+/// Where the daemon in `home` serves the host of the bot `bot_id` on this
+/// computer, while it runs. A record a daemon that stopped left behind names
+/// a port nothing answers on, or a certificate nothing else has: a client
+/// finds out at once and goes the other way.
+pub fn direct(home: &Path, bot_id: &str) -> Option<Direct> {
+    let text = std::fs::read_to_string(direct_file(&home.join(bot_id))).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +189,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(linked_daemon(home.path()).as_deref(), Some("Studio Mac"));
+    }
+
+    #[test]
+    fn a_running_daemon_says_where_it_serves_its_host_on_this_computer() {
+        let home = tempfile::tempdir().unwrap();
+        let bot = home.path().join("b1");
+        assert_eq!(direct(home.path(), "b1"), None);
+        let first = Direct { addr: "127.0.0.1:4100".parse().unwrap(), fingerprint: "f1".into() };
+        record_direct(&bot, &first, true).unwrap();
+        assert_eq!(direct(home.path(), "b1"), Some(first.clone()));
+        assert_eq!(direct(home.path(), "b2"), None);
+        // A service that started since keeps its record when the old one stops.
+        let second = Direct { addr: "127.0.0.1:4200".parse().unwrap(), fingerprint: "f1".into() };
+        record_direct(&bot, &second, true).unwrap();
+        record_direct(&bot, &first, false).unwrap();
+        assert_eq!(direct(home.path(), "b1"), Some(second.clone()));
+        record_direct(&bot, &second, false).unwrap();
+        assert_eq!(direct(home.path(), "b1"), None);
+        record_direct(&bot, &second, false).unwrap();
+        // The record isn't a linked bot.
+        assert_eq!(linked_daemon(home.path()), None);
     }
 }
