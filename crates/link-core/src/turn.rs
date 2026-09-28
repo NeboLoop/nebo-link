@@ -55,22 +55,22 @@ impl Permission {
     }
 }
 
-/// The agent's mode for a Nebo permission: by the ids Claude Code and Codex
-/// use, else by the kind any agent may say its modes are.
+/// The agent's mode for a Nebo permission: by the ids Claude Code, Codex and
+/// Gemini CLI use, else by the kind any agent may say its modes are.
 ///
-/// | Nebo        | Claude Code         | Codex               | kind          |
-/// |-------------|---------------------|---------------------|---------------|
-/// | Ask         | `default`           | `read-only`         | `standard`    |
-/// | Automatic   | `acceptEdits`       | `agent`             | `auto_review` |
-/// | Plan        | `plan`              | (as Ask)            | `plan`        |
-/// | Full access | `bypassPermissions` | `agent-full-access` | `full_access` |
+/// | Nebo        | Claude Code         | Codex               | Gemini CLI | kind          |
+/// |-------------|---------------------|---------------------|------------|---------------|
+/// | Ask         | `default`           | `read-only`         | `default`  | `standard`    |
+/// | Automatic   | `acceptEdits`       | `agent`             | `autoEdit` | `auto_review` |
+/// | Plan        | `plan`              | (as Ask)            | `plan`     | `plan`        |
+/// | Full access | `bypassPermissions` | `agent-full-access` | `yolo`     | `full_access` |
 pub fn mode_for(permission: Permission, modes: &[SessionMode]) -> Option<&str> {
     let (ids, kinds): (&[&str], &[&str]) = match permission {
         Permission::Ask => (&["default", "read-only"], &["standard"]),
-        Permission::Automatic => (&["acceptEdits", "agent"], &["auto_review"]),
+        Permission::Automatic => (&["acceptEdits", "agent", "autoEdit"], &["auto_review"]),
         Permission::Plan => (&["plan", "default", "read-only"], &["plan", "standard"]),
         Permission::FullAccess => (
-            &["bypassPermissions", "agent-full-access"],
+            &["bypassPermissions", "agent-full-access", "yolo"],
             &["full_access"],
         ),
     };
@@ -294,8 +294,9 @@ mod tests {
     }
 
     /// Each Nebo permission lands on the mode the adapters advertised on
-    /// 2026-09-26 (claude-agent-acp 0.81.2, codex-acp 1.13.1), and on any
-    /// other agent's by the kind it says the mode is.
+    /// 2026-09-26 (claude-agent-acp 0.81.2, codex-acp 1.13.1), on Gemini
+    /// CLI's (its ACP modes carry no kind), and on any other agent's by the
+    /// kind it says the mode is.
     #[test]
     fn permissions_map_onto_the_agents_modes() {
         let claude = offered(&[
@@ -310,28 +311,55 @@ mod tests {
             ("agent", "auto_review"),
             ("agent-full-access", "full_access"),
         ]);
+        // Gemini CLI's `--experimental-acp` modes, which say no kind.
+        let gemini: Vec<SessionMode> = ["default", "autoEdit", "yolo", "plan"]
+            .iter()
+            .map(|id| SessionMode {
+                id: (*id).into(),
+                kind: None,
+            })
+            .collect();
         let other = offered(&[
             ("careful", "standard"),
             ("yolo", "full_access"),
             ("review", "auto_review"),
         ]);
         let cases = [
-            (Permission::Ask, "default", "read-only", Some("careful")),
+            (
+                Permission::Ask,
+                "default",
+                "read-only",
+                "default",
+                Some("careful"),
+            ),
             (
                 Permission::Automatic,
                 "acceptEdits",
                 "agent",
+                "autoEdit",
                 Some("review"),
             ),
-            (Permission::Plan, "plan", "read-only", Some("careful")),
+            (
+                Permission::Plan,
+                "plan",
+                "read-only",
+                "plan",
+                Some("careful"),
+            ),
             (
                 Permission::FullAccess,
                 "bypassPermissions",
                 "agent-full-access",
+                "yolo",
                 Some("yolo"),
             ),
         ];
-        for (permission, on_claude, on_codex, on_other) in cases {
+        for (permission, on_claude, on_codex, on_gemini, on_other) in cases {
+            assert_eq!(
+                mode_for(permission, &gemini),
+                Some(on_gemini),
+                "{permission:?}"
+            );
             assert_eq!(
                 mode_for(permission, &claude),
                 Some(on_claude),
