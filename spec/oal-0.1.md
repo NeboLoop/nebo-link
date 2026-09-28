@@ -2,7 +2,7 @@
 
 Status: draft. Version 0.1, 2026-09-26.
 Canonical home: https://openagent.link. Schemas: `https://openagent.link/schemas/0.1/`.
-Editors: NeboLoop. Reference implementation: Nebo Link (`crates/nebo-link` in https://github.com/NeboLoop/nebo-link).
+Editors: NeboAI. Reference implementation: Nebo Link (`crates/nebo-link` in https://github.com/NeboLoop/nebo-link).
 License of this text: CC-BY-4.0 (`spec/LICENSE`).
 
 ## 1. Introduction
