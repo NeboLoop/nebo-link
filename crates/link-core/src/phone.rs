@@ -291,11 +291,19 @@ impl Contract {
         }
     }
 
-    /// The hosted agents as employee rows, the first as `assistant`, and
-    /// the coding agents this computer can add (`runtimes`).
+    /// The hosted agents as employee rows, the first as `assistant`, each
+    /// with the runtime it runs (`runtime`), and the coding agents this
+    /// computer can add (`runtimes`).
     async fn agents(&self) -> Result<Value, Refusal> {
-        let agents = self.roster_agents().await?;
-        let rows: Vec<Value> = agents.iter().map(|a| employee(a, &a.id)).collect();
+        let agents = self.roster().listed().await.map_err(|e| self.refuse(e))?;
+        let rows: Vec<Value> = agents
+            .iter()
+            .map(|(runtime, a)| {
+                let mut row = employee(a, &a.id);
+                row["runtime"] = json!(runtime);
+                row
+            })
+            .collect();
         Ok(json!({ "agents": rows, "primaryChristened": true, "runtimes": self.host.addable() }))
     }
 
