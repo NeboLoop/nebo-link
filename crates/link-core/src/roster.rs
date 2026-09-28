@@ -202,16 +202,45 @@ pub(crate) fn agent_ids(member: &Member, agents: &[Agent], members: &[&str]) -> 
         .collect()
 }
 
-/// A member's agents as the roster names them ([`agent_ids`]).
+/// A member's agents as the roster names them: ids by [`agent_ids`], names
+/// by [`agent_names`].
 pub(crate) fn member_agents(member: &Member, agents: Vec<Agent>, members: &[&str]) -> Vec<Agent> {
     let ids = agent_ids(member, &agents, members);
+    let names = agent_names(member, &agents);
     agents
         .into_iter()
         .zip(ids)
-        .map(|(agent, id)| Agent {
+        .zip(names)
+        .map(|((agent, id), name)| Agent {
             is_default: id == PRIMARY,
             id,
+            name,
             ..agent
+        })
+        .collect()
+}
+
+/// Names a runtime gives an agent nobody named: OpenClaw's "Assistant" and
+/// "main", Hermes' "default".
+const GENERIC_NAMES: [&str; 4] = ["assistant", "main", "default", "agent"];
+
+/// The name of each of `member`'s agents, in order: an agent with a generic
+/// name ([`GENERIC_NAMES`]) is named after its app, the member's label
+/// ("OpenClaw"), the default agent first; another one is "<label> · <its
+/// id>". Named agents keep their names.
+pub(crate) fn agent_names(member: &Member, agents: &[Agent]) -> Vec<String> {
+    let generic = |a: &Agent| GENERIC_NAMES.contains(&a.name.trim().to_lowercase().as_str());
+    let plain = agents
+        .iter()
+        .position(|a| a.is_default && generic(a))
+        .or_else(|| agents.iter().position(generic));
+    agents
+        .iter()
+        .enumerate()
+        .map(|(i, a)| match () {
+            _ if Some(i) == plain => member.label.clone(),
+            _ if generic(a) => format!("{} · {}", member.label, a.id),
+            _ => a.name.clone(),
         })
         .collect()
 }
@@ -247,13 +276,19 @@ impl Roster {
     /// Every member's agents; a member whose runtime doesn't answer is left
     /// out, unless none answers.
     pub async fn agents(&self) -> Result<Vec<Agent>, Error> {
+        Ok(self.listed().await?.into_iter().map(|(_, agent)| agent).collect())
+    }
+
+    /// [`Roster::agents`], each with its member's runtime (`claude-code`,
+    /// `openclaw`, ...).
+    pub async fn listed(&self) -> Result<Vec<(String, Agent)>, Error> {
         let mut all = Vec::new();
         let mut failed = None;
         let members = self.members();
         let ids: Vec<&str> = members.iter().map(|m| m.id.as_str()).collect();
         for member in &members {
             match member.backend.agents().await {
-                Ok(agents) => all.extend(member_agents(member, agents, &ids)),
+                Ok(agents) => all.extend(member_agents(member, agents, &ids).into_iter().map(|a| (member.runtime.clone(), a))),
                 Err(e) => {
                     failed.get_or_insert(unreachable(member, e));
                 }
@@ -342,6 +377,28 @@ mod tests {
         );
         assert_eq!(first, ["assistant", "research", "openclaw-2"]);
         assert!(first.iter().chain(&others).all(|id| is_agent_id(id)));
+    }
+
+    /// An agent the runtime left with a generic name is named after its app:
+    /// OpenClaw's default "Assistant" reads "OpenClaw", a second generic one
+    /// "OpenClaw · <id>"; named agents keep their names.
+    #[test]
+    fn generic_agent_names_are_the_apps() {
+        let mut openclaw = member("openclaw");
+        openclaw.label = "OpenClaw".into();
+        let named = |id: &str, name: &str, is_default: bool| Agent { name: name.into(), ..agent(id, is_default) };
+        let agents = [
+            named("research", "Research", false),
+            named("work", "main", false),
+            named("main", "Assistant", true),
+        ];
+        assert_eq!(agent_names(&openclaw, &agents), ["Research", "OpenClaw · work", "OpenClaw"]);
+        let listed = member_agents(&openclaw, agents.to_vec(), &["assistant", "openclaw"]);
+        assert_eq!(listed[2].name, "OpenClaw");
+        let mut hermes = member("hermes");
+        hermes.label = "Hermes".into();
+        assert_eq!(agent_names(&hermes, &[named("default", "Default", false), named("coder", "coder", false)]), ["Hermes", "coder"]);
+        assert_eq!(agent_names(&hermes, &[named("default", "Hermes", true)]), ["Hermes"]);
     }
 
     #[test]
