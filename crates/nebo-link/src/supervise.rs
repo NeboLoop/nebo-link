@@ -31,6 +31,7 @@ use tokio::sync::watch;
 use crate::error::Result;
 use crate::install::{self, runtime_name};
 use crate::state::{AgentDir, read_json, write_json};
+pub use link_core::process::alive;
 
 /// How often a process that answers is checked again.
 pub const POLL: Duration = Duration::from_secs(30);
@@ -560,46 +561,13 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// Whether a process with this pid exists.
-pub fn alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: kill with signal 0 only checks that the process exists.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-    #[cfg(not(unix))]
-    {
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!(" {pid} ")))
-    }
-}
+/// How long a process the link started gets to end when asked.
+const STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// Stops a process the link started: its whole process group is asked to
-/// end, and made to after ten seconds.
+/// end, and made to after [`STOP_GRACE`].
 pub async fn stop(pid: u32) {
-    #[cfg(unix)]
-    {
-        // SAFETY: signalling a process group by id has no memory effects.
-        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while alive(pid) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        if alive(pid) {
-            // SAFETY: as above.
-            unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .await;
-    }
+    link_core::process::stop(pid, STOP_GRACE).await;
 }
 
 #[cfg(test)]

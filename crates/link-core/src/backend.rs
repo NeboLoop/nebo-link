@@ -9,12 +9,13 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::oneshot;
 
 pub use crate::model::{
-    ErrorObject, PermissionOption, SessionModeState, StopReason, ToolCallUpdate, Usage, Words,
+    AgentStatus, ErrorObject, PermissionOption, SessionModeState, StopReason, ToolCallUpdate, Usage, Words,
 };
 
 /// A boxed future, so the trait is object-safe and one host can hold any
@@ -194,5 +195,21 @@ pub trait Backend: Send + Sync + 'static {
     fn session_folder(&self, agent: &str, session: &str) -> Option<PathBuf> {
         let _ = (agent, session);
         None
+    }
+
+    /// Where each of the runtime's agents is in its life and whether it
+    /// works now, by the runtime's agent id, for a runtime whose processes
+    /// the host runs and pauses (a coding agent). `None`: the runtime runs on
+    /// its own, and the host tells what works from its turns.
+    fn status(&self) -> BoxFuture<'_, Option<Vec<AgentStatus>>> {
+        Box::pin(async { None })
+    }
+
+    /// Stops what the host runs of the runtime, as the host shuts down: a
+    /// prompt still running gets up to `grace` to finish, then every process
+    /// is stopped, its sessions kept for the next start.
+    fn shutdown(&self, grace: Duration) -> BoxFuture<'_, ()> {
+        let _ = grace;
+        Box::pin(async {})
     }
 }

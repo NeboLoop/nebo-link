@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+/// The file in the bot's logs folder the service's own output goes to:
+/// what it writes before its log opens, and a crash's last words. Its log
+/// proper is the daily file beside it.
+pub const OUTPUT_LOG: &str = "service.log";
+
+/// How long the service manager lets the service stop before it kills it:
+/// time for a running prompt to finish ([`crate::run::AGENT_GRACE`]) and for
+/// its agents to stop.
+const STOP_TIMEOUT_SECS: u64 = crate::run::AGENT_GRACE.as_secs() + 30;
+
 /// What the service runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
@@ -23,6 +33,15 @@ pub struct Spec {
     /// The owner's `PATH`, so the runtime's own commands (e.g. `openclaw`)
     /// are found from the service.
     pub path: Option<String>,
+    /// The bot's logs folder, where the service's output goes
+    /// ([`OUTPUT_LOG`]).
+    pub logs: PathBuf,
+}
+
+impl Spec {
+    fn output_log(&self) -> String {
+        self.logs.join(OUTPUT_LOG).display().to_string()
+    }
 }
 
 impl Spec {
@@ -50,6 +69,8 @@ pub fn name(bot_id: &str) -> String {
 
 /// Installs and starts the service; replaces one installed before.
 pub fn install(spec: &Spec) -> Result<()> {
+    // The service manager opens the output log before the service runs.
+    std::fs::create_dir_all(&spec.logs).map_err(|e| Error::io(&spec.logs, e))?;
     platform::install(spec)
 }
 
@@ -143,12 +164,20 @@ pub fn launchd_plist(spec: &Spec) -> String {
   <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>{stop}</integer>
+  <key>StandardOutPath</key>
+  <string>{log}</string>
+  <key>StandardErrorPath</key>
+  <string>{log}</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>
 </plist>
 "#,
         label = xml_escape(&format!("com.neboai.link.{}", spec.bot_id)),
+        stop = STOP_TIMEOUT_SECS,
+        log = xml_escape(&spec.output_log()),
     )
 }
 
@@ -161,11 +190,14 @@ pub fn systemd_unit(spec: &Spec, system: bool) -> String {
         .as_ref()
         .map(|path| format!("Environment={}\n", quote(&format!("PATH={path}"))))
         .unwrap_or_default();
+    let log = spec.output_log().replace('%', "%%");
     format!(
         "[Unit]\nDescription=Nebo Link ({bot})\nWants=network-online.target\nAfter=network-online.target\n\n\
-         [Service]\nExecStart={exec}\n{env}Restart=always\nRestartSec=5\n\n\
+         [Service]\nExecStart={exec}\n{env}Restart=always\nRestartSec=5\nTimeoutStopSec={stop}\n\
+         StandardOutput=append:{log}\nStandardError=append:{log}\n\n\
          [Install]\nWantedBy={target}\n",
         bot = spec.bot_id,
+        stop = STOP_TIMEOUT_SECS,
         target = if system { "multi-user.target" } else { "default.target" },
     )
 }
@@ -368,6 +400,7 @@ mod tests {
             exe: "/opt/nebo link/nebo-link".into(),
             home: Some("/srv/link state".into()),
             path: Some("/usr/local/bin:/usr/bin".into()),
+            logs: "/srv/link state/b1/logs".into(),
         }
     }
 
@@ -389,6 +422,9 @@ mod tests {
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
         assert!(plist.contains("<key>KeepAlive</key>\n  <true/>"));
         assert!(plist.contains("<string>/usr/local/bin:/usr/bin</string>"));
+        assert!(plist.contains("<key>StandardOutPath</key>\n  <string>/srv/link state/b1/logs/service.log</string>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>\n  <string>/srv/link state/b1/logs/service.log</string>"));
+        assert!(plist.contains("<key>ExitTimeOut</key>\n  <integer>90</integer>"));
     }
 
     #[test]
@@ -400,6 +436,9 @@ mod tests {
         assert!(user.contains("Restart=always"));
         assert!(user.contains(r#"Environment="PATH=/usr/local/bin:/usr/bin""#));
         assert!(user.contains("WantedBy=default.target"));
+        assert!(user.contains("StandardOutput=append:/srv/link state/b1/logs/service.log\n"));
+        assert!(user.contains("StandardError=append:/srv/link state/b1/logs/service.log\n"));
+        assert!(user.contains("TimeoutStopSec=90\n"));
         assert!(systemd_unit(&spec(), true).contains("WantedBy=multi-user.target"));
     }
 

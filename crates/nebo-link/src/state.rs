@@ -19,8 +19,18 @@
 //!                    proves itself with (chat contract)
 //!     acp-chats.json the chats an ACP agent that can't list its sessions
 //!                    was given (chat contract)
-//!   logs/          rotating service logs, and each agent's own output
-//!                  (`<agent id>.log`, `<agent id>-<process>.log`)
+//!     acp-process.json
+//!                    the ACP agent's process while it runs, so the next
+//!                    run stops what a crashed one left (link_core::acp)
+//!     acp-sessions.json
+//!                    the sessions it paused with, resumed when asked for
+//!   oal/direct.json where this computer's apps reach the bot's host
+//!                  directly, while the service runs (link_core::machine)
+//!   logs/          rotating service logs (`nebo-link.<date>.log`), the
+//!                  service's own output (`service.log`: what it writes
+//!                  before its log opens, a crash's last words), and each
+//!                  agent's own output (`<agent id>.log`,
+//!                  `<agent id>-<process>.log`)
 //! ```
 //!
 //! `<data dir>` is the platform data directory; `--home` (or

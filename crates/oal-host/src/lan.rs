@@ -274,13 +274,16 @@ impl ServerCertVerifier for Pinned {
     }
 }
 
+/// Each host a [`Browser`] heard, by its DNS-SD name: its id and where it
+/// listens.
+type Heard = Arc<Mutex<HashMap<String, (String, Vec<SocketAddr>)>>>;
+
 /// Finds hosts that serve LAN direct, by DNS-SD (`_oal._tcp`, `id=<hostId>`),
 /// for as long as it lives: what it has heard is at hand at once.
 pub struct Browser {
     daemon: mdns_sd::ServiceDaemon,
     started: Instant,
-    /// Each host heard, by its DNS-SD name: its id and where it listens.
-    heard: Arc<Mutex<HashMap<String, (String, Vec<SocketAddr>)>>>,
+    heard: Heard,
     changed: Arc<tokio::sync::Notify>,
 }
 
@@ -289,7 +292,7 @@ impl Browser {
     pub fn start() -> Result<Self, String> {
         let daemon = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
         let events = daemon.browse(SERVICE).map_err(|e| e.to_string())?;
-        let heard: Arc<Mutex<HashMap<String, (String, Vec<SocketAddr>)>>> = Arc::default();
+        let heard: Heard = Arc::default();
         let changed = Arc::new(tokio::sync::Notify::new());
         let (hosts, notify) = (heard.clone(), changed.clone());
         std::thread::spawn(move || {

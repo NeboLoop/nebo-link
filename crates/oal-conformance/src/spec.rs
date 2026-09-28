@@ -60,6 +60,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     schema!("host-pending-update.schema.json"),
     schema!("host-pending.schema.json"),
     schema!("host-ping.schema.json"),
+    schema!("host-status.schema.json"),
     schema!("host-turn.schema.json"),
     schema!("host-unpair.schema.json"),
 ];

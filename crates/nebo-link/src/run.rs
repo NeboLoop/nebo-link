@@ -60,6 +60,10 @@ const SLEEP_DRIFT: Duration = Duration::from_secs(10);
 const CHAT_PROBE_EVERY: Duration = Duration::from_secs(30);
 /// How often the link's file is looked at for agents added or removed.
 const RELOAD_EVERY: Duration = Duration::from_secs(2);
+/// How long a prompt still running gets to finish when the service stops or
+/// restarts, before its agent is stopped anyway (and its session resumes
+/// on the next message).
+pub const AGENT_GRACE: Duration = Duration::from_secs(60);
 
 /// Shared by the service's tasks.
 struct Service {
@@ -85,6 +89,14 @@ struct Service {
 }
 
 impl Service {
+    /// Stops the agents as the service stops or restarts: a prompt still
+    /// running gets [`AGENT_GRACE`] to finish, then every agent pauses, its
+    /// sessions kept for the next start. Nothing they started outlives the
+    /// service.
+    async fn stop_agents(&self) {
+        self.host.shutdown(AGENT_GRACE).await;
+    }
+
     /// Closes every Open Agent Link connection with 1001: clients reconnect
     /// once the service is back.
     fn close_oal(&self) {
@@ -447,6 +459,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
                     Ended::Shutdown => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
+                        service.stop_agents().await;
                         service.close_oal();
                         return stopped(&dir);
                     }
@@ -454,6 +467,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
                     Ended::Update(next) => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
+                        service.stop_agents().await;
                         let e = update::restart(next, root, &exe);
                         tracing::error!(error = %e, "could not restart as the new version");
                         Duration::ZERO
@@ -475,10 +489,12 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = &mut shutdown => {
+                service.stop_agents().await;
                 service.close_oal();
                 return stopped(&dir);
             }
             Some(next) = staged.recv() => {
+                service.stop_agents().await;
                 let e = update::restart(next, root, &exe);
                 tracing::error!(error = %e, "could not restart as the new version");
             }
@@ -488,6 +504,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     tracing::warn!("NeboAI removed this bot; unlinking it");
     status_writer.abort();
     let _ = plugin.disconnect().await;
+    service.stop_agents().await;
     let link = service.link.lock().expect("link lock").clone();
     let unlinked = link::unlink(root, &link, By::Revocation).await?;
     for (agent, released) in unlinked.installs {

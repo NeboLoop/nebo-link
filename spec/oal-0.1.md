@@ -149,6 +149,8 @@ A host MAY accept connections on the local network. The owner turns this on; it 
 - A client connecting on the LAN MUST have learned `tlsFingerprint` from an earlier authenticated connection, and MUST refuse a certificate that does not match it. Pairing on the LAN is therefore done through the relay, or by entering the code together with the fingerprint shown on the host.
 - After the upgrade, everything is the same as on the relay path.
 
+A host MAY also serve the same `wss://…/oal` on loopback, for apps of the same OS user on the same computer, whatever the owner chose for the LAN. It is not announced and not named in `host/info`: the app reads where it is, and the certificate's fingerprint, in the host's own state, which only that user can read. Such an app tries it first, then the LAN, then the relay, so a relay that fails never keeps it from a host on its own computer.
+
 ## 5. Handshake: `host/hello`
 
 The first request on a connection from a paired device. Schema: `schemas/host-hello.schema.json`.
@@ -274,6 +276,23 @@ A paired device can add an agent to the host and remove one. Only a connection a
 - A host MAY refuse, with `not_permitted`, an agent it removes only on the computer itself (an adapted runtime, or its last agent).
 - An id the host doesn't have gets `unknown_agent`.
 - Result: `{}`. Every connection receives `host/agent_update` `removed`, and every connection attached to one of its sessions is detached.
+
+### 7.5 `host/status`
+
+Where each agent is in its life and whether it works now, so a client can tell a turn that is silent but working from one that stopped. Returns `{agents: AgentStatus[]}`. Schema: `schemas/host-status.schema.json`.
+
+A host MAY pause an agent that works on nothing: its processes stop and free their memory, and its sessions are kept. A request for a paused session resumes it: the host starts the agent again and reopens the same session (`session/load`, or the agent's own resume) before it passes the request on. A session that can't be reopened is refused with the agent's error in plain words; the host never starts a new session in its place. A host MUST NOT pause an agent while it works.
+
+AgentStatus:
+
+| Field | Meaning |
+|---|---|
+| `agent` | The agent's id (section 7.2). |
+| `state` | `starting` (its process starts), `running`, `paused` (stopped, its sessions kept), or `resuming` (starting again to reopen a paused session). An agent the host doesn't run itself (an adapted runtime) is `running`. |
+| `busy` | True while the agent works. |
+| `why` | Why it works, any of: `prompt` (a `session/prompt` is outstanding, however long it has been silent), `tool` (a tool call started and has not completed or failed), `permission` (a permission request waits for an answer), `plan` (its plan has an entry pending or in progress), `request` (another request to it is outstanding), `processes` (a process it started since it last worked on nothing still runs, or its processes use the CPU). Absent when idle. |
+| `idleSince` | When it last stopped working, while it is idle (RFC 3339). |
+| `sessions` | Each session it holds: `{sessionId, state, busy, why, lastUpdate}`, with `state` `starting`, `running`, `paused` or `resuming`, `why` as above for that session, and `lastUpdate` when the agent last sent anything in it (RFC 3339). A turn whose only `why` is `prompt`, long silent, with no `processes`, may be stuck rather than working: a client can cancel it, and the host then MAY pause the agent and resume the session fresh. |
 
 ## 8. ACP on agent channels
 
@@ -621,7 +640,7 @@ Nebo Link first served Nebo's own phone API (the "chat contract": `/api/v1/agent
 
 ## Appendix C. Message index
 
-Host channel, client to host (requests): `host/hello`, `host/pair`, `host/info`, `host/agents`, `host/agents/add`, `host/agents/remove`, `host/pending`, `host/answer`, `host/ping`, `host/devices`, `host/unpair`.
+Host channel, client to host (requests): `host/hello`, `host/pair`, `host/info`, `host/agents`, `host/agents/add`, `host/agents/remove`, `host/status`, `host/pending`, `host/answer`, `host/ping`, `host/devices`, `host/unpair`.
 
 Host channel, host to client (notifications): `host/agent_update`, `host/turn`, `host/pending_update`.
 
@@ -629,6 +648,9 @@ Agent channels: ACP v1, unchanged. The host serves `initialize`, `session/new`, 
 
 ## Changes
 
+- **0.1, amended 2026-09-28**:
+  - `host/status`: where each agent is in its life (starting, running, paused, resuming) and whether it works now, and why, per agent and per session. A host MAY pause an agent that works on nothing and MUST NOT pause one that works; a paused session resumes as the same session, or is refused plainly, never replaced by a new one (section 7.5, `schemas/host-status.schema.json`).
+  - A host MAY serve its own apps on the same computer on loopback, with the same certificate and the same end-to-end encrypted connections as LAN direct; the app learns where from the host's own state, and nothing announces it or names it in `host/info` (section 4.5).
 - **0.1, amended 2026-09-26, third time**:
   - Paired devices add and remove agents: `host/agents/add {runtime, label?}` and `host/agents/remove {agentId}`, with `addable` on `host/info` `runtimes`. The host chooses a new agent's folder, and removing an agent never deletes its folder (section 7.4, `schemas/host-agents-add.schema.json`, `schemas/host-agents-remove.schema.json`, `examples/add-remove.json`). This was deferred to 0.2.
   - A conversation moves to another folder through the host's own MCP tool `move_to_folder`, when the owner asks in the conversation; it keeps its `sessionId`, and clients learn the folder from `_meta."oal/cwd"`. A client still can't choose another folder itself (sections 8, 8.1, 16).

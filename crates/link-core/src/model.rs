@@ -78,6 +78,73 @@ pub struct Agent {
     pub modes: Option<SessionModeState>,
 }
 
+/// Where an agent (or one of its sessions) is in its life (`host/status`):
+/// its process starts, runs, is paused (stopped, its memory freed, its
+/// sessions kept), or resumes (starts again and reopens a paused session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Life {
+    Starting,
+    Running,
+    Paused,
+    Resuming,
+}
+
+/// Why an agent or a session is working now (`host/status` `why`). Any one
+/// is enough: a working agent is never paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Working {
+    /// A `session/prompt` is outstanding, however long it has been silent.
+    Prompt,
+    /// A tool call started and has not completed or failed.
+    Tool,
+    /// A permission request waits for an answer.
+    Permission,
+    /// The agent's plan has an entry pending or in progress.
+    Plan,
+    /// A request to the agent (opening a session, listing them) is
+    /// outstanding.
+    Request,
+    /// The agent's processes work: one it started since it was last idle
+    /// still runs (a build, a test run, a shell), or they used the CPU.
+    Processes,
+}
+
+/// One session's state (`host/status`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStatus {
+    pub session_id: String,
+    pub state: Life,
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub why: Vec<Working>,
+    /// When the agent last sent anything in the session (an update, a
+    /// permission request), RFC 3339: with `why` only `prompt`, a long
+    /// silence tells a client a turn may be stuck rather than working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<String>,
+}
+
+/// One agent's state (`host/status`): its process, whether it works now and
+/// why, since when it has been idle, and each session it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+    pub agent: String,
+    pub state: Life,
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub why: Vec<Working>,
+    /// When it last stopped working (RFC 3339), while it is idle: it pauses
+    /// once idle for the host's idle window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
+    #[serde(default)]
+    pub sessions: Vec<SessionStatus>,
+}
+
 /// ACP `SessionModeState`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

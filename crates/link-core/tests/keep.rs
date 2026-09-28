@@ -58,6 +58,7 @@ fn settings(dir: &Path, agent: &CodingAgent) -> Settings {
         log: dir.join(format!("{}.log", agent.id)),
         chats_file: dir.join(&agent.id).join("acp-chats.json"),
         client: CLIENT,
+        idle: link_core::acp::IDLE_WINDOW,
     }
 }
 

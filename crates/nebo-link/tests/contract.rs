@@ -1985,6 +1985,7 @@ async fn start_acp_link(
         log: dir.join("logs").join("agent.log"),
         chats_file: dir.join("acp-chats.json"),
         client: nebo_link::link::CLIENT,
+        idle: link_core::acp::IDLE_WINDOW,
     });
     let runtime = nebo_link::install::runtime_name(nebo_runtimes::Runtime::Acp(agent));
     let key = nebo_link::install::runtime_key(nebo_runtimes::Runtime::Acp(agent));
@@ -2264,6 +2265,7 @@ async fn an_acp_agent_that_will_not_start_is_not_announced() {
         log: tmp.path().join("agent.log"),
         chats_file: tmp.path().join("acp-chats.json"),
         client: nebo_link::link::CLIENT,
+        idle: link_core::acp::IDLE_WINDOW,
     });
     let link = serve_contract(("codex", "Codex"), Arc::new(backend), &hub_url).await;
     assert_eq!(get(link, "/health").await["chat"], false);
@@ -2477,6 +2479,7 @@ async fn live_acp_phone_flow() {
         log: tmp.path().join("agent.log"),
         chats_file: tmp.path().join("acp-chats.json"),
         client: nebo_link::link::CLIENT,
+        idle: link_core::acp::IDLE_WINDOW,
     });
     let link = serve_contract((agent.key(), agent.name()), Arc::new(backend), &hub_url).await;
     // A first start may fetch the adapter: probe until it answers.
