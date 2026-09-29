@@ -807,17 +807,19 @@ impl Host {
         if let (Some(tools), Some(token)) = (&tools, &token) {
             tools.bind(token, session_id);
         }
-        let mut state = self.lock();
         let mut session = Session::new(&member.id, &runtime_agent);
         session.answered(&result);
         let key = (agent.to_owned(), session_id.to_owned());
-        Self::insert(&mut state, key, session);
+        let dropped = Self::insert(&mut self.lock(), key, session);
+        self.close_in_agents(dropped);
         Ok(result)
     }
 
     /// Records a session the host now holds open, with any updates that came
-    /// before it, and lets the least used go past [`OPEN_SESSIONS`].
-    fn insert(state: &mut State, key: Key, mut session: Session) {
+    /// before it, and lets the least used go past [`OPEN_SESSIONS`]: those
+    /// are returned, for the caller to close in their agents
+    /// ([`Host::close_in_agents`]) once it lets go of the state.
+    fn insert(state: &mut State, key: Key, mut session: Session) -> Vec<(Key, Session)> {
         let index = (session.member.clone(), session.runtime_agent.clone(), key.1.clone());
         if let Some(strays) = state.strays.remove(&index) {
             session.record.extend(strays.into_iter().map(|update| Recorded { update, at: None }));
@@ -826,6 +828,7 @@ impl Host {
         session.used = state.tick;
         state.index.insert(index, key.clone());
         state.sessions.insert(key, session);
+        let mut dropped = Vec::new();
         while state.sessions.len() > OPEN_SESSIONS {
             let idle = state
                 .sessions
@@ -836,7 +839,25 @@ impl Host {
                 .min_by_key(|(_, s)| s.used)
                 .map(|(k, _)| k.clone());
             let Some(idle) = idle else { break };
-            Self::forget(state, &idle);
+            dropped.extend(Self::forget(state, &idle).map(|session| (idle, session)));
+        }
+        dropped
+    }
+
+    /// Closes sessions the host let go in their agents (`session/close`), so
+    /// what an agent runs for one (its process, its tool servers) ends with
+    /// it rather than when the agent pauses. Each backend decides what
+    /// closing means to it; a runtime whose sessions are shared keeps them.
+    fn close_in_agents(&self, dropped: Vec<(Key, Session)>) {
+        for ((agent, session_id), session) in dropped {
+            let Some(backend) = self.backend(&session.member) else { continue };
+            let runtime_agent = session.runtime_agent;
+            tokio::spawn(async move {
+                let params = json!({ "sessionId": session_id });
+                if let Err(e) = backend.request(&runtime_agent, "session/close", params).await {
+                    tracing::info!(agent = %agent, session = %session_id, error = %e.message, "host: could not close a session it let go");
+                }
+            });
         }
     }
 
@@ -863,6 +884,7 @@ impl Host {
             return Ok(opened);
         }
         let _one = self.opening.lock().await;
+        let mut dropped = Vec::new();
         let was_open = {
             let mut state = self.lock();
             let busy = state.sessions.get(&key).is_some_and(|s| s.turn.is_some())
@@ -881,12 +903,13 @@ impl Host {
                     None => {
                         let mut session = Session::new(&member.id, &runtime_agent);
                         session.opening = true;
-                        Self::insert(&mut state, key.clone(), session);
+                        dropped = Self::insert(&mut state, key.clone(), session);
                         false
                     }
                 })
             }
         };
+        self.close_in_agents(dropped);
         let Some(was_open) = was_open else {
             return self
                 .snapshot(&key, how, None)

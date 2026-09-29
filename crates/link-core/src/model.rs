@@ -108,8 +108,9 @@ pub enum Working {
     /// A request to the agent (opening a session, listing them) is
     /// outstanding.
     Request,
-    /// The agent's processes work: one it started since it was last idle
-    /// still runs (a build, a test run, a shell), or they used the CPU.
+    /// A process of the agent's uses the CPU (a build, a test run a turn
+    /// left running). One that merely runs (a session's own process, its
+    /// tool servers, a shell waiting) is not work.
     Processes,
 }
 

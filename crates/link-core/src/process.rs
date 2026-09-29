@@ -11,7 +11,7 @@
 //! process since, after the process ended or the computer restarted, is
 //! never signalled.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, SystemTime};
 
 /// How far apart two readings of one start time may be: the operating
@@ -138,8 +138,23 @@ fn boot_time() -> Option<u64> {
 pub struct Tree {
     /// Every process under the root (its descendants, not the root itself).
     pub descendants: BTreeSet<u32>,
-    /// The CPU time the root and its descendants have used so far.
+    /// What each process of the tree, the root included, has used so far.
+    pub usage: BTreeMap<u32, Usage>,
+}
+
+/// What one process has used so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Its CPU time.
     pub cpu: Duration,
+    /// When it started, Unix seconds.
+    pub started: u64,
+}
+
+impl Row {
+    fn usage(&self) -> Usage {
+        Usage { cpu: self.cpu, started: self.started }
+    }
 }
 
 /// The tree under `root`, with every process of its process group; `None`
@@ -155,7 +170,7 @@ fn tree_in(rows: &[Row], root: u32) -> Option<Tree> {
         children.entry(row.ppid).or_default().push(row);
     }
     let mut tree = Tree {
-        cpu: root_row.cpu,
+        usage: BTreeMap::from([(root, root_row.usage())]),
         ..Tree::default()
     };
     let mut stack = vec![root];
@@ -167,7 +182,9 @@ fn tree_in(rows: &[Row], root: u32) -> Option<Tree> {
             if !tree.descendants.insert(pid) {
                 continue;
             }
-            tree.cpu += rows.iter().find(|r| r.pid == pid).map_or(Duration::ZERO, |r| r.cpu);
+            if let Some(row) = rows.iter().find(|r| r.pid == pid) {
+                tree.usage.insert(pid, row.usage());
+            }
         }
         stack.extend(children.get(&pid).into_iter().flatten().map(|c| c.pid).filter(|p| *p != root));
     }
@@ -434,7 +451,8 @@ mod tests {
         ]);
         let tree = tree_in(&table, 100).unwrap();
         assert_eq!(tree.descendants, BTreeSet::from([101, 102, 103, 104]));
-        assert_eq!(tree.cpu, Duration::from_millis(2050));
+        assert_eq!(tree.usage.keys().copied().collect::<Vec<_>>(), [100, 101, 102, 103, 104]);
+        assert_eq!(tree.usage.values().map(|u| u.cpu).sum::<Duration>(), Duration::from_millis(2050));
         assert_eq!(tree_in(&table, 999), None);
         assert_eq!(group(&table, 100), vec![100, 101, 102, 104]);
     }

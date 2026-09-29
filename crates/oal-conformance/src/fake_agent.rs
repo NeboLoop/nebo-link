@@ -18,9 +18,16 @@
 //! With `OAL_FAKE_AGENT_SESSIONS` set to a folder, its sessions outlive it
 //! there, as a real agent's do: another process of it loads one (its folder
 //! and mode; the record starts empty).
+//!
+//! With `OAL_FAKE_AGENT_TOOL_SERVER` set to a shell command, every session
+//! it opens (new or loaded) runs that command a second later, until the
+//! session closes (`session/close`): as a real agent starts a session's
+//! tool servers while its first prompt already runs.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -63,6 +70,8 @@ pub async fn run(mut input: mpsc::UnboundedReceiver<Value>, out: mpsc::Unbounded
         next_request: 0,
         done,
         store: std::env::var_os("OAL_FAKE_AGENT_SESSIONS").map(PathBuf::from),
+        tool_server: std::env::var("OAL_FAKE_AGENT_TOOL_SERVER").ok(),
+        created: 0,
     };
     loop {
         tokio::select! {
@@ -93,7 +102,13 @@ struct Session {
     log: Vec<Value>,
     calls: u32,
     turn: Option<Turn>,
+    /// Its tool server, once started: stopped when the session closes.
+    server: Server,
 }
+
+/// A session's tool server (`OAL_FAKE_AGENT_TOOL_SERVER`), killed when the
+/// last holder drops it.
+type Server = Arc<Mutex<Option<tokio::process::Child>>>;
 
 struct Turn {
     prompt_id: Value,
@@ -118,6 +133,10 @@ struct Agent {
     done: mpsc::UnboundedSender<Called>,
     /// Where its sessions outlive it (`OAL_FAKE_AGENT_SESSIONS`).
     store: Option<PathBuf>,
+    /// What each session it opens runs (`OAL_FAKE_AGENT_TOOL_SERVER`).
+    tool_server: Option<String>,
+    /// How many sessions it created.
+    created: usize,
 }
 
 /// The host's MCP server among `params`' `mcpServers`: the HTTP one named
@@ -178,7 +197,32 @@ impl Agent {
             log: Vec::new(),
             calls: 0,
             turn: None,
+            server: Server::default(),
         })
+    }
+
+    /// Starts the session `id`'s tool server a second from now, unless it
+    /// has one or closes first.
+    fn serve(&self, id: &str) {
+        let (Some(command), Some(session)) = (&self.tool_server, self.sessions.get(id)) else {
+            return;
+        };
+        let (command, slot) = (command.clone(), session.server.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if Arc::strong_count(&slot) < 2 || slot.lock().expect("server").is_some() {
+                return;
+            }
+            let started = tokio::process::Command::new("sh")
+                .args(["-c", &command])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn();
+            if let Ok(child) = started {
+                *slot.lock().expect("server") = Some(child);
+            }
+        });
     }
 
     fn respond(&self, id: &Value, result: Result<Value, (i64, &str)>) {
@@ -235,7 +279,7 @@ impl Agent {
                 "agentCapabilities": {
                     "loadSession": true,
                     "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
-                    "sessionCapabilities": { "list": {}, "resume": {} },
+                    "sessionCapabilities": { "close": {}, "list": {}, "resume": {} },
                     "mcpCapabilities": { "http": true, "sse": false }
                 },
                 "agentInfo": { "name": "oal-fake-agent", "title": "Fake Agent", "version": env!("CARGO_PKG_VERSION") },
@@ -243,7 +287,9 @@ impl Agent {
             }))),
             "session/new" => {
                 let kept = self.store.as_ref().and_then(|s| std::fs::read_dir(s).ok()).map_or(0, |d| d.count());
-                let id_text = format!("sess-{}", self.sessions.len().max(kept) + 1);
+                // Never an id a closed session had.
+                self.created = self.created.max(self.sessions.len()).max(kept) + 1;
+                let id_text = format!("sess-{}", self.created);
                 self.sessions.insert(id_text.clone(), Session {
                     cwd: params["cwd"].as_str().unwrap_or("").to_owned(),
                     host_tools: host_tools(&params),
@@ -251,8 +297,10 @@ impl Agent {
                     log: Vec::new(),
                     calls: 0,
                     turn: None,
+                    server: Server::default(),
                 });
                 self.keep(&id_text);
+                self.serve(&id_text);
                 self.respond(&id, Ok(json!({ "sessionId": id_text, "modes": modes("ask") })));
             }
             "session/load" | "session/resume" => {
@@ -267,7 +315,8 @@ impl Agent {
                 if let Some(url) = host_tools(&params) {
                     session.host_tools = Some(url);
                 }
-                let session = &*session;
+                self.serve(&session_id);
+                let Some(session) = self.sessions.get(&session_id) else { return };
                 let mode = session.mode.clone();
                 if method == "session/load" {
                     for update in session.log.clone() {
@@ -297,6 +346,11 @@ impl Agent {
                 }
             }
             "session/prompt" => self.prompt(id, &session_id, &params["prompt"]),
+            // Its tool server stops with it.
+            "session/close" => match self.sessions.remove(&session_id) {
+                Some(_) => self.respond(&id, Ok(json!({}))),
+                None => self.respond(&id, Err((-32002, "Resource not found"))),
+            },
             _ => self.respond(&id, Err((-32601, "Method not found"))),
         }
     }

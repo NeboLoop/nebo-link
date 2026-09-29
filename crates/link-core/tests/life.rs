@@ -1,10 +1,13 @@
 //! A coding agent's life on the host, with a real agent process (the
 //! conformance suite's scripted agent, this test binary again): it works
-//! while a prompt, a tool call, a permission request or a process it started
-//! runs; it pauses once idle for its window and never before; a paused
-//! conversation resumes as the same session, or says plainly why it can't;
-//! shutting down lets a prompt finish, then stops everything; and what a
-//! crashed run left running is stopped by the next.
+//! while a prompt, a tool call, a permission request runs, or a process of
+//! its uses the CPU; the processes a session starts (its tool servers) are
+//! not work while they idle; it pauses once idle for its window and never
+//! before, and nothing it ran is left; a paused conversation resumes as the
+//! same session, or says plainly why it can't; a session closed (by a client
+//! or the host letting it go) ends what the agent runs for it, and never
+//! starts a paused agent; shutting down lets a prompt finish, then stops
+//! everything; and what a crashed run left running is stopped by the next.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -13,8 +16,10 @@ use std::time::{Duration, Instant};
 
 use link_core::acp::{Acp, Client, IDLE_WINDOW, Settings};
 use link_core::backend::{AgentMessage, Backend, FromAgent, Reply};
+use link_core::host::Host;
 use link_core::model::{AgentStatus, Life, Working};
 use link_core::process;
+use link_core::roster::{Member, Roster};
 use nebo_runtimes::RuntimeCommand;
 use nebo_runtimes::acp::Agent as AcpAgent;
 use serde_json::{Value, json};
@@ -56,6 +61,16 @@ fn command(store: Option<&Path>, starts_work: bool) -> RuntimeCommand {
         },
     }
 }
+
+/// `command` with every session the agent opens running `server` a second
+/// later, until the session closes: its tool servers.
+fn with_tool_server(mut command: RuntimeCommand, server: &str) -> RuntimeCommand {
+    command.env.push(("OAL_FAKE_AGENT_TOOL_SERVER".to_owned(), server.to_owned()));
+    command
+}
+
+/// A tool server that idles, as one waiting for its next call does.
+const IDLE_SERVER: &str = "exec sleep 300";
 
 struct Agent {
     acp: Arc<Acp>,
@@ -100,6 +115,11 @@ impl Agent {
 
     async fn status(&self) -> AgentStatus {
         self.acp.status().await.unwrap().remove(0)
+    }
+
+    /// The processes under the agent's process now.
+    fn under(&self) -> Vec<u32> {
+        process::tree(self.pid()).map(|t| t.descendants.into_iter().collect()).unwrap_or_default()
     }
 
     /// The agent's process now, as the host recorded it.
@@ -161,16 +181,135 @@ async fn it_works_while_a_prompt_a_tool_or_a_permission_request_is_outstanding()
     assert!(a.acp.busy().await.is_idle());
 }
 
+/// The owner's case: the first prompt goes the moment `session/new`
+/// answers, and the session's tool servers start after it, then idle. They
+/// never keep the agent running: it pauses once idle for its window, and
+/// nothing it ran is left. The conversation resumes, its tool server with
+/// it.
 #[tokio::test]
-async fn it_works_while_a_process_it_started_runs() {
+async fn tool_servers_a_session_starts_never_keep_it_running() {
     let root = tempfile::tempdir().unwrap();
-    let a = agent(root.path(), command(None, true), IDLE_WINDOW);
+    let store = root.path().join("sessions");
+    let window = Duration::from_millis(1500);
+    let a = agent(root.path(), with_tool_server(command(Some(&store), false), IDLE_SERVER), window);
+    let session = a.new_session().await;
+    let first = a.pid();
+    assert_eq!(a.prompt(&session, "hello").await.unwrap().unwrap()["stopReason"], "end_turn");
+    let idle_from = Instant::now();
+    until("its tool server runs", || async { !a.under().is_empty() }).await;
+    let servers = a.under();
+    until("it paused", || async { a.status().await.state == Life::Paused }).await;
+    assert!(idle_from.elapsed() >= window, "paused {:?} after it went idle", idle_from.elapsed());
+    for p in servers.iter().chain([&first]) {
+        assert!(!process::alive(*p), "{p} still runs");
+    }
+
+    assert_eq!(a.prompt(&session, "where").await.unwrap().unwrap()["stopReason"], "end_turn");
+    assert_ne!(a.pid(), first);
+    until("the resumed session's tool server runs", || async { !a.under().is_empty() }).await;
+    until("it paused again", || async { a.status().await.state == Life::Paused }).await;
+}
+
+/// With its tool servers idling beside it, a turn in flight is never paused:
+/// a tool call running quietly for many windows, and the prompt it is in.
+#[tokio::test]
+async fn a_turn_in_flight_is_never_paused_beside_idle_tool_servers() {
+    let root = tempfile::tempdir().unwrap();
+    let a = agent(root.path(), with_tool_server(command(None, false), IDLE_SERVER), Duration::from_millis(300));
+    let session = a.new_session().await;
+    let turn = a.prompt(&session, "busy");
+    until("the call runs", || async { a.acp.busy().await.why.contains(&Working::Tool) }).await;
+    until("its tool server runs", || async { !a.under().is_empty() }).await;
+    let pid = a.pid();
+    let servers = a.under();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let status = a.status().await;
+    assert_eq!(status.state, Life::Running, "never paused while a call runs");
+    assert_eq!(status.why, [Working::Prompt, Working::Tool]);
+    for p in servers.iter().chain([&pid]) {
+        assert!(process::alive(*p), "{p} stopped mid-turn");
+    }
+    a.acp.notify(AGENT, "session/cancel", json!({ "sessionId": session }));
+    assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "cancelled");
+    until("it paused", || async { a.status().await.state == Life::Paused }).await;
+    for p in servers.iter().chain([&pid]) {
+        assert!(!process::alive(*p), "{p} still runs");
+    }
+}
+
+/// A process of the agent's that uses the CPU (a build a turn left running)
+/// is work, and keeps it running past its window; closed with its session,
+/// it no longer does, and the agent pauses.
+#[tokio::test]
+async fn a_process_using_the_cpu_is_work_until_it_ends() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("sessions");
+    let window = Duration::from_secs(3);
+    let a = agent(root.path(), with_tool_server(command(Some(&store), false), "while :; do :; done"), window);
     let session = a.new_session().await;
     assert_eq!(a.prompt(&session, "hello").await.unwrap().unwrap()["stopReason"], "end_turn");
-    until("the process it started counts as work", || async {
-        a.acp.busy().await.why.contains(&Working::Processes)
-    })
-    .await;
+    until("the busy process is work", || async { a.acp.busy().await.why.contains(&Working::Processes) }).await;
+    tokio::time::sleep(window * 2).await;
+    assert_eq!(a.status().await.state, Life::Running, "never paused while a process works");
+    let busy = a.under();
+    a.request("session/close", json!({ "sessionId": session })).await.unwrap();
+    until("what the session ran ended with it", || async { busy.iter().all(|p| !process::alive(*p)) }).await;
+    until("it paused", || async { a.status().await.state == Life::Paused }).await;
+}
+
+/// `session/close` ends the session in the agent, and the tool server it ran
+/// with it; the agent's other sessions run on. Closing a session of a paused
+/// agent never starts it.
+#[tokio::test]
+async fn a_closed_session_ends_what_it_ran_and_never_starts_a_paused_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("sessions");
+    let a = agent(root.path(), with_tool_server(command(Some(&store), false), IDLE_SERVER), IDLE_WINDOW);
+    let first = a.new_session().await;
+    until("its tool server runs", || async { a.under().len() == 1 }).await;
+    let first_server = a.under();
+    let second = a.new_session().await;
+    until("both tool servers run", || async { a.under().len() == 2 }).await;
+    a.request("session/close", json!({ "sessionId": first })).await.unwrap();
+    until("the closed session's tool server stopped", || async { !process::alive(first_server[0]) }).await;
+    assert_eq!(a.under().len(), 1, "the other session's runs on");
+    let status = a.status().await;
+    assert_eq!(status.sessions.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(), [second.as_str()]);
+
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("sessions");
+    let a = agent(root.path(), command(Some(&store), false), Duration::from_millis(300));
+    let session = a.new_session().await;
+    let pid = a.pid();
+    until("it paused", || async { a.status().await.state == Life::Paused }).await;
+    assert_eq!(a.request("session/close", json!({ "sessionId": session })).await.unwrap(), json!({}));
+    let status = a.status().await;
+    assert_eq!(status.state, Life::Paused, "not started to close a session");
+    assert!(status.sessions.is_empty(), "the closed session is no longer held");
+    assert!(!process::alive(pid));
+    assert!(!a.dir.join("agent").join("acp-process.json").exists(), "no process started");
+}
+
+/// A session the host lets go (past its open sessions) is closed in its
+/// agent, not only dropped from the host's record.
+#[tokio::test]
+async fn a_session_the_host_lets_go_is_closed_in_its_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let a = agent(root.path(), command(None, false), IDLE_WINDOW);
+    let host = Host::new(Arc::new(Roster::new(vec![Member {
+        id: AGENT.into(),
+        label: "Fake Agent".into(),
+        runtime: "acp".into(),
+        backend: a.acp.clone(),
+    }])));
+    let params = json!({ "cwd": root.path().join("work"), "mcpServers": [] });
+    let first = host.new_session(AGENT, params.clone()).await.unwrap()["sessionId"].as_str().unwrap().to_owned();
+    for _ in 0..256 {
+        host.new_session(AGENT, params.clone()).await.unwrap();
+    }
+    assert!(!host.is_open(AGENT, &first), "the least used was let go");
+    until("the agent closed it", || async { a.status().await.sessions.iter().all(|s| s.session_id != first) }).await;
+    assert_eq!(a.status().await.sessions.len(), 256);
 }
 
 /// Idle for its window, it pauses (its process stops); the conversation
