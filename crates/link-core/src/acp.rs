@@ -328,8 +328,9 @@ struct Sessions {
     /// last cancelled.
     prompts: HashMap<String, usize>,
     cancelled: HashMap<String, Instant>,
-    /// Tool calls started and not finished, by conversation (a turn's end
-    /// finishes them: what they left running shows in the processes).
+    /// Tool calls running (`in_progress`) and not finished, by
+    /// conversation (a turn's end finishes them: what they left running
+    /// shows in the processes).
     tools: HashMap<String, HashSet<String>>,
     /// Conversations whose plan has an entry pending or in progress.
     plans: HashSet<String>,
@@ -414,7 +415,7 @@ impl Sessions {
         self.processes_work = started || used;
     }
 
-    /// Takes in a `session/update`: tool calls started and finished, and the
+    /// Takes in a `session/update`: tool calls running and finished, and the
     /// plan.
     fn track(&mut self, session: &str, update: &Value) {
         let status = update["status"].as_str();
@@ -422,15 +423,16 @@ impl Sessions {
             Some("tool_call" | "tool_call_update") => {
                 let Some(call) = update["toolCallId"].as_str() else { return };
                 let calls = self.tools.entry(session.to_owned()).or_default();
+                // A call runs once it is `in_progress`. One still `pending`
+                // (ACP's default: its input still streaming from the model,
+                // or waiting on the owner's approval, which is work of its
+                // own) has not started, and one completed or failed is done.
                 match status {
-                    Some("completed" | "failed") => {
-                        calls.remove(call);
+                    Some("in_progress") => {
+                        calls.insert(call.to_owned());
                     }
                     Some(_) => {
-                        calls.insert(call.to_owned());
-                    }
-                    None if update["sessionUpdate"] == "tool_call" => {
-                        calls.insert(call.to_owned());
+                        calls.remove(call);
                     }
                     None => {}
                 }
@@ -1755,6 +1757,7 @@ mod tests {
         assert_eq!(why(&busy), [Working::Tool, Working::Permission, Working::Plan]);
         assert_eq!(busy.sessions["s1"], BTreeSet::from([Working::Tool]));
         assert_eq!(busy.sessions["s3"], BTreeSet::from([Working::Permission]));
+        assert!(!busy.sessions.contains_key("s2"), "a call with no status is pending: not running");
 
         sessions.track("s1", &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed" }));
         sessions.track("s2", &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c2", "status": "failed" }));
@@ -1763,11 +1766,29 @@ mod tests {
         assert!(sessions.busy(now).is_idle());
 
         // A turn's end finishes what it left unfinished.
-        sessions.track("s1", &json!({ "sessionUpdate": "tool_call", "toolCallId": "c3", "status": "pending" }));
+        sessions.track("s1", &json!({ "sessionUpdate": "tool_call", "toolCallId": "c3", "status": "in_progress" }));
         *sessions.prompts.entry("s1".into()).or_default() += 1;
         assert_eq!(why(&sessions.busy(now)), [Working::Prompt, Working::Tool]);
         sessions.turn_ended("s1");
         assert!(sessions.busy(now).is_idle());
+    }
+
+    /// A call still pending (its input streaming from the model, as a stream
+    /// that stalled leaves it) has not started: the prompt it sits in reads
+    /// as only a prompt. It runs once in progress, and is done once it
+    /// completes.
+    #[test]
+    fn a_pending_tool_call_is_not_running() {
+        let mut sessions = Sessions::default();
+        let now = Instant::now();
+        sessions.prompt_started("s1", now);
+        sessions.track("s1", &json!({ "sessionUpdate": "tool_call", "toolCallId": "c1", "status": "pending" }));
+        sessions.track("s1", &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "rawInput": { "command": "ls" } }));
+        assert_eq!(why(&sessions.busy(now)), [Working::Prompt]);
+        sessions.track("s1", &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "in_progress" }));
+        assert_eq!(why(&sessions.busy(now)), [Working::Prompt, Working::Tool]);
+        sessions.track("s1", &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed" }));
+        assert_eq!(why(&sessions.busy(now)), [Working::Prompt]);
     }
 
     /// Processes started since the agent last worked on nothing, and CPU

@@ -97,7 +97,9 @@ pub enum Life {
 pub enum Working {
     /// A `session/prompt` is outstanding, however long it has been silent.
     Prompt,
-    /// A tool call started and has not completed or failed.
+    /// A tool call runs: it is `in_progress` and has not completed or
+    /// failed. One still `pending` (its input streaming from the model, or
+    /// waiting for the owner's approval) has not started.
     Tool,
     /// A permission request waits for an answer.
     Permission,

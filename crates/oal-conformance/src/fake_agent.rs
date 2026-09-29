@@ -4,6 +4,8 @@
 //! |---|---|
 //! | `run: <command>` | A `tool_call` for the command, then `session/request_permission` (options `allow-once`, `reject-once`) unless the session is in mode `full`; then the result (`echo X` prints `X`), `Done.` and `end_turn`. |
 //! | `wait` | `Working on it.`, then nothing until `session/cancel`, then `cancelled`. |
+//! | `stall` | A `tool_call` still `pending` (as a model's stream leaves one it stopped in the middle of), then nothing until `session/cancel`, then `cancelled`. |
+//! | `busy` | A `tool_call` `in_progress` (a long step running quietly), then nothing until `session/cancel`, then `cancelled`. |
 //! | `work in <folder>` | Calls the host's `move_to_folder` tool (its MCP server named `host`, over HTTP) with that folder and the handoff `Was working in <cwd>.`, as a `move_to_folder` tool call; then `Moved.` or `Couldn't move: <why>`, and `end_turn`. `work in new <folder>` asks the host to make it. |
 //! | `where` | `Working in <cwd>.`, then `Handoff: <text>` when the prompt started with another text block (a moved conversation's handoff), and `end_turn`. |
 //! | anything else | `You said: <prompt>` and `end_turn`. |
@@ -375,6 +377,15 @@ impl Agent {
                 waiting: Waiting::Cancel,
             });
             self.say(session_id, "Working on it.");
+        } else if text == "stall" || text == "busy" {
+            session.calls += 1;
+            let call = format!("call-{}", session.calls);
+            session.turn = Some(Turn {
+                prompt_id: id,
+                waiting: Waiting::Cancel,
+            });
+            let status = if text == "stall" { "pending" } else { "in_progress" };
+            self.update(session_id, json!({ "sessionUpdate": "tool_call", "toolCallId": call, "title": "a long step", "kind": "other", "status": status }));
         } else {
             self.say(session_id, &format!("You said: {text}"));
             self.end(session_id, &id, "end_turn");
