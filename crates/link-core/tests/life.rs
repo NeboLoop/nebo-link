@@ -143,11 +143,13 @@ async fn it_works_while_a_prompt_a_tool_or_a_permission_request_is_outstanding()
     let session = a.new_session().await;
     assert!(a.acp.busy().await.is_idle());
 
+    // The call waits on the owner's approval: still pending, it has not
+    // started; the permission request is the work.
     let turn = a.prompt(&session, "run: echo hi");
     let reply = a.permission().await;
     let busy = a.acp.busy().await;
-    assert_eq!(busy.why.iter().copied().collect::<Vec<_>>(), [Working::Prompt, Working::Tool, Working::Permission]);
-    assert_eq!(busy.sessions[&session].len(), 3);
+    assert_eq!(busy.why.iter().copied().collect::<Vec<_>>(), [Working::Prompt, Working::Permission]);
+    assert_eq!(busy.sessions[&session].len(), 2);
     let status = a.status().await;
     assert!(status.busy && status.state == Life::Running);
     assert_eq!(status.sessions[0].session_id, session);
@@ -239,6 +241,54 @@ async fn a_prompt_after_a_cancel_starts_the_agent_afresh() {
     assert_ne!(a.pid(), wedged, "a fresh process");
     assert!(!process::alive(wedged));
     assert_eq!(a.status().await.sessions[0].session_id, session);
+}
+
+/// A prompt whose stream stopped in the middle of a call (the call still
+/// pending, then nothing) reads as only a prompt, its processes idle: what
+/// a client takes for a turn that stopped answering. Cancelled, the agent
+/// pauses at once, and a new session answers in a fresh process.
+#[tokio::test]
+async fn a_stalled_prompt_reads_as_only_a_prompt_and_a_new_session_answers_after_the_cancel() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("sessions");
+    let a = agent(root.path(), command(Some(&store), false), Duration::from_millis(300));
+    let session = a.new_session().await;
+    let turn = a.prompt(&session, "stall");
+    until("the stalled prompt reads as only a prompt", || async {
+        let status = a.status().await;
+        !status.why.contains(&Working::Processes)
+            && status.sessions.iter().any(|s| s.session_id == session && s.why == [Working::Prompt] && s.last_update.is_some())
+    })
+    .await;
+    let wedged = a.pid();
+    a.acp.notify(AGENT, "session/cancel", json!({ "sessionId": session }));
+    assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "cancelled");
+    until("the cancelled agent paused", || async { a.status().await.state == Life::Paused }).await;
+    assert!(!process::alive(wedged));
+    let fresh = a.new_session().await;
+    assert_ne!(fresh, session);
+    assert_eq!(a.prompt(&fresh, "hello").await.unwrap().unwrap()["stopReason"], "end_turn");
+    assert_ne!(a.pid(), wedged, "a fresh process");
+}
+
+/// A call running is work however quiet the turn is: never taken for a
+/// turn that stopped answering, never paused.
+#[tokio::test]
+async fn a_running_tool_call_is_work_however_quiet() {
+    let root = tempfile::tempdir().unwrap();
+    let a = agent(root.path(), command(None, false), Duration::from_millis(300));
+    let session = a.new_session().await;
+    let turn = a.prompt(&session, "busy");
+    until("the call runs", || async { a.acp.busy().await.why.contains(&Working::Tool) }).await;
+    let pid = a.pid();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let status = a.status().await;
+    assert_eq!(status.state, Life::Running, "never paused while a call runs");
+    let working = status.sessions.iter().find(|s| s.session_id == session).expect("the session");
+    assert_eq!(working.why, [Working::Prompt, Working::Tool]);
+    assert!(process::alive(pid));
+    a.acp.notify(AGENT, "session/cancel", json!({ "sessionId": session }));
+    assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "cancelled");
 }
 
 /// An agent that can't load a paused session says so, in plain words; the
