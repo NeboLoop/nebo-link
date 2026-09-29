@@ -31,6 +31,9 @@ pub struct Initialized {
     /// `sessionCapabilities.resume`: `session/resume` reopens a session
     /// without replaying it.
     pub resume_session: bool,
+    /// `sessionCapabilities.close`: `session/close` ends a session, and what
+    /// the agent runs for it (its process, its tool servers).
+    pub close_session: bool,
 }
 
 impl Initialized {
@@ -43,6 +46,7 @@ impl Initialized {
             load_session: caps["loadSession"].as_bool().unwrap_or(false),
             list_sessions: caps["sessionCapabilities"]["list"].is_object(),
             resume_session: caps["sessionCapabilities"]["resume"].is_object(),
+            close_session: caps["sessionCapabilities"]["close"].is_object(),
         }
     }
 }
@@ -421,7 +425,14 @@ mod tests {
         }));
         assert_eq!(init.protocol_version, 1);
         assert!(init.load_session && init.list_sessions && init.resume_session);
+        assert!(!init.close_session);
         assert_eq!(init.title.as_deref(), Some("Claude Agent"));
+        // claude-agent-acp 0.84.0 and codex-acp close sessions.
+        let closes = Initialized::parse(&json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": true, "sessionCapabilities": { "close": {}, "list": {}, "resume": {} } }
+        }));
+        assert!(closes.close_session);
 
         let claude_new = json!({ "sessionId": "s", "configOptions": [
             { "id": "mode", "category": "mode", "currentValue": "default", "options": [] },
