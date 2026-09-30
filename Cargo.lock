@@ -1296,7 +1296,7 @@ checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
 name = "link-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "dirs",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "nebo-link"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "brotli",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "nebo-runtimes"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "oal-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "oal-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "oal-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "oal-secure"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
