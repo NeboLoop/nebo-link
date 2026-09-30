@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+command = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }

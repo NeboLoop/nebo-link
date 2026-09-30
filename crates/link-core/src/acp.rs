@@ -1615,7 +1615,7 @@ const FIRST_START: Duration = START_TIMEOUT;
 /// Starts the agent once in `workdir`, proving it speaks ACP, and returns
 /// what it calls itself. `name` is its name for the messages.
 pub async fn probe(name: &str, command: &RuntimeCommand, workdir: &Path, client: Client) -> Result<Option<String>, String> {
-    let mut probe = tokio::process::Command::new(&command.program);
+    let mut probe = command::new::<tokio::process::Command>(&command.program, command::Console::Hidden);
     probe
         .args(&command.args)
         .envs(command.env.iter().cloned())

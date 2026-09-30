@@ -30,14 +30,14 @@ pub fn alive(pid: u32) -> bool {
         let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
         let exists = rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         exists
-            && !std::process::Command::new("ps")
+            && !command::new::<std::process::Command>("ps", command::Console::Hidden)
                 .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
                 .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim_start().starts_with('Z'))
     }
     #[cfg(not(unix))]
     {
-        std::process::Command::new("tasklist")
+        command::new::<std::process::Command>("tasklist", command::Console::Hidden)
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!(" {pid} ")))
@@ -63,7 +63,7 @@ struct Row {
 fn table() -> Option<Vec<Row>> {
     #[cfg(unix)]
     {
-        let out = std::process::Command::new("ps")
+        let out = command::new::<std::process::Command>("ps", command::Console::Hidden)
             .args(["-A", "-o", "pid=,ppid=,pgid=,time=,etime=,stat="])
             .output()
             .ok()?;
@@ -122,7 +122,7 @@ fn boot_time() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
         // `{ sec = 1790000000, usec = 123456 } Mon Sep 28 …`
-        let out = std::process::Command::new("sysctl").args(["-n", "kern.boottime"]).output().ok()?;
+        let out = command::new::<std::process::Command>("sysctl", command::Console::Hidden).args(["-n", "kern.boottime"]).output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         let sec = text.split("sec = ").nth(1)?;
         sec.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
@@ -243,7 +243,7 @@ pub async fn stop(pid: u32, grace: Duration) {
     #[cfg(not(unix))]
     {
         let _ = grace;
-        let _ = tokio::process::Command::new("taskkill")
+        let _ = command::new::<tokio::process::Command>("taskkill", command::Console::Hidden)
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output()
             .await;
@@ -319,7 +319,7 @@ pub fn kill_now(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+        let _ = command::new::<std::process::Command>("taskkill", command::Console::Hidden).args(["/PID", &pid.to_string(), "/T", "/F"]).output();
     }
 }
 
@@ -486,7 +486,7 @@ mod tests {
             use std::os::unix::process::CommandExt;
             // A shell leading its own group, with a child that ignores
             // SIGTERM: asked, then made to.
-            let mut child = std::process::Command::new("sh")
+            let mut child = command::new::<std::process::Command>("sh", command::Console::Hidden)
                 .args(["-c", "trap '' TERM; sleep 60 & wait"])
                 .process_group(0)
                 .spawn()
@@ -519,7 +519,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            let mut child = std::process::Command::new("sh")
+            let mut child = command::new::<std::process::Command>("sh", command::Console::Hidden)
                 .args(["-c", "sleep 60 & exit 0"])
                 .process_group(0)
                 .spawn()

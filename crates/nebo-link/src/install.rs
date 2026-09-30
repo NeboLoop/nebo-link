@@ -179,7 +179,7 @@ pub async fn run(command: &RuntimeCommand, wait: std::time::Duration, log: &Path
 pub fn detached(command: &RuntimeCommand, log: &Path) -> Result<tokio::process::Command> {
     let out = log_file(log)?;
     let err = out.try_clone().map_err(|e| Error::io(log, e))?;
-    let mut cmd = tokio::process::Command::new(&command.program);
+    let mut cmd = command::new::<tokio::process::Command>(&command.program, command::Console::Hidden);
     cmd.args(&command.args)
         .envs(command.env.iter().cloned())
         .stdin(std::process::Stdio::null())

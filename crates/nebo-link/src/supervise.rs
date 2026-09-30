@@ -532,12 +532,12 @@ fn recorded_pid(process: &ManagedProcess) -> Option<u32> {
 /// The command line of a live process.
 fn command_line(pid: u32) -> Option<String> {
     #[cfg(unix)]
-    let output = std::process::Command::new("ps")
+    let output = command::new::<std::process::Command>("ps", command::Console::Hidden)
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()
         .ok()?;
     #[cfg(not(unix))]
-    let output = std::process::Command::new("tasklist")
+    let output = command::new::<std::process::Command>("tasklist", command::Console::Hidden)
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
         .ok()?;

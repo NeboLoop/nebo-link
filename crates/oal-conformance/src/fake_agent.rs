@@ -213,7 +213,7 @@ impl Agent {
             if Arc::strong_count(&slot) < 2 || slot.lock().expect("server").is_some() {
                 return;
             }
-            let started = tokio::process::Command::new("sh")
+            let started = command::new::<tokio::process::Command>("sh", command::Console::Hidden)
                 .args(["-c", &command])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

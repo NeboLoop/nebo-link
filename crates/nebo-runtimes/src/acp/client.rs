@@ -249,7 +249,7 @@ pub fn spawn(
     stderr: Stdio,
     handler: Handler,
 ) -> std::io::Result<(Child, Arc<Connection>)> {
-    let mut cmd = tokio::process::Command::new(&command.program);
+    let mut cmd = command::new::<tokio::process::Command>(&command.program, command::Console::Hidden);
     cmd.args(&command.args)
         .envs(command.env.iter().cloned())
         .current_dir(cwd)

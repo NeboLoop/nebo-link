@@ -1295,6 +1295,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
+name = "link-command"
+version = "0.1.1"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "link-core"
 version = "0.1.1"
 dependencies = [
@@ -1305,6 +1312,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "link-command",
  "nebo-runtimes",
  "oal-conformance",
  "serde",
@@ -1466,6 +1474,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "link-command",
  "link-core",
  "nebo-comm",
  "nebo-runtimes",
@@ -1500,6 +1509,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "json5",
+ "link-command",
  "reqwest",
  "serde",
  "serde_json",
@@ -1640,6 +1650,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "jsonschema",
+ "link-command",
  "oal-relay",
  "oal-secure",
  "rustls",
