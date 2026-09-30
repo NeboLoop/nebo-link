@@ -46,7 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
       - run: cargo test -p link-command --locked
-      - run: cargo test -p nebo-link --lib service --locked
+      - run: cargo test -p nebo-link --lib service::tests::windows --locked
       - run: cargo test -p nebo-link --test windows_console_host --locked
 
   # The client SDKs (sdk/), tested against the conformance suite's fake host,

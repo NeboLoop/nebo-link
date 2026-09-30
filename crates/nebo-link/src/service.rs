@@ -197,7 +197,7 @@ fn encode(text: &str) -> Vec<u8> {
 fn decode(bytes: &[u8]) -> Option<String> {
     match bytes {
         [0xFF, 0xFE, rest @ ..] => {
-            let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
             String::from_utf16(&units).ok()
         }
         _ => String::from_utf8(bytes.to_vec()).ok(),
@@ -700,7 +700,7 @@ mod tests {
     /// Task files are UTF-16: one written reads back as written, so a
     /// current definition is never taken for an outdated one.
     #[test]
-    fn definitions_read_back_as_written() {
+    fn windows_task_files_read_back_as_written() {
         let text = windows_task(&spec(), "owner");
         assert_eq!(decode(&encode(&text)).as_deref(), Some(text.as_str()));
         let mut utf16 = vec![0xFF, 0xFE];
