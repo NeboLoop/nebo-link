@@ -179,6 +179,10 @@ fn tree_in(rows: &[Row], root: u32) -> Option<Tree> {
     stack.extend(rows.iter().filter(|r| r.pgid == root && r.pid != root).map(|r| r.pid));
     while let Some(pid) = stack.pop() {
         if pid != root {
+            // An exited process its parent has not reaped yet runs nothing.
+            if rows.iter().any(|r| r.pid == pid && r.zombie) {
+                continue;
+            }
             if !tree.descendants.insert(pid) {
                 continue;
             }
@@ -455,6 +459,11 @@ mod tests {
         assert_eq!(tree.usage.values().map(|u| u.cpu).sum::<Duration>(), Duration::from_millis(2050));
         assert_eq!(tree_in(&table, 999), None);
         assert_eq!(group(&table, 100), vec![100, 101, 102, 104]);
+
+        // A session's tool server that exited, not yet reaped, is not the agent's.
+        let mut table = table;
+        table.push(Row { pid: 105, ppid: 101, pgid: 100, cpu: Duration::ZERO, started: 0, zombie: true });
+        assert_eq!(tree_in(&table, 100).unwrap().descendants, BTreeSet::from([101, 102, 103, 104]));
     }
 
     #[test]
