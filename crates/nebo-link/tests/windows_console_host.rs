@@ -81,6 +81,7 @@ mod windows {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetConsoleWindow() -> *mut c_void;
+        fn GetConsoleProcessList(pids: *mut u32, count: u32) -> u32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
         fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
         fn TerminateProcess(handle: *mut c_void, code: u32) -> i32;
@@ -117,12 +118,16 @@ mod windows {
     pub fn service(args: &[String]) {
         let dir = Path::new(arg_after(args, "--home")).parent().expect("test dir").to_path_buf();
         let mode = arg_after(args, "--bot");
-        // SAFETY: no preconditions; a null window means no console.
+        let mut sharing = [0u32; 16];
+        // SAFETY: a buffer of the length given; 0 means no console.
+        let console = unsafe { GetConsoleProcessList(sharing.as_mut_ptr(), sharing.len() as u32) } != 0;
+        // SAFETY: no preconditions. A headless host's window, where it makes
+        // one, is never shown; off a desktop it makes none (null).
         let window = unsafe { GetConsoleWindow() };
         // SAFETY: a null or console window handle is a valid argument.
         let visible = !window.is_null() && unsafe { IsWindowVisible(window) } != 0;
         let pid = std::process::id();
-        let report = format!("console={} visible={visible}", !window.is_null());
+        let report = format!("console={console} visible={visible}");
         std::fs::write(dir.join(format!("started-{pid}")), report).expect("write started");
         if mode == "handover" {
             let mut next: Vec<String> = args[1..].to_vec();
