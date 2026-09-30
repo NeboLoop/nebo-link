@@ -6,7 +6,8 @@
 //!   session); as root, a system unit.
 //! - Windows: a scheduled task that starts at logon as the owner and restarts
 //!   on failure. It runs as the owner, like the launchd agent and the
-//!   systemd user unit, so it sees the owner's runtimes and files.
+//!   systemd user unit, so it sees the owner's runtimes and files. It opens
+//!   no window: see [`windows_task`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,15 +42,37 @@ pub fn refresh(spec: &Spec) -> Duration {
     let (Some(path), Some(current)) = (platform::definition(&spec.bot_id), platform::text(spec)) else {
         return full;
     };
-    let installed = std::fs::read_to_string(&path).ok();
+    let installed = std::fs::read(&path).ok().and_then(|bytes| decode(&bytes));
     let grace = grace_under(installed.as_deref(), &current, platform::DEFAULT_STOP_TIMEOUT);
-    if installed.as_deref().is_some_and(|text| text != current) {
-        match write(&path, &current).and_then(|()| platform::reread()) {
-            Ok(()) => tracing::info!(path = %path.display(), "the service's definition was out of date; rewritten, it takes effect when the service is next loaded"),
-            Err(e) => tracing::warn!(error = %e, "could not rewrite the service's out-of-date definition"),
+    if let Some(installed) = installed.as_deref().filter(|text| *text != current) {
+        match write(&path, &current).and_then(|()| platform::reread(&spec.bot_id)) {
+            Ok(Reread::NextLoad) => tracing::info!(path = %path.display(), "the service's definition was out of date; rewritten, it takes effect when the service is next loaded"),
+            Ok(Reread::RunEnds) => {
+                tracing::info!(path = %path.display(), "the service's definition was out of date; rewritten, the service starts again from it");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not rewrite the service's out-of-date definition");
+                // The service manager still has the old one: the file says
+                // so again, and the next start tries again.
+                let _ = write(&path, installed);
+            }
         }
     }
     grace
+}
+
+/// When a rewritten definition takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reread {
+    /// The next time the service manager loads the service (launchd,
+    /// systemd).
+    #[cfg_attr(windows, allow(dead_code))]
+    NextLoad,
+    /// Once this run ends: Task Scheduler has a run of the new definition
+    /// waiting for it, so this run exits.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    RunEnds,
 }
 
 /// A running prompt's grace for a service started from `installed` when
@@ -155,7 +178,30 @@ fn write(path: &Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
     }
-    std::fs::write(path, text).map_err(|e| Error::io(path, e))
+    std::fs::write(path, encode(text)).map_err(|e| Error::io(path, e))
+}
+
+/// A definition as its service manager reads it: Task Scheduler reads
+/// UTF-16 task files (with a byte-order mark), launchd and systemd UTF-8.
+fn encode(text: &str) -> Vec<u8> {
+    if cfg!(windows) {
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
+/// A definition file's text, UTF-16 (with its byte-order mark) or UTF-8.
+fn decode(bytes: &[u8]) -> Option<String> {
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => {
+            let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&units).ok()
+        }
+        _ => String::from_utf8(bytes.to_vec()).ok(),
+    }
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -245,14 +291,25 @@ pub fn systemd_unit(spec: &Spec, system: bool) -> String {
 }
 
 /// Task Scheduler definition: at the owner's logon, restart on failure,
-/// no time limit, never stopped for battery.
+/// no time limit, never stopped for battery, and no window.
+///
+/// `nebo-link` is a console program (its commands print to the terminal
+/// they are run from), and a console program Task Scheduler starts gets a
+/// console window of its own; `<Hidden>` hides only the task in Task
+/// Scheduler's list. So the task runs it under `conhost.exe --headless`:
+/// the console host every console program gets, here without a window
+/// (Windows 10 1809 and later; headless, it never hands the console to
+/// Windows Terminal either). The service and everything it starts share
+/// that windowless console, and the host runs as long as any of them does,
+/// so a service that updates itself in place is still the task's run.
+///
+/// `Queue`: a run asked for while one runs starts when it ends. A service
+/// whose definition this version rewrote asks for that run and exits
+/// ([`refresh`]); a restart ends the run before asking.
 pub fn windows_task(spec: &Spec, user: &str) -> String {
-    let args = spec.args();
-    let rest = args[1..]
-        .iter()
-        .map(|a| format!("\"{}\"", a.replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut args = spec.args();
+    args[0] = without_verbatim_prefix(&args[0]);
+    let client = args.iter().map(|a| windows_quote(a)).collect::<Vec<_>>().join(" ");
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -260,7 +317,7 @@ pub fn windows_task(spec: &Spec, user: &str) -> String {
   <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
@@ -268,14 +325,57 @@ pub fn windows_task(spec: &Spec, user: &str) -> String {
     <StartWhenAvailable>true</StartWhenAvailable>
     <Hidden>true</Hidden>
   </Settings>
-  <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>{rest}</Arguments></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>{host}</Command><Arguments>--headless {client}</Arguments></Exec></Actions>
 </Task>
 "#,
         bot = xml_escape(&spec.bot_id),
         user = xml_escape(user),
-        exe = xml_escape(&args[0]),
-        rest = xml_escape(&rest),
+        host = xml_escape(WINDOWS_CONSOLE_HOST),
+        client = xml_escape(&client),
     )
+}
+
+/// The windowless console host the Windows service runs under
+/// ([`windows_task`]). Task Scheduler expands the variable.
+pub const WINDOWS_CONSOLE_HOST: &str = r"%SystemRoot%\System32\conhost.exe";
+
+/// One argument quoted for a Windows command line so that programs split
+/// it back as given (`CommandLineToArgvW`, Rust's own parsing): backslashes
+/// are literal except before a quote, where they and the quote are escaped.
+fn windows_quote(arg: &str) -> String {
+    let mut quoted = String::from('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
+                quoted.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+/// `\\?\C:\…` as `C:\…` and `\\?\UNC\host\…` as `\\host\…`: a canonical
+/// Windows path is verbatim, which a command line does not need and not
+/// every program reads.
+fn without_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => path.to_owned(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -304,8 +404,8 @@ mod platform {
     }
 
     /// launchd reads a definition when it loads the service.
-    pub fn reread() -> Result<()> {
-        Ok(())
+    pub fn reread(_bot_id: &str) -> Result<Reread> {
+        Ok(Reread::NextLoad)
     }
 
     pub fn install(spec: &Spec) -> Result<()> {
@@ -364,8 +464,9 @@ mod platform {
     }
 
     /// systemd takes a changed unit once told to read it again.
-    pub fn reread() -> Result<()> {
-        if is_root() { run("systemctl", &["daemon-reload"]) } else { run("systemctl", &["--user", "daemon-reload"]) }
+    pub fn reread(_bot_id: &str) -> Result<Reread> {
+        if is_root() { run("systemctl", &["daemon-reload"])? } else { run("systemctl", &["--user", "daemon-reload"])? }
+        Ok(Reread::NextLoad)
     }
 
     pub fn install(spec: &Spec) -> Result<()> {
@@ -430,44 +531,55 @@ mod platform {
     /// Task Scheduler ends a task at once.
     pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::ZERO;
 
-    /// The task Task Scheduler runs is the one it registered, not this file:
-    /// nothing to refresh.
-    pub fn text(_spec: &Spec) -> Option<String> {
-        None
+    fn user() -> Result<String> {
+        match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+            (Ok(domain), Ok(user)) => Ok(format!("{domain}\\{user}")),
+            (_, Ok(user)) => Ok(user),
+            _ => Err(Error::Service("could not tell which Windows user this is".into())),
+        }
     }
 
-    pub fn running_as_service(_bot_id: &str) -> bool {
-        false
+    /// The task file as this version writes it. Task Scheduler runs what it
+    /// registered from that file, so the file says what the task runs.
+    pub fn text(spec: &Spec) -> Option<String> {
+        user().ok().map(|user| windows_task(spec, &user))
     }
 
-    pub fn reread() -> Result<()> {
-        Ok(())
+    /// Task Scheduler tells what it starts nothing. A bot's task file is
+    /// there only while its task is installed, and then the task is what
+    /// runs the bot's connection.
+    pub fn running_as_service(bot_id: &str) -> bool {
+        definition(bot_id).is_some_and(|path| path.exists())
+    }
+
+    /// A run keeps the definition it started with, window and all: register
+    /// the rewritten file and ask for a run, which Task Scheduler starts
+    /// when this one ends (`Queue`). This run then exits.
+    pub fn reread(bot_id: &str) -> Result<Reread> {
+        register(bot_id)?;
+        run("schtasks", &["/Run", "/TN", &name(bot_id)])?;
+        Ok(Reread::RunEnds)
+    }
+
+    fn register(bot_id: &str) -> Result<()> {
+        let path = definition(bot_id).ok_or_else(|| Error::Service("no local data directory".into()))?;
+        run("schtasks", &["/Create", "/TN", &name(bot_id), "/XML", &path.display().to_string(), "/F"])
     }
 
     pub fn install(spec: &Spec) -> Result<()> {
-        let task = name(&spec.bot_id);
-        let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
-            (Ok(domain), Ok(user)) => format!("{domain}\\{user}"),
-            (_, Ok(user)) => user,
-            _ => return Err(Error::Service("could not tell which Windows user this is".into())),
-        };
         let path = definition(&spec.bot_id).ok_or_else(|| Error::Service("no local data directory".into()))?;
-        // Task Scheduler reads UTF-16 task files.
-        let xml = windows_task(spec, &user);
-        let mut bytes = vec![0xFF, 0xFE];
-        bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
-        }
-        std::fs::write(&path, bytes).map_err(|e| Error::io(&path, e))?;
-        run("schtasks", &["/Create", "/TN", &task, "/XML", &path.display().to_string(), "/F"])?;
-        run("schtasks", &["/Run", "/TN", &task])
+        write(&path, &windows_task(spec, &user()?))?;
+        // One installed before runs until it is ended; a run asked for
+        // meanwhile would wait for it (Queue).
+        let _ = run("schtasks", &["/End", "/TN", &name(&spec.bot_id)]);
+        register(&spec.bot_id)?;
+        run("schtasks", &["/Run", "/TN", &name(&spec.bot_id)])
     }
 
     pub fn restart(bot_id: &str) -> Result<()> {
         let task = name(bot_id);
-        // /Run is ignored while the task runs (MultipleInstancesPolicy
-        // IgnoreNew), so end it first.
+        // A run asked for while one runs waits for it (Queue), so end it
+        // first.
         let _ = run("schtasks", &["/End", "/TN", &task]);
         run("schtasks", &["/Run", "/TN", &task])
     }
@@ -556,7 +668,44 @@ mod tests {
         let task = windows_task(&spec(), r"HOST\owner");
         assert!(task.contains(r"<UserId>HOST\owner</UserId></LogonTrigger>"));
         assert!(task.contains("<RestartOnFailure>"));
-        assert!(task.contains("<Command>/opt/nebo link/nebo-link</Command>"));
-        assert!(task.contains(r#"<Arguments>&quot;--home&quot; &quot;/srv/link state&quot; &quot;run&quot; &quot;--bot&quot; &quot;b1&quot;</Arguments>"#));
+        assert!(task.contains("<MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>"));
+    }
+
+    /// The owner saw terminals open on Windows: the service runs under the
+    /// windowless console host, never as the task's own program.
+    #[test]
+    fn windows_task_runs_the_link_under_a_windowless_console_host() {
+        let task = windows_task(&spec(), r"HOST\owner");
+        assert!(task.contains(r"<Command>%SystemRoot%\System32\conhost.exe</Command>"));
+        assert!(task.contains(
+            r#"<Arguments>--headless &quot;/opt/nebo link/nebo-link&quot; &quot;--home&quot; &quot;/srv/link state&quot; &quot;run&quot; &quot;--bot&quot; &quot;b1&quot;</Arguments>"#
+        ));
+        let canonical = Spec { exe: r"\\?\C:\Program Files\Nebo Link\nebo-link.exe".into(), home: None, ..spec() };
+        assert!(windows_task(&canonical, "owner").contains(
+            r#"<Arguments>--headless &quot;C:\Program Files\Nebo Link\nebo-link.exe&quot; &quot;run&quot;"#
+        ));
+    }
+
+    #[test]
+    fn windows_arguments_split_back_as_given() {
+        assert_eq!(windows_quote("plain"), r#""plain""#);
+        assert_eq!(windows_quote(r"C:\state dir\"), r#""C:\state dir\\""#);
+        assert_eq!(windows_quote(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(windows_quote(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(without_verbatim_prefix(r"\\?\C:\x\nebo-link.exe"), r"C:\x\nebo-link.exe");
+        assert_eq!(without_verbatim_prefix(r"\\?\UNC\host\share\nebo-link.exe"), r"\\host\share\nebo-link.exe");
+        assert_eq!(without_verbatim_prefix("/opt/nebo-link"), "/opt/nebo-link");
+    }
+
+    /// Task files are UTF-16: one written reads back as written, so a
+    /// current definition is never taken for an outdated one.
+    #[test]
+    fn definitions_read_back_as_written() {
+        let text = windows_task(&spec(), "owner");
+        assert_eq!(decode(&encode(&text)).as_deref(), Some(text.as_str()));
+        let mut utf16 = vec![0xFF, 0xFE];
+        utf16.extend("ä<Task/>".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(decode(&utf16).as_deref(), Some("ä<Task/>"));
+        assert_eq!(decode("plain".as_bytes()).as_deref(), Some("plain"));
     }
 }

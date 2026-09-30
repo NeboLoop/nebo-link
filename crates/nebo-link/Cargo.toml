@@ -13,6 +13,12 @@ path = "src/lib.rs"
 name = "nebo-link"
 path = "src/main.rs"
 
+# Starts the Windows service's console host as the task does; its own main,
+# since the stand-in service takes the service's arguments.
+[[test]]
+name = "windows_console_host"
+harness = false
+
 [dependencies]
 command = { workspace = true }
 link-core = { workspace = true }
