@@ -151,8 +151,8 @@ mod windows {
     pub fn run_all() {
         runs_without_a_window_and_its_host_ends_with_it();
         a_service_that_updates_itself_is_still_the_hosts();
-        ending_the_host_ends_the_service();
         the_registered_task_runs_it_without_a_window();
+        ending_the_host_ends_the_service();
         println!("windows_console_host: all passed");
     }
 
