@@ -137,7 +137,7 @@ pub fn installed(bot_id: &str) -> bool {
 }
 
 fn run(program: &str, args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new(program)
+    let output = command::new::<std::process::Command>(program, command::Console::Hidden)
         .args(args)
         .output()
         .map_err(|e| Error::Service(format!("could not run {program}: {e}")))?;

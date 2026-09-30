@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance", "crates/oal-host", "crates/oal-relay", "crates/oal-secure"]
+members = ["crates/link-command", "crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance", "crates/oal-host", "crates/oal-relay", "crates/oal-secure"]
 
 [workspace.package]
 version = "0.1.1"
@@ -14,6 +14,8 @@ repository = "https://github.com/NeboLoop/nebo-link"
 # that embeds link-core.
 nebo-runtimes = { path = "crates/nebo-runtimes", default-features = false }
 link-core = { path = "crates/link-core" }
+# Every child process the link starts is made by `command::new`.
+command = { path = "crates/link-command", package = "link-command" }
 # The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
 # nebo-comm is published to crates.io; then this becomes a version.
 nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "4b03c2c2a390123e2230a40f663bb484ae617365" }

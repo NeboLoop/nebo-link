@@ -21,7 +21,7 @@
 //!     });
 //!     let outcome = journal.apply(install, None, &change)?;
 //!     if let Some(command) = outcome.restart {
-//!         // Run `command` with std::process::Command.
+//!         // Run `command`, made by `link_command::new` (no console window on Windows).
 //!         let _ = command;
 //!     }
 //! }

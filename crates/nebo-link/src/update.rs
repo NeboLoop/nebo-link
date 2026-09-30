@@ -146,7 +146,7 @@ pub async fn lock(root: &Root) -> Result<Lock> {
 
 /// The version of the `nebo-link` binary at `exe`, from `exe --version`.
 pub fn version_of(exe: &Path) -> Option<String> {
-    let output = std::process::Command::new(exe).arg("--version").output().ok()?;
+    let output = command::new::<std::process::Command>(exe, command::Console::Hidden).arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -223,13 +223,13 @@ pub fn restart(staged: Staged, root: &Root, exe: &Path) -> Error {
 #[cfg(unix)]
 fn become_binary(exe: &Path) -> Error {
     use std::os::unix::process::CommandExt;
-    let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    let e = command::new::<std::process::Command>(exe, command::Console::Inherit).args(std::env::args_os().skip(1)).exec();
     Error::io(exe, e)
 }
 
 #[cfg(windows)]
 fn become_binary(exe: &Path) -> Error {
-    match std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn() {
+    match command::new::<std::process::Command>(exe, command::Console::Inherit).args(std::env::args_os().skip(1)).spawn() {
         Ok(_) => std::process::exit(0),
         Err(e) => Error::io(exe, e),
     }
