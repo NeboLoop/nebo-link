@@ -303,6 +303,9 @@ pub fn systemd_unit(spec: &Spec, system: bool) -> String {
 /// that windowless console, and the host runs as long as any of them does,
 /// so a service that updates itself in place is still the task's run.
 ///
+/// Ending the task ends the host only; the service notices and ends too
+/// ([`console_host_gone`]).
+///
 /// `Queue`: a run asked for while one runs starts when it ends. A service
 /// whose definition this version rewrote asks for that run and exits
 /// ([`refresh`]); a restart ends the run before asking.
@@ -333,6 +336,39 @@ pub fn windows_task(spec: &Spec, user: &str) -> String {
         host = xml_escape(WINDOWS_CONSOLE_HOST),
         client = xml_escape(&client),
     )
+}
+
+/// Resolves when the console this process runs on goes away because its
+/// host ended. On Windows the service runs under a console host
+/// ([`windows_task`]), and Task Scheduler ending the task (`schtasks
+/// /End`, a restart, an update) ends only that host: the service ends with
+/// it rather than run on untracked beside the next run. Never resolves for
+/// a process with no console, or on other systems.
+pub async fn console_host_gone() {
+    #[cfg(windows)]
+    if console_attached() {
+        let mut every = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            every.tick().await;
+            if !console_attached() {
+                return;
+            }
+        }
+    }
+    std::future::pending::<()>().await
+}
+
+/// Whether this process is attached to a console whose host still runs.
+#[cfg(windows)]
+fn console_attached() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleProcessList(pids: *mut u32, count: u32) -> u32;
+    }
+    let mut pids = [0u32; 8];
+    // SAFETY: a buffer of the length given. 0 means no console (or one whose
+    // host is gone); a count larger than the buffer still means one.
+    unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) != 0 }
 }
 
 /// The windowless console host the Windows service runs under

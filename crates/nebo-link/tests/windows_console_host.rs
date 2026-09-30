@@ -7,10 +7,10 @@
 //! - the host runs as long as the service does, and ends with it;
 //! - a service that updates itself in place (starts its successor on the
 //!   same console and exits) is still the host's, so still the task's run;
-//! - ending the host ends the service;
+//! - ending the host ends the service (`service::console_host_gone`);
 //! - registered with Task Scheduler as `service::windows_task` writes it:
-//!   the task runs without a window, `schtasks /End` ends the service, and
-//!   a run asked for while one runs starts when it ends (`Queue`).
+//!   the task runs without a window, a run asked for while one runs starts
+//!   when it ends (`Queue`), and `schtasks /End` ends the service.
 //!
 //! The host is started the way Task Scheduler starts it: a program with no
 //! standard handles. (Given handles, the console host takes them for a
@@ -41,7 +41,7 @@ mod windows {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use nebo_link::service::{Spec, windows_task};
+    use nebo_link::service::{Spec, console_host_gone, windows_task};
 
     const WAIT: Duration = Duration::from_secs(30);
     const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -142,10 +142,20 @@ mod windows {
                     .expect("successor starts");
             return;
         }
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while !dir.join(format!("stop-{pid}")).exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        // Runs until told to stop, or until its console host ends, as the
+        // service does (`service::console_host_gone`).
+        let stopped = async {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while !dir.join(format!("stop-{pid}")).exists() && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime").block_on(async {
+            tokio::select! {
+                _ = stopped => {}
+                _ = console_host_gone() => {}
+            }
+        });
     }
 
     pub fn run_all() {
