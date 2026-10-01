@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/link-command", "crates/link-core", "crates/nebo-link", "crates/nebo-runtimes", "crates/oal-conformance", "crates/oal-host", "crates/oal-relay", "crates/oal-secure"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/NeboLoop/nebo-link"
