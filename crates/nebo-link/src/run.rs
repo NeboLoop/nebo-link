@@ -5,8 +5,10 @@
 //! and the first OpenClaw or Hermes install's UI), and serves each install's
 //! NeboAI models endpoint.
 //!
-//! Reconnects follow Nebo's watchers: a connection that drops is redialed at
-//! once, repeated failures back off from 30 s to 10 min, a refused lease is
+//! Reconnects follow Nebo's watchers (`nebo_comm::reconnect`): a hub drain
+//! (1012) is redialed within 3 s without advancing the backoff, any other
+//! drop or failed dial waits a jittered backoff from under 1 s up to 30 s
+//! that starts over once a connection stayed up 10 s, a refused lease is
 //! asked for again at the renewal cadence, and a wake from sleep forces a
 //! fresh connection.
 //!
@@ -36,6 +38,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use link_core::host::Host;
 use link_core::phone::Contract;
+use nebo_comm::reconnect::{Backoff, Disconnect};
 use nebo_comm::{CommError, CommPlugin, NeboAIPlugin, lease};
 use nebo_runtimes::{Installation, Runtime, acp};
 use tokio::sync::watch;
@@ -50,10 +53,6 @@ use crate::state::{BotDir, Hosted, Link, Oal, Root, STATUS_EVERY, Status};
 use crate::supervise::Supervisor;
 use crate::update::{self, Staged};
 
-/// Longest wait between failed connection attempts.
-const MAX_BACKOFF: Duration = Duration::from_secs(600);
-/// First wait after a failed attempt.
-const FIRST_BACKOFF: Duration = Duration::from_secs(30);
 /// A tick this much later than scheduled means the machine slept.
 const SLEEP_DRIFT: Duration = Duration::from_secs(10);
 /// How often the chat contract's readiness is probed between process starts.
@@ -447,7 +446,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     let plugin = NeboAIPlugin::new(Arc::new(FileOffsets::open(dir.offsets_file())));
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
-    let mut backoff = FIRST_BACKOFF;
+    let mut backoff = Backoff::new();
     loop {
         // Probed before every connect, so an agent that came up (or went
         // away) since the last one is announced as it is now.
@@ -471,12 +470,13 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
                 online_tx.send_replace(true);
                 service.write_status();
                 tracing::info!("connected to NeboAI");
-                backoff = FIRST_BACKOFF;
+                let connected_at = Instant::now();
                 let ended = connected(&plugin, &mut shutdown, &revoked, &chat_changed, &mut staged).await;
                 online_tx.send_replace(false);
                 service.write_status();
                 match ended {
-                    Ended::Dropped => Duration::ZERO,
+                    Ended::Dropped(how) => backoff.wait(how, connected_at.elapsed()),
+                    Ended::Reconnect => Duration::ZERO,
                     Ended::Shutdown(stop) => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
@@ -499,9 +499,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
             }
             Err(e) => {
                 record_error(&service, &e.to_string());
-                let delay = backoff;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                delay
+                backoff.wait(Disconnect::Dropped, Duration::ZERO)
             }
         };
         tokio::select! {
@@ -540,9 +538,12 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
 
 /// Why the service stopped waiting on a connection.
 enum Ended {
-    /// The connection dropped, the machine woke from sleep, or what CONNECT
-    /// should announce changed: reconnect.
-    Dropped,
+    /// The connection dropped (a hub drain or any other drop): reconnect
+    /// after the backoff's wait.
+    Dropped(Disconnect),
+    /// The machine woke from sleep, or what CONNECT should announce changed:
+    /// reconnect at once.
+    Reconnect,
     /// The service is shutting down.
     Shutdown(Stop),
     /// NeboAI removed the bot.
@@ -563,9 +564,9 @@ async fn connected(
     loop {
         let before = SystemTime::now();
         tokio::select! {
-            _ = plugin.wait_disconnect() => {
-                tracing::info!("disconnected from NeboAI; reconnecting");
-                return Ended::Dropped;
+            how = plugin.wait_disconnect() => {
+                tracing::info!(ended = ?how, "disconnected from NeboAI; reconnecting");
+                return Ended::Dropped(how);
             }
             _ = tokio::time::sleep(tick) => {
                 let slept = SystemTime::now()
@@ -576,10 +577,10 @@ async fn connected(
                 if slept {
                     tracing::info!("woke from sleep; reconnecting");
                     let _ = plugin.disconnect().await;
-                    return Ended::Dropped;
+                    return Ended::Reconnect;
                 }
                 if !plugin.is_connected() {
-                    return Ended::Dropped;
+                    return Ended::Dropped(Disconnect::Dropped);
                 }
             }
             stop = shutdown.as_mut() => return Ended::Shutdown(stop),
@@ -587,7 +588,7 @@ async fn connected(
             _ = chat_changed.notified() => {
                 tracing::info!("reconnecting to announce chat as it is now");
                 let _ = plugin.disconnect().await;
-                return Ended::Dropped;
+                return Ended::Reconnect;
             }
             Some(next) = staged.recv() => return Ended::Update(next),
         }
@@ -606,7 +607,7 @@ async fn tunnel_watcher(
     tunnel: Arc<AtomicBool>,
     revoked: Arc<tokio::sync::Notify>,
 ) {
-    let mut backoff = FIRST_BACKOFF;
+    let mut backoff = Backoff::new();
     loop {
         if online.wait_for(|on| *on).await.is_err() {
             return;
@@ -614,24 +615,27 @@ async fn tunnel_watcher(
         lease::process().granted_or_unleased().await;
         let token = token.borrow().clone();
         let started = Instant::now();
-        match nebo_comm::tunnel::run(&hub_url, &token, &local_addr, &tunnel).await {
-            Ok(()) => tracing::info!("tunnel closed by NeboAI; redialing"),
+        // A hub drain redials within 3 s and leaves the backoff where it
+        // was; a tunnel that ended any other way, or a dial that failed,
+        // waits the jittered backoff.
+        let delay = match nebo_comm::tunnel::run(&hub_url, &token, &local_addr, &tunnel).await {
+            Ok(how) => {
+                tracing::info!(ended = ?how, "tunnel closed by NeboAI; redialing");
+                backoff.wait(how, started.elapsed())
+            }
             Err(nebo_comm::tunnel::TunnelError::Revoked) => {
                 tracing::info!("tunnel closed: NeboAI removed this bot");
                 revoked.notify_one();
                 return;
             }
-            Err(e) => tracing::info!(error = %e, "tunnel dropped"),
-        }
-        // A tunnel that lived a while earns a quick redial; repeated fast
-        // failures back off.
-        let delay = if started.elapsed() > Duration::from_secs(60) {
-            backoff = FIRST_BACKOFF;
-            Duration::from_secs(5)
-        } else {
-            let delay = backoff;
-            backoff = (backoff * 2).min(MAX_BACKOFF);
-            delay
+            Err(e @ nebo_comm::tunnel::TunnelError::Mux(_)) => {
+                tracing::info!(error = %e, "tunnel dropped");
+                backoff.wait(Disconnect::Dropped, started.elapsed())
+            }
+            Err(e) => {
+                tracing::info!(error = %e, "tunnel dropped");
+                backoff.wait(Disconnect::Dropped, Duration::ZERO)
+            }
         };
         tokio::time::sleep(delay).await;
     }

@@ -1437,12 +1437,13 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "nebo-comm"
-version = "0.15.0"
-source = "git+https://github.com/NeboLoop/nebo?rev=4b03c2c2a390123e2230a40f663bb484ae617365#4b03c2c2a390123e2230a40f663bb484ae617365"
+version = "0.16.4"
+source = "git+https://github.com/NeboLoop/nebo?rev=12ab56464a88bebce9a0866a3566d951aa9ea76c#12ab56464a88bebce9a0866a3566d951aa9ea76c"
 dependencies = [
  "async-trait",
  "futures",
  "getrandom 0.2.17",
+ "nebo-tls",
  "reqwest",
  "serde",
  "serde_json",
@@ -1519,6 +1520,20 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "yaml_serde",
+]
+
+[[package]]
+name = "nebo-tls"
+version = "0.1.0"
+source = "git+https://github.com/NeboLoop/nebo?rev=12ab56464a88bebce9a0866a3566d951aa9ea76c#12ab56464a88bebce9a0866a3566d951aa9ea76c"
+dependencies = [
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

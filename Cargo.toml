@@ -18,7 +18,7 @@ link-core = { path = "crates/link-core" }
 command = { path = "crates/link-command", package = "link-command" }
 # The NeboAI hub client, shared with Nebo. Pinned to a nebo commit until
 # nebo-comm is published to crates.io; then this becomes a version.
-nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "4b03c2c2a390123e2230a40f663bb484ae617365" }
+nebo-comm = { git = "https://github.com/NeboLoop/nebo", rev = "12ab56464a88bebce9a0866a3566d951aa9ea76c" }
 # Nebo's updater, for self-update from nebo-link's signed release feed.
 nebo-updater = { git = "https://github.com/NeboLoop/nebo", rev = "4b03c2c2a390123e2230a40f663bb484ae617365" }
 tokio = { version = "1", features = ["full"] }
