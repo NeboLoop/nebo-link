@@ -578,9 +578,24 @@ impl Host {
                 same.label
             )));
         }
-        let title = crate::acp::probe(name, &command, &folder, keeper.client()).await.map_err(|why| {
-            ErrorObject::new(code::AGENT_UNAVAILABLE, why)
-        })?;
+        // Starting a coding agent once to check it runs takes tens of seconds
+        // (Claude Code: ~40 s), longer than the hire that asked for it waits,
+        // so the hire failed while the agent was added anyway, and each retry
+        // left another one. Only an agent of no known kind needs the probe's
+        // answer (its title); a known one is added now and checked behind it.
+        let title = if kind == nebo_runtimes::acp::Agent::Other {
+            crate::acp::probe(name, &command, &folder, keeper.client()).await.map_err(|why| {
+                ErrorObject::new(code::AGENT_UNAVAILABLE, why)
+            })?
+        } else {
+            let (name, command, folder, client) = (name.to_owned(), command.clone(), folder.clone(), keeper.client());
+            tokio::spawn(async move {
+                if let Err(why) = crate::acp::probe(&name, &command, &folder, client).await {
+                    tracing::warn!(agent = %name, folder = %folder.display(), %why, "host: an added agent did not start");
+                }
+            });
+            None
+        };
         let label = match (kind, title, add.label.is_some()) {
             (nebo_runtimes::acp::Agent::Other, Some(title), false) => title,
             _ => label,
