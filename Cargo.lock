@@ -1437,13 +1437,13 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "nebo-comm"
-version = "0.16.5"
-source = "git+https://github.com/NeboLoop/nebo?rev=bb7e7b489c27ccc1b6d1229a18c4a87a78d2775b#bb7e7b489c27ccc1b6d1229a18c4a87a78d2775b"
+version = "0.16.6"
+source = "git+https://github.com/NeboLoop/nebo?rev=fa736128fffcf6c25ddb629232d78546582510ba#fa736128fffcf6c25ddb629232d78546582510ba"
 dependencies = [
  "async-trait",
  "futures",
  "getrandom 0.2.17",
- "nebo-tls 0.1.0 (git+https://github.com/NeboLoop/nebo?rev=bb7e7b489c27ccc1b6d1229a18c4a87a78d2775b)",
+ "nebo-tls 0.1.0 (git+https://github.com/NeboLoop/nebo?rev=fa736128fffcf6c25ddb629232d78546582510ba)",
  "reqwest",
  "serde",
  "serde_json",
@@ -1530,7 +1530,7 @@ dependencies = [
 [[package]]
 name = "nebo-tls"
 version = "0.1.0"
-source = "git+https://github.com/NeboLoop/nebo?rev=bb7e7b489c27ccc1b6d1229a18c4a87a78d2775b#bb7e7b489c27ccc1b6d1229a18c4a87a78d2775b"
+source = "git+https://github.com/NeboLoop/nebo?rev=d2a349260d4ae10026755be73abb15657c58f58c#d2a349260d4ae10026755be73abb15657c58f58c"
 dependencies = [
  "reqwest",
  "rustls",
@@ -1544,7 +1544,7 @@ dependencies = [
 [[package]]
 name = "nebo-tls"
 version = "0.1.0"
-source = "git+https://github.com/NeboLoop/nebo?rev=d2a349260d4ae10026755be73abb15657c58f58c#d2a349260d4ae10026755be73abb15657c58f58c"
+source = "git+https://github.com/NeboLoop/nebo?rev=fa736128fffcf6c25ddb629232d78546582510ba#fa736128fffcf6c25ddb629232d78546582510ba"
 dependencies = [
  "reqwest",
  "rustls",

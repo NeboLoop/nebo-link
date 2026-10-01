@@ -6,8 +6,10 @@
 //! NeboAI models endpoint.
 //!
 //! Reconnects follow Nebo's watchers (`nebo_comm::reconnect`): a hub drain
-//! (1012) is redialed within 3 s without advancing the backoff, any other
-//! drop or failed dial waits a jittered backoff from under 1 s up to 30 s
+//! (1012) is redialed within 500 ms without advancing the backoff, a hard
+//! cut (no close frame) first within 5 s, any other drop or a dial that
+//! failed on every address the hub's hostname resolves to waits a jittered
+//! backoff from under 1 s up to 30 s
 //! that starts over once a connection stayed up 10 s, a refused lease is
 //! asked for again at the renewal cadence, and a wake from sleep forces a
 //! fresh connection.
@@ -625,9 +627,10 @@ async fn tunnel_watcher(
         lease::process().granted_or_unleased().await;
         let token = token.borrow().clone();
         let started = Instant::now();
-        // A hub drain redials within 3 s and leaves the backoff where it
-        // was; a tunnel that ended any other way, or a dial that failed,
-        // waits the jittered backoff.
+        // A hub drain redials within 500 ms and leaves the backoff where it
+        // was; a hard cut's first redial comes within 5 s; a tunnel that
+        // ended any other way, or a dial that failed, waits the jittered
+        // backoff.
         let delay = match nebo_comm::tunnel::run(&hub_url, &token, &local_addr, &tunnel).await {
             Ok(how) => {
                 tracing::info!(ended = ?how, "tunnel closed by NeboAI; redialing");
