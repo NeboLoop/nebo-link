@@ -96,10 +96,15 @@ impl Service {
     /// first (its connections and listeners close, so no prompt comes in),
     /// then the agents: a prompt still running gets the service's grace to
     /// finish, then every agent pauses, its sessions kept for the next start.
-    /// Nothing they started outlives the service.
-    async fn stop(&self) {
+    /// Nothing they started outlives the service. [`Stop::AtOnce`] gives a
+    /// running prompt no grace.
+    async fn stop(&self, stop: Stop) {
         self.close_oal();
-        self.host.shutdown(self.grace).await;
+        let grace = match stop {
+            Stop::WithGrace => self.grace,
+            Stop::AtOnce => Duration::ZERO,
+        };
+        self.host.shutdown(grace).await;
     }
 
     /// Closes every Open Agent Link connection with 1001: clients reconnect
@@ -472,17 +477,17 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
                 service.write_status();
                 match ended {
                     Ended::Dropped => Duration::ZERO,
-                    Ended::Shutdown => {
+                    Ended::Shutdown(stop) => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
-                        service.stop().await;
+                        service.stop(stop).await;
                         return stopped(&dir);
                     }
                     Ended::Revoked => break,
                     Ended::Update(next) => {
                         lease::process().release();
                         let _ = plugin.disconnect().await;
-                        service.stop().await;
+                        service.stop(Stop::WithGrace).await;
                         return Err(restart_failed(update::restart(next, root, &exe)));
                     }
                 }
@@ -501,12 +506,12 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
         };
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = &mut shutdown => {
-                service.stop().await;
+            stop = &mut shutdown => {
+                service.stop(stop).await;
                 return stopped(&dir);
             }
             Some(next) = staged.recv() => {
-                service.stop().await;
+                service.stop(Stop::WithGrace).await;
                 return Err(restart_failed(update::restart(next, root, &exe)));
             }
         }
@@ -515,7 +520,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
     tracing::warn!("NeboAI removed this bot; unlinking it");
     status_writer.abort();
     let _ = plugin.disconnect().await;
-    service.stop().await;
+    service.stop(Stop::WithGrace).await;
     let link = service.link.lock().expect("link lock").clone();
     let unlinked = link::unlink(root, &link, By::Revocation).await?;
     for (agent, released) in unlinked.installs {
@@ -539,7 +544,7 @@ enum Ended {
     /// should announce changed: reconnect.
     Dropped,
     /// The service is shutting down.
-    Shutdown,
+    Shutdown(Stop),
     /// NeboAI removed the bot.
     Revoked,
     /// A newer nebo-link is ready to run.
@@ -549,7 +554,7 @@ enum Ended {
 /// Waits while connected.
 async fn connected(
     plugin: &NeboAIPlugin,
-    shutdown: &mut std::pin::Pin<&mut impl Future<Output = ()>>,
+    shutdown: &mut std::pin::Pin<&mut impl Future<Output = Stop>>,
     revoked: &tokio::sync::Notify,
     chat_changed: &tokio::sync::Notify,
     staged: &mut tokio::sync::mpsc::Receiver<Staged>,
@@ -577,7 +582,7 @@ async fn connected(
                     return Ended::Dropped;
                 }
             }
-            _ = shutdown.as_mut() => return Ended::Shutdown,
+            stop = shutdown.as_mut() => return Ended::Shutdown(stop),
             _ = revoked.notified() => return Ended::Revoked,
             _ = chat_changed.notified() => {
                 tracing::info!("reconnecting to announce chat as it is now");
@@ -679,7 +684,19 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-async fn shutdown_signal() {
+/// How the service stops when told to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// Asked to (Ctrl+C, the service manager's SIGTERM): a running prompt
+    /// gets the service's grace.
+    WithGrace,
+    /// Its console host ended: Task Scheduler ended the task, which it does
+    /// at once, and a restart's next run starts right away.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    AtOnce,
+}
+
+async fn shutdown_signal() -> Stop {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -694,10 +711,14 @@ async fn shutdown_signal() {
                 let _ = tokio::signal::ctrl_c().await;
             }
         }
+        Stop::WithGrace
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Stop::WithGrace,
+            _ = crate::service::console_host_gone() => Stop::AtOnce,
+        }
     }
 }
 

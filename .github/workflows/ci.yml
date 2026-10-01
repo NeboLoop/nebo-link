@@ -34,15 +34,20 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  # nebo-link ships a Windows binary; this keeps it compiling on Windows.
+  # nebo-link ships a Windows binary; this keeps it compiling on Windows and
+  # runs what only Windows can show: every child process's console, and the
+  # service under its windowless console host.
   windows:
-    name: windows-latest (cargo check)
+    name: windows-latest (cargo check, Windows tests)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
+      - run: cargo test -p link-command --locked
+      - run: cargo test -p nebo-link --lib service::tests::windows --locked
+      - run: cargo test -p nebo-link --test windows_console_host --locked
 
   # The client SDKs (sdk/), tested against the conformance suite's fake host,
   # directly and through the relay.
