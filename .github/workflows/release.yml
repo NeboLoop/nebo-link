@@ -775,3 +775,47 @@ jobs:
           aws s3 cp version.json s3://neboloop/nebo-link/releases/version.json \
             --endpoint-url "$S3_ENDPOINT" --acl public-read --content-type application/json \
             --cache-control "public, max-age=60"
+
+      # Tell every connected copy about the release, so it looks for it now
+      # instead of at its next poll. Each picks a random moment inside a
+      # window the hub sizes to how many are connected (minutes when urgent,
+      # hours otherwise; one that isn't urgent also waits until nothing is
+      # running). The download still comes from the CDN, signed and checked
+      # as always: the hub only says when to look.
+      #
+      # An urgent release is an annotated tag with [urgent] in its message:
+      #   git tag -a vX.Y.Z -m "[urgent] <why>" && git push origin vX.Y.Z
+      # Needs the RELEASE_SERVICE_TOKEN secret (the hub's releases
+      # service_token); without it nothing is announced and copies poll.
+      - name: Tell connected links about the release
+        if: ${{ env.DRY_RUN != 'true' }}
+        continue-on-error: true
+        env:
+          RELEASE_SERVICE_TOKEN: ${{ secrets.RELEASE_SERVICE_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_SERVICE_TOKEN" ]; then
+            echo "::notice::RELEASE_SERVICE_TOKEN is not set: connected copies learn of $TAG at their next poll."
+            exit 0
+          fi
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*-*) echo "::notice::$TAG is a pre-release; nothing announced."; exit 0 ;;
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::notice::$TAG is not a release tag; nothing announced."; exit 0 ;;
+          esac
+          # Urgent when the tag is annotated with [urgent] in its message.
+          git fetch --quiet --force origin "refs/tags/$TAG:refs/tags/$TAG" || true
+          URGENT=false
+          if [ "$(git cat-file -t "$TAG" 2>/dev/null)" = tag ] \
+             && git tag -l --format='%(contents)' "$TAG" | grep -qiF '[urgent]'; then
+            URGENT=true
+          fi
+          # version.json is served with max-age=60: let the CDN edge catch up
+          # before anything is told to look.
+          sleep 75
+          curl -fsS --retry 5 --retry-all-errors --retry-delay 15 --max-time 30 \
+            -X POST "https://api.neboai.com/api/v1/internal/releases" \
+            -H "Authorization: Bearer $RELEASE_SERVICE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"product\":\"nebo-link\",\"version\":\"$TAG\",\"urgent\":$URGENT}"
+          echo
+          echo "Announced nebo-link $TAG (urgent: $URGENT)."

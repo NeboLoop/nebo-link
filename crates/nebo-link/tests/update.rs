@@ -113,3 +113,71 @@ async fn a_release_signed_by_another_key_is_refused() {
     let err = update::fetch(&feed, "0.1.0").await.unwrap_err().to_string();
     assert!(err.contains("SHA256SUMS.sig does not match"), "{err}");
 }
+
+// ── A release NeboAI announces ──────────────────────────────────────────
+
+/// Runs the service's update check on `feed` with a fresh data root and a
+/// binary path that holds no other version, and announces v9.9.9 to it
+/// (urgent, so it looks at once). Returns what the check hands the service
+/// within `secs`, if anything.
+async fn announce_to_watch(feed: nebo_updater::Feed, idle: bool, urgent: bool, secs: u64) -> Option<update::Staged> {
+    let root = nebo_link::state::Root::at(std::env::temp_dir().join(format!("nebo-link-push-{}", uuid::Uuid::new_v4())));
+    let exe = root.path().join("not-a-binary");
+    let (staged_tx, mut staged) = tokio::sync::mpsc::channel(1);
+    let (nudge, nudges) = tokio::sync::mpsc::unbounded_channel();
+    let watcher = tokio::spawn(update::watch(
+        root.clone(),
+        exe,
+        feed,
+        staged_tx,
+        nudges,
+        Box::new(move || Box::pin(async move { idle })),
+    ));
+    nudge
+        .send(nebo_updater::Nudge::Announced(
+            nebo_updater::Announcement::parse(&format!(
+                r#"{{"type":"software_update","product":"nebo-link","version":"9.9.9","urgent":{urgent},"window_s":0}}"#
+            ))
+            .unwrap(),
+        ))
+        .unwrap();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(secs), staged.recv()).await.ok().flatten();
+    watcher.abort();
+    let _ = std::fs::remove_dir_all(root.path());
+    got
+}
+
+#[tokio::test]
+async fn an_announced_release_is_staged_at_once_through_the_signed_check() {
+    let key = test_key();
+    let base = publish(&key, RELEASE).await;
+    let feed = update::feed(base, key.verifying_key().to_bytes());
+    match announce_to_watch(feed, false, true, 15).await {
+        Some(update::Staged::Downloaded(downloaded, _lock)) => {
+            assert_eq!(downloaded.tag, "v9.9.9");
+            assert_eq!(std::fs::read(&downloaded.path).unwrap(), RELEASE);
+            let _ = std::fs::remove_file(&downloaded.path);
+        }
+        other => panic!("expected the verified release, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_announced_release_that_fails_verification_is_never_staged() {
+    let key = test_key();
+    // Signed by another key, then tampered: neither is ever handed over.
+    let base = publish(&test_key(), RELEASE).await;
+    let feed = update::feed(base, key.verifying_key().to_bytes());
+    assert!(announce_to_watch(feed, true, true, 5).await.is_none(), "a release signed by another key was staged");
+    let base = publish(&key, b"not the release").await;
+    let feed = update::feed(base, key.verifying_key().to_bytes());
+    assert!(announce_to_watch(feed, true, true, 5).await.is_none(), "a tampered release was staged");
+}
+
+#[tokio::test]
+async fn an_announced_release_that_is_not_urgent_waits_while_a_turn_runs() {
+    let key = test_key();
+    let base = publish(&key, RELEASE).await;
+    let feed = update::feed(base, key.verifying_key().to_bytes());
+    assert!(announce_to_watch(feed, false, false, 3).await.is_none(), "staged while a turn was running");
+}

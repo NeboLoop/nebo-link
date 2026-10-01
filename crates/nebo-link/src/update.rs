@@ -8,8 +8,13 @@
 //! local build) cannot update itself.
 //!
 //! `nebo-link update` replaces the binary and restarts every bot's service.
-//! The service checks daily and, when a newer release is out, becomes it in
-//! place (same process, so launchd and systemd keep supervising it). Bot
+//! The service checks every six hours, once soon after each (re)connect, and
+//! whenever NeboAI announces a release (`nebo_updater::push`: at a random
+//! moment inside the announcement's window, and for a release that isn't
+//! urgent, once no agent turn is running). When a newer release is out it
+//! becomes it in place (same process, so launchd and systemd keep
+//! supervising it). An announcement only says when to look: what is
+//! installed is always the signed release from the feed. Bot
 //! services share one binary: the update lock in the data root lets only one
 //! of them replace it, and one that finds the binary already replaced by
 //! another restarts into it instead of replacing it again.
@@ -18,7 +23,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nebo_updater::{ApplyMode, Feed};
+use nebo_updater::{ApplyMode, Feed, IdleFn, Nudge};
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
@@ -30,8 +35,9 @@ pub const CDN: &str = "https://cdn.neboai.com/nebo-link/releases";
 /// This build's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// How often the service checks for a newer release.
-pub const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often the service checks for a newer release when nothing nudges
+/// it: the backstop for an announcement it missed.
+pub const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// What `nebo-link update` says in a build that has no release key.
 pub const NO_KEY: &str = "This build of nebo-link can't update itself. Install it from https://neboai.com/link.sh.";
@@ -166,10 +172,19 @@ pub enum Staged {
     OnDisk(Lock),
 }
 
-/// The service's update check: every [`CHECK_EVERY`], and when a newer
-/// release is out, hands the service what to run next. `exe` is the binary
-/// the service was started as.
-pub async fn watch(root: Root, exe: PathBuf, feed: Feed, staged: mpsc::Sender<Staged>) {
+/// The service's update check: every [`CHECK_EVERY`] and when `nudges`
+/// says to (a release NeboAI announced, the connection coming up; `idle`
+/// says no agent turn is running). When a newer release is out, it hands
+/// the service what to run next. `exe` is the binary the service was
+/// started as.
+pub async fn watch(
+    root: Root,
+    exe: PathBuf,
+    feed: Feed,
+    staged: mpsc::Sender<Staged>,
+    nudges: mpsc::UnboundedReceiver<Nudge>,
+    idle: IdleFn,
+) {
     if let Some(why) = not_self_updating() {
         tracing::info!("{why}");
         return;
@@ -177,7 +192,8 @@ pub async fn watch(root: Root, exe: PathBuf, feed: Feed, staged: mpsc::Sender<St
     let (available_tx, mut available) = mpsc::unbounded_channel();
     let checker = nebo_updater::BackgroundChecker::new(feed.clone(), VERSION.to_string(), CHECK_EVERY, move |r| {
         let _ = available_tx.send(r.latest_version);
-    });
+    })
+    .nudged_by(nudges, idle);
     tokio::spawn(async move { checker.run(tokio_util::sync::CancellationToken::new()).await });
     while let Some(latest) = available.recv().await {
         tracing::info!(current = VERSION, latest, "a newer nebo-link is out");
@@ -268,6 +284,11 @@ mod tests {
         let short = base64::engine::general_purpose::STANDARD.encode([9u8; 31]);
         assert_eq!(decode_key(&short), None);
         assert_eq!(decode_key("not base64!"), None);
+    }
+
+    #[test]
+    fn the_backstop_poll_is_six_hours() {
+        assert_eq!(CHECK_EVERY, Duration::from_secs(6 * 60 * 60));
     }
 
     #[test]

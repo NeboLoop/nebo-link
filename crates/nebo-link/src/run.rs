@@ -27,9 +27,10 @@
 //! again when it changes, and a coding agent joins or leaves the roster
 //! without a restart (an install restarts the service, from the CLI).
 //!
-//! Once a day the service checks for a newer nebo-link; when one is out it
-//! hands back the bot's lease, disconnects and becomes the new release in
-//! place (see `update`).
+//! The service checks for a newer nebo-link every six hours, soon after each
+//! (re)connect, and when NeboAI announces a release (a `software_update` on
+//! the bot's `installs` stream); when one is out it hands back the bot's
+//! lease, disconnects and becomes the new release in place (see `update`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -436,14 +437,22 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
         "nebo-link started"
     );
     let (staged_tx, mut staged) = tokio::sync::mpsc::channel(1);
+    // Releases NeboAI announces, and each (re)connect, nudge the update check.
+    let (nudge_tx, nudges) = tokio::sync::mpsc::unbounded_channel();
     match update::official() {
         Some(feed) => {
-            tokio::spawn(update::watch(root.clone(), exe.clone(), feed, staged_tx));
+            let host = service.host.clone();
+            let idle: nebo_updater::IdleFn = Box::new(move || {
+                let idle = host.turns().is_empty();
+                Box::pin(async move { idle })
+            });
+            tokio::spawn(update::watch(root.clone(), exe.clone(), feed, staged_tx, nudges, idle));
         }
         None => tracing::info!("this build can't update itself (no release key)"),
     }
 
     let plugin = NeboAIPlugin::new(Arc::new(FileOffsets::open(dir.offsets_file())));
+    plugin.set_message_handler(announcements(nudge_tx.clone()));
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut backoff = Backoff::new();
@@ -468,6 +477,7 @@ pub async fn run(root: &Root, bot_id: &str, oal: Oal) -> Result<()> {
                 }
                 *service.error.lock().expect("error lock") = None;
                 online_tx.send_replace(true);
+                let _ = nudge_tx.send(nebo_updater::Nudge::Connected);
                 service.write_status();
                 tracing::info!("connected to NeboAI");
                 let connected_at = Instant::now();
@@ -641,6 +651,21 @@ async fn tunnel_watcher(
     }
 }
 
+/// What the service takes from the hub's deliveries: release announcements
+/// on the `installs` stream, handed to the update check. Everything else the
+/// hub sends a bot is Nebo's to act on, not a link's.
+fn announcements(nudges: tokio::sync::mpsc::UnboundedSender<nebo_updater::Nudge>) -> nebo_comm::MessageHandler {
+    Arc::new(move |msg: nebo_comm::CommMessage| {
+        if msg.topic != "installs" {
+            return;
+        }
+        if let Some(announcement) = nebo_updater::Announcement::parse(&msg.content) {
+            tracing::info!(product = %announcement.product, version = %announcement.version, urgent = announcement.urgent, "a release was announced");
+            let _ = nudges.send(nebo_updater::Nudge::Announced(announcement));
+        }
+    })
+}
+
 /// `chat` announces the chat contract; a link that can't serve it says
 /// nothing, and the phone keeps the runtime's own UI.
 fn connect_config(link: &Link, token: &str, chat: bool) -> HashMap<String, String> {
@@ -731,6 +756,30 @@ mod tests {
     use super::*;
     use crate::endpoints::Endpoints;
     use crate::state::{AcpLink, InstallLink, ModelsEndpoint, PRIMARY, Via};
+
+    fn delivery(topic: &str, content: &str) -> nebo_comm::CommMessage {
+        serde_json::from_value(serde_json::json!({
+            "id": "m1", "from": "", "to": "", "topic": topic, "type": "message", "content": content,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn release_announcements_reach_the_update_check_and_nothing_else_does() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = announcements(tx);
+        let announced = r#"{"type":"software_update","product":"nebo-link","version":"0.1.3","urgent":true,"window_s":60}"#;
+        handler(delivery("installs", announced));
+        match rx.try_recv().unwrap() {
+            nebo_updater::Nudge::Announced(a) => {
+                assert_eq!((a.product.as_str(), a.version.as_str(), a.urgent, a.window_s), ("nebo-link", "0.1.3", true, 60));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        handler(delivery("installs", r#"{"type":"tool_installed","tool_id":"t"}"#));
+        handler(delivery("tasks", announced));
+        assert!(rx.try_recv().is_err(), "only an announcement on installs nudges");
+    }
 
     #[test]
     fn connect_announces_the_runtime() {
