@@ -1,7 +1,15 @@
 # Test CI for pull requests and main: build, test and lint on Linux and macOS,
-# and a compile check on Windows. This is not the release build. Release builds
-# (release.yml) run on NeboAI's own (self-hosted) runners, never on these
-# GitHub-hosted ones.
+# and a compile check on Windows. This is not the release build (release.yml).
+#
+# Every job runs on NeboAI's own machines, never on GitHub-hosted runners (the
+# org's Actions budget is capped; no-hosted-runners.yml enforces it):
+#   - Linux tests: a DigitalOcean x86 droplet that exists only for this run
+#   - macOS tests: the house Mac mini ([self-hosted, macOS, stadium-mac])
+#   - Windows: the house Windows box ([self-hosted, Windows, X64, stadium-win])
+#   - SDKs and the OAL proof: the Mac mini's Lima VM ([self-hosted, Linux, ARM64, neboloop])
+#   - release-runners: the VM's orchestration runners (neboloop-orch)
+# A pull request from a fork runs nothing here: fork PRs get no secrets and
+# never run on our machines (the jobs below check the head repo).
 name: CI
 
 on:
@@ -17,13 +25,142 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  # ─── x86 runner: a DigitalOcean droplet that exists only for this run ───
+  # GitHub-hosted runners are never used (the org's Actions budget is spent).
+  # This job only calls doctl and gh, on the stadium orchestration runners;
+  # the droplet boots from the nebo-runner-amd64-base snapshot with a
+  # just-in-time registration good for ONE job, and the -down job deletes it.
+  linux-runner:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only
+    steps:
+      # Install only. Up to four jobs share this VM's HOME, and `doctl auth
+      # init` in each rewrote one shared config file under the others. Every
+      # doctl call takes the token from the environment and a config dir of
+      # its own job.
+      - uses: digitalocean/action-doctl@v2
+        with:
+          no_auth: "true"
+      # A just-in-time runner carries ONLY the labels named here, so the
+      # build's runs-on list must spell them out in full.
+      - name: Mint a one-job runner registration
+        id: jit
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+          NAME: nebo-link-ci-amd64-${{ github.run_id }}
+          LABEL: nebo-link-ci-${{ github.run_id }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          cfg=$(gh api -X POST "orgs/$OWNER/actions/runners/generate-jitconfig" \
+            -f name="$NAME" -F runner_group_id=1 -f work_folder=_work \
+            -f "labels[]=self-hosted" -f "labels[]=Linux" -f "labels[]=X64" \
+            -f "labels[]=$LABEL" -q .encoded_jit_config)
+          echo "::add-mask::$cfg"
+          echo "config=$cfg" >> "$GITHUB_OUTPUT"
+      - name: Boot the droplet from the golden snapshot
+        env:
+          JIT: ${{ steps.jit.outputs.config }}
+          NAME: nebo-link-ci-amd64-${{ github.run_id }}
+          RUN_TAG: run-${{ github.run_id }}
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          XDG_CONFIG_HOME: ${{ runner.temp }}/doctl-config
+        run: |
+          image=$(doctl compute image list-user --format ID,Name --no-header | awk '$2=="nebo-runner-amd64-base"{print $1}' | tail -n1)
+          test -n "$image" || { echo "snapshot nebo-runner-amd64-base not found"; exit 1; }
+          ud="$RUNNER_TEMP/user-data-$NAME.sh"
+          cat > "$ud" <<'EOS'
+          #!/bin/bash
+          # A droplet booted from a snapshot comes up with root's password
+          # expired, which blocks even key-based SSH; clear that so the box
+          # can be inspected while it lives.
+          chage -d "$(date +%F)" -M -1 root
+          cd /home/runner/actions-runner
+          nohup sudo -u runner ./run.sh --jitconfig '__JIT__' > /home/runner/runner.log 2>&1 &
+          EOS
+          sed -i "s|__JIT__|$JIT|" "$ud"
+          # --ssh-keys: with no key DigitalOcean emails the owner a root
+          # password for every droplet. Nobody logs in.
+          # nyc3 capacity comes and goes per size (a 422 "not available");
+          # any other error is fatal.
+          id=""
+          for size in s-8vcpu-16gb s-8vcpu-16gb-amd s-8vcpu-16gb-intel s-4vcpu-16gb-320gb-intel; do
+            if id=$(doctl compute droplet create "$NAME" \
+                --region nyc3 --size "$size" --image "$image" \
+                --tag-names "nebo-ci-runner,$RUN_TAG" \
+                --ssh-keys 15:57:9d:98:dc:e4:b9:b5:69:e2:42:d8:08:86:08:86 \
+                --user-data-file "$ud" --wait --format ID --no-header 2>"$ud.err"); then
+              echo "droplet size: $size"; break
+            fi
+            grep -q "not available in this region" "$ud.err" || { cat "$ud.err"; rm -f "$ud" "$ud.err"; exit 1; }
+            echo "$size is not available in nyc3 right now, trying the next size"
+          done
+          rm -f "$ud" "$ud.err"
+          [ -n "$id" ] || { echo "::error::no droplet size available in nyc3"; exit 1; }
+      - name: Wait for the runner to come online
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+          NAME: nebo-link-ci-amd64-${{ github.run_id }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          for i in $(seq 1 40); do
+            status=$(gh api "orgs/$OWNER/actions/runners?name=$NAME" -q '.runners[0].status // "absent"')
+            [ "$status" = online ] && { echo "runner online after $((i*10))s"; exit 0; }
+            sleep 10
+          done
+          echo "runner never came online"; exit 1
+
+  linux:
+    name: linux
+    needs: [linux-runner]
+    runs-on: [self-hosted, Linux, X64, "nebo-link-ci-${{ github.run_id }}"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The droplet is deleted whether the job passed, failed, was cancelled or
+  # never ran. NOTE: when two droplets exist in one run, each -down job
+  # deletes by name, so it never kills the other job's droplet.
+  linux-runner-down:
+    needs: [linux-runner, linux]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only
+    steps:
+      - uses: digitalocean/action-doctl@v2
+        with:
+          no_auth: "true"
+      - name: Delete this run's droplet, and any runner droplet older than three hours
+        env:
+          NAME: nebo-link-ci-amd64-${{ github.run_id }}
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          XDG_CONFIG_HOME: ${{ runner.temp }}/doctl-config
+        run: |
+          doctl compute droplet list --tag-name nebo-ci-runner --format ID,Name --no-header \
+            | awk -v n="$NAME" '$2==n{print $1}' | xargs -r doctl compute droplet delete --force || true
+          cutoff=$(date -u -d '3 hours ago' +%s)
+          doctl compute droplet list --tag-name nebo-ci-runner --format ID,Created --no-header | while read -r id created; do
+            [ "$(date -u -d "$created" +%s)" -lt "$cutoff" ] && doctl compute droplet delete --force "$id" || true
+          done
+      # A one-job runner removes itself after its job; if the job never ran,
+      # its registration would linger as offline. Remove it either way.
+      - name: Remove the runner registration
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+          NAME: nebo-link-ci-amd64-${{ github.run_id }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          id=$(gh api "orgs/$OWNER/actions/runners?name=$NAME" -q '.runners[0].id // empty')
+          [ -n "$id" ] && gh api -X DELETE "orgs/$OWNER/actions/runners/$id" || true
+
+  macos:
+    name: macos
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, macOS, stadium-mac] # the house Mac mini
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,8 +175,9 @@ jobs:
   # runs what only Windows can show: every child process's console, and the
   # service under its windowless console host.
   windows:
-    name: windows-latest (cargo check, Windows tests)
-    runs-on: windows-latest
+    name: windows (cargo check, Windows tests)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -53,7 +191,8 @@ jobs:
   # directly and through the relay.
   sdk:
     name: SDKs (TypeScript, Python)
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, ARM64, neboloop]
     env:
       OAL_CONFORMANCE: ${{ github.workspace }}/target/debug/oal-conformance
       OAL_RELAY: ${{ github.workspace }}/target/debug/oal-relay
@@ -93,9 +232,12 @@ jobs:
   # the conformance suite's scripted agent, end-to-end encrypted, through a
   # local oal-relay and on the LAN: every conformance example, and the SDKs'
   # live tests (pair, prompt, permission, reconnect). See scripts/oal-proof.sh.
+  # After sdk, not beside it: both build Rust on the VM's two runners, which
+  # share one 7 GiB memory slice.
   oal-proof:
     name: OAL proof (nebo-link, relay, LAN, SDKs)
-    runs-on: ubuntu-latest
+    needs: [sdk]
+    runs-on: [self-hosted, Linux, ARM64, neboloop]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -119,7 +261,8 @@ jobs:
   # Guards the release workflow: its builds run on the house machines, never
   # on GitHub-hosted runners. See scripts/check-release-runners.py.
   release-runners:
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # seconds of python
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/check-release-runners.py
