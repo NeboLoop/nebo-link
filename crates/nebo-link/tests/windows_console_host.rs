@@ -210,6 +210,14 @@ mod windows {
     /// The task exactly as `service::windows_task` writes it, registered
     /// and run by Task Scheduler.
     fn the_registered_task_runs_it_without_a_window() {
+        // The task runs as the signed-in user (an interactive logon). A
+        // service account has no such user: its USERNAME is the machine
+        // account (`HOST$`), which Task Scheduler cannot map to one. That is
+        // how the CI runner on the house Windows box runs (NETWORK SERVICE).
+        if std::env::var("USERNAME").is_ok_and(|u| u.ends_with('$')) {
+            println!("skipped: the registered task needs a signed-in user; this runs as a service account");
+            return;
+        }
         let dir = fresh("task");
         let task = format!("NeboLinkTest-{}", std::process::id());
         let file = dir.join("task.xml");
