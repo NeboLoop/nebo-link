@@ -178,8 +178,29 @@ jobs:
     name: windows (cargo check, Windows tests)
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box
+    env:
+      RUSTC_WRAPPER: ""
+      # Beside the checkout, so the build survives checkout's wipe of the
+      # workspace on this persistent box (release.yml does the same).
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\nebo-link-ci-target-windows
     steps:
       - uses: actions/checkout@v4
+
+      # The house box's runner service (NETWORK SERVICE) has a Restricted
+      # execution policy and no Git bash or PowerShell 7 on its PATH; the
+      # same prep as release.yml's build-windows (see that step's comment).
+      - name: Runner prep (no admin needed)
+        shell: cmd
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; Get-ExecutionPolicy -List | Out-String"
+          echo C:\Program Files\Git\bin>> "%GITHUB_PATH%"
+          echo C:\Program Files\Git\usr\bin>> "%GITHUB_PATH%"
+          set PWSH_DIR=%RUNNER_TEMP%\..\..\pwsh7
+          if not exist "%PWSH_DIR%\pwsh.exe" (
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -Uri https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.zip -OutFile pwsh.zip; Expand-Archive -Force pwsh.zip '%PWSH_DIR%'; Remove-Item pwsh.zip"
+          )
+          "%PWSH_DIR%\pwsh.exe" -NoProfile -ExecutionPolicy Bypass -Command "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; $PSVersionTable.PSVersion.ToString()"
+          echo %PWSH_DIR%>> "%GITHUB_PATH%"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
@@ -194,6 +215,9 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, Linux, ARM64, neboloop]
     env:
+      # The VM's own python3 is 3.14, which rbcl (PyNaCl's libsodium) has no
+      # build for; uv fetches 3.12, what the SDK was tested on until now.
+      UV_PYTHON: "3.12"
       OAL_CONFORMANCE: ${{ github.workspace }}/target/debug/oal-conformance
       OAL_RELAY: ${{ github.workspace }}/target/debug/oal-relay
       # oal-secure's host peer: the SDKs' end-to-end encryption against the
@@ -238,6 +262,8 @@ jobs:
     name: OAL proof (nebo-link, relay, LAN, SDKs)
     needs: [sdk]
     runs-on: [self-hosted, Linux, ARM64, neboloop]
+    env:
+      UV_PYTHON: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
