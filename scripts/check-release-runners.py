@@ -5,11 +5,13 @@ Linux amd64 on a DigitalOcean droplet created for the run and deleted after it,
 Windows on the house Windows box. Nebo's releases follow the same rule, and
 this check exists because it has been undone there before (Aug 15-16 2026:
 release builds moved to macos-latest/ubuntu-latest and took 70+ minutes on
-4-core rented machines). ubuntu-latest is allowed only for jobs that
-orchestrate (key checks, droplet lifecycle, checksums, uploads).
+4-core rented machines). No job runs on a GitHub-hosted runner, not even the
+ones that only orchestrate (key checks, droplet lifecycle, checksums,
+uploads): those run on the Lima VM. The org's Actions budget is capped.
 
 Run locally: python3 scripts/check-release-runners.py
 """
+import re
 import sys
 import yaml
 
@@ -51,22 +53,21 @@ def main():
         runs_on = labels(jobs[name].get("runs-on"))
         if "stadium-win" not in runs_on:
             errors.append(f"{name}: runs-on {runs_on} — must be the house Windows box ([self-hosted, Windows, X64, stadium-win])")
+    hosted = re.compile(r"\b(ubuntu|macos|windows)-(latest|slim|[0-9])")
     for name, job in jobs.items():
         runs_on = " ".join(labels(job.get("runs-on")))
-        if "macos-" in runs_on or "windows-" in runs_on:
-            errors.append(f"{name}: uses a GitHub-hosted runner ({runs_on})")
-        # Anything that compiles runs on a house machine.
+        legs = [" ".join(labels(leg.get("runner"))) for leg in job.get("strategy", {}).get("matrix", {}).get("include", []) if "runner" in leg]
+        for r in [runs_on] + legs:
+            if hosted.search(r):
+                errors.append(f"{name}: uses a GitHub-hosted runner ({r})")
         if "self-hosted" not in runs_on and "${{ matrix.runner }}" not in runs_on:
-            for step in job.get("steps", []):
-                if "cargo " in str(step.get("run", "")):
-                    errors.append(f"{name}: runs cargo on a GitHub-hosted runner ({runs_on})")
-                    break
+            errors.append(f"{name}: runs-on {runs_on} — must be self-hosted")
     if errors:
         print("Release builds must run on NeboAI's own machines (see nebo CLAUDE.md, 'Release builds'):")
         for e in errors:
             print("  -", e)
         return 1
-    print("release runners OK: Mac + Linux arm64 on the house Mac mini, Linux amd64 on a per-run droplet, Windows on the house Windows box")
+    print("release runners OK: Mac + Linux arm64 on the house Mac mini, Linux amd64 on a per-run droplet, Windows on the house Windows box, nothing GitHub-hosted")
     return 0
 
 

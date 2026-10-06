@@ -6,8 +6,9 @@
 #   - Linux arm64: the Mac mini's Lima VM ([self-hosted, Linux, ARM64, neboloop])
 #   - Linux amd64: a DigitalOcean droplet that exists only for this run
 #   - Windows amd64: the house Windows box ([self-hosted, Windows, X64, stadium-win])
-# The ubuntu-latest jobs only orchestrate (key checks, droplet lifecycle,
-# checksums, uploads); nothing is compiled there.
+# Nothing runs on GitHub-hosted runners (the org's Actions budget is capped).
+# Key checks, checksums and uploads run on the Lima VM; the droplet lifecycle
+# runs on the VM's orchestration runners (neboloop-orch).
 #
 # Windows is switched by the repo variable WINDOWS_BUILD_ENABLED (the same
 # switch Nebo's release uses). Unless it is "true", build-windows and
@@ -54,7 +55,7 @@ env:
 jobs:
   # ─── Release mode, version check, release key ────────────────────────
   prepare:
-    runs-on: ubuntu-latest # orchestration only — no build happens here
+    runs-on: [self-hosted, Linux, ARM64, neboloop] # the Mac mini's Lima VM; no build happens here
     outputs:
       dry_run: ${{ steps.mode.outputs.dry_run }}
       release_key: ${{ steps.key.outputs.release_key }}
@@ -289,13 +290,17 @@ jobs:
   # ONE job, and linux-amd64-runner-down deletes it whatever happens.
   linux-amd64-runner:
     needs: prepare
-    runs-on: ubuntu-latest # orchestration only — no build happens here
+    runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only — no build happens here
     outputs:
       droplet_id: ${{ steps.droplet.outputs.id }}
     steps:
+      # Install only. Up to four jobs share the VM's HOME, and `doctl auth
+      # init` in each rewrote one shared config file under the others. Every
+      # doctl call takes the token from the environment and a config dir of
+      # its own job.
       - uses: digitalocean/action-doctl@v2
         with:
-          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          no_auth: "true"
       # A just-in-time runner carries ONLY the labels named here, so the
       # build's runs-on list must be spelled out in full.
       - name: Mint a one-job runner registration
@@ -311,10 +316,14 @@ jobs:
           echo "config=$cfg" >> "$GITHUB_OUTPUT"
       - name: Boot the droplet from the golden snapshot
         id: droplet
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          XDG_CONFIG_HOME: ${{ runner.temp }}/doctl-config
         run: |
           image=$(doctl compute image list-user --format ID,Name --no-header | awk '$2=="nebo-runner-amd64-base"{print $1}' | tail -n1)
           test -n "$image" || { echo "snapshot nebo-runner-amd64-base not found"; exit 1; }
-          cat > user-data.sh <<'EOS'
+          ud="$RUNNER_TEMP/user-data-${{ github.run_id }}.sh"
+          cat > "$ud" <<'EOS'
           #!/bin/bash
           # A droplet booted from a snapshot comes up with root's password
           # expired, which blocks even key-based SSH; clear that so the box
@@ -323,7 +332,7 @@ jobs:
           cd /home/runner/actions-runner
           nohup sudo -u runner ./run.sh --jitconfig '__JIT__' > /home/runner/runner.log 2>&1 &
           EOS
-          sed -i "s|__JIT__|${{ steps.jit.outputs.config }}|" user-data.sh
+          sed -i "s|__JIT__|${{ steps.jit.outputs.config }}|" "$ud"
           # --ssh-keys: with no key DigitalOcean emails the owner a root
           # password for every build droplet. Any account key suppresses that.
           # nyc3 capacity comes and goes per size; every candidate is the same
@@ -334,15 +343,14 @@ jobs:
                 --region nyc3 --size "$size" --image "$image" \
                 --tag-names nebo-ci-runner,run-${{ github.run_id }} \
                 --ssh-keys 15:57:9d:98:dc:e4:b9:b5:69:e2:42:d8:08:86:08:86 \
-                --user-data-file user-data.sh --wait --format ID --no-header 2>create.err); then
+                --user-data-file "$ud" --wait --format ID --no-header 2>"$ud.err"); then
               echo "droplet size: $size"; break
             fi
-            grep -q "not available in this region" create.err || { cat create.err; exit 1; }
+            grep -q "not available in this region" "$ud.err" || { cat "$ud.err"; rm -f "$ud" "$ud.err"; exit 1; }
             echo "$size is not available in nyc3 right now, trying the next size"
           done
-          rm -f create.err
+          rm -f "$ud" "$ud.err"
           [ -n "$id" ] || { echo "::error::no droplet size available in nyc3"; exit 1; }
-          rm -f user-data.sh
           echo "id=$id" >> "$GITHUB_OUTPUT"
       - name: Wait for the runner to come online
         env:
@@ -436,12 +444,15 @@ jobs:
   linux-amd64-runner-down:
     needs: [linux-amd64-runner, build-linux]
     if: ${{ always() }}
-    runs-on: ubuntu-latest # orchestration only — no build happens here
+    runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only — no build happens here
     steps:
       - uses: digitalocean/action-doctl@v2
         with:
-          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          no_auth: "true"
       - name: Delete this run's droplet, and any runner droplet older than three hours
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          XDG_CONFIG_HOME: ${{ runner.temp }}/doctl-config
         run: |
           doctl compute droplet delete --force --tag-name "run-${{ github.run_id }}" || true
           cutoff=$(date -u -d '3 hours ago' +%s)
@@ -591,7 +602,7 @@ jobs:
           "Status: $($sig.Status)  Signer: $($sig.SignerCertificate.Subject)"
           if ($sig.Status -ne 'Valid') { Write-Error "nebo-link-windows-amd64.exe is not validly signed"; exit 1 }
 
-      # Upload (not cache): the ubuntu release job can't read a Windows-saved cache.
+      # Upload (not cache): the Linux release job can't read a Windows-saved cache.
       - uses: actions/upload-artifact@v4
         with:
           name: nebo-link-windows-amd64
@@ -611,7 +622,7 @@ jobs:
         && needs.build-linux.result == 'success'
         && (needs.prepare.outputs.windows == 'true' && needs.sign-windows.result == 'success'
             || needs.prepare.outputs.windows != 'true' && needs.sign-windows.result == 'skipped') }}
-    runs-on: ubuntu-latest # orchestration only — no build happens here (OpenSSL 3 for ed25519)
+    runs-on: [self-hosted, Linux, ARM64, neboloop] # the Mac mini's Lima VM; no build happens here (OpenSSL 3 for ed25519)
     permissions:
       contents: write
     env:
@@ -688,6 +699,20 @@ jobs:
           name: release-bundle
           path: artifacts/
           retention-days: 7
+
+      # The VM has no AWS CLI of its own: install it once into the runner
+      # user's home (kept between runs), arm64.
+      - name: AWS CLI
+        if: ${{ env.DRY_RUN != 'true' }}
+        run: |
+          if ! command -v aws >/dev/null && [ ! -x "$HOME/.local/bin/aws" ]; then
+            curl -fsSLo "$RUNNER_TEMP/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip"
+            unzip -q -o "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP/awscli"
+            "$RUNNER_TEMP/awscli/aws/install" -i "$HOME/.local/aws-cli" -b "$HOME/.local/bin" --update
+            rm -rf "$RUNNER_TEMP/awscli.zip" "$RUNNER_TEMP/awscli"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          PATH="$HOME/.local/bin:$PATH" aws --version
 
       - name: Upload release assets to CDN
         if: ${{ env.DRY_RUN != 'true' }}
