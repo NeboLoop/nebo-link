@@ -561,7 +561,7 @@ impl Connection {
                 format!("Sign in to {} on the computer itself.", agent.label),
             )),
             "session/new" | "session/load" | "session/resume" => {
-                let params = match place(agent, params) {
+                let params = match place(agent, params, matches!(self.writer, Writer::Local(_))) {
                     Ok(params) => params,
                     Err(e) => return Ok(Some(Err(e))),
                 };
@@ -736,9 +736,12 @@ impl Connection {
 
 /// `session/new`, `session/load` or `session/resume` params with the host's
 /// rules applied (spec 8): the session works in the agent's folder or inside
-/// it, and no MCP server comes from a client (a `stdio` one is a command
-/// that would run here). An agent without a folder ignores `cwd`.
-fn place(agent: &Agent, params: &Value) -> Result<Value, ErrorObject> {
+/// it, and no MCP server comes from another device (a `stdio` one is a
+/// command that would run here). An in-process client (`local`, the app
+/// that hosts this computer's agents) passes its `http` servers on
+/// loopback: its own tools, served on this computer. An agent without a
+/// folder ignores `cwd`.
+fn place(agent: &Agent, params: &Value, local: bool) -> Result<Value, ErrorObject> {
     let mut params = params.clone();
     if params["mcpServers"]
         .as_array()
@@ -749,7 +752,12 @@ fn place(agent: &Agent, params: &Value) -> Result<Value, ErrorObject> {
             "MCP servers that run commands can't be added from another device.",
         ));
     }
-    params["mcpServers"] = json!([]);
+    let servers = params["mcpServers"].as_array().cloned().unwrap_or_default();
+    let kept: Vec<Value> = servers
+        .into_iter()
+        .filter(|s| local && s["type"] == "http" && s["url"].as_str().is_some_and(on_loopback))
+        .collect();
+    params["mcpServers"] = Value::Array(kept);
     match &agent.folder {
         Some(folder) => {
             let cwd = params["cwd"].as_str().unwrap_or(folder);
@@ -765,6 +773,19 @@ fn place(agent: &Agent, params: &Value) -> Result<Value, ErrorObject> {
         None => params["cwd"] = json!("/"),
     }
     Ok(params)
+}
+
+/// Whether `url` is plain HTTP to this computer's loopback.
+fn on_loopback(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 #[cfg(test)]
@@ -787,15 +808,41 @@ mod tests {
     #[test]
     fn a_session_works_in_its_agents_folder_with_no_commands_from_clients() {
         let app = agent(Some("/w/app"));
-        assert_eq!(place(&app, &json!({ "cwd": "/w/app", "mcpServers": [] })).unwrap()["cwd"], "/w/app");
-        assert_eq!(place(&app, &json!({ "cwd": "/w/app/src" })).unwrap()["mcpServers"], json!([]));
-        assert_eq!(place(&app, &json!({ "cwd": "/w/apple" })).unwrap_err().code, code::NOT_PERMITTED);
-        assert_eq!(place(&app, &json!({ "cwd": "/etc" })).unwrap_err().code, code::NOT_PERMITTED);
+        assert_eq!(place(&app, &json!({ "cwd": "/w/app", "mcpServers": [] }), false).unwrap()["cwd"], "/w/app");
+        assert_eq!(place(&app, &json!({ "cwd": "/w/app/src" }), false).unwrap()["mcpServers"], json!([]));
+        assert_eq!(place(&app, &json!({ "cwd": "/w/apple" }), false).unwrap_err().code, code::NOT_PERMITTED);
+        assert_eq!(place(&app, &json!({ "cwd": "/etc" }), false).unwrap_err().code, code::NOT_PERMITTED);
         let stdio = json!({ "cwd": "/w/app", "mcpServers": [{ "name": "x", "command": "rm", "args": [] }] });
-        assert_eq!(place(&app, &stdio).unwrap_err().code, code::NOT_PERMITTED);
+        assert_eq!(place(&app, &stdio, false).unwrap_err().code, code::NOT_PERMITTED);
         let http = json!({ "cwd": "/w/app", "mcpServers": [{ "type": "http", "name": "x", "url": "https://example.com" }] });
-        assert_eq!(place(&app, &http).unwrap()["mcpServers"], json!([]), "0.1 hosts pass none");
-        assert_eq!(place(&agent(None), &json!({ "cwd": "/anything" })).unwrap()["cwd"], "/");
+        assert_eq!(place(&app, &http, false).unwrap()["mcpServers"], json!([]), "0.1 hosts pass none");
+        assert_eq!(place(&agent(None), &json!({ "cwd": "/anything" }), false).unwrap()["cwd"], "/");
+    }
+
+    /// The app hosting this computer's agents gives them its own tools: an
+    /// `http` server on loopback passes from its in-process connection, and
+    /// nothing else does, from it or from another device.
+    #[test]
+    fn only_the_in_process_client_passes_its_loopback_http_servers() {
+        let app = agent(Some("/w/app"));
+        let own = json!({ "type": "http", "name": "nebo-agent", "url": "http://127.0.0.1:27895/agent/mcp", "headers": [] });
+        let servers = json!([
+            own,
+            { "type": "http", "name": "far", "url": "https://example.com/mcp", "headers": [] },
+            { "type": "http", "name": "trick", "url": "http://127.0.0.1@example.com/mcp", "headers": [] },
+            { "type": "sse", "name": "sse", "url": "http://127.0.0.1:1/sse", "headers": [] },
+        ]);
+        let params = json!({ "cwd": "/w/app", "mcpServers": servers });
+        assert_eq!(place(&app, &params, true).unwrap()["mcpServers"], json!([own]));
+        assert_eq!(place(&app, &params, false).unwrap()["mcpServers"], json!([]));
+        let stdio = json!({ "cwd": "/w/app", "mcpServers": [{ "name": "x", "command": "rm", "args": [] }] });
+        assert_eq!(place(&app, &stdio, true).unwrap_err().code, code::NOT_PERMITTED);
+        for url in ["http://localhost:1/mcp", "http://[::1]:1/mcp", "http://127.0.0.1/mcp"] {
+            assert!(on_loopback(url), "{url}");
+        }
+        for url in ["https://127.0.0.1/mcp", "http://127.0.0.2/mcp", "http://localhost.example.com/mcp"] {
+            assert!(!on_loopback(url), "{url}");
+        }
     }
 
     #[test]
