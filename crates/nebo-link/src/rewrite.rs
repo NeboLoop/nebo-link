@@ -758,7 +758,7 @@ impl hyper::body::Body for RewrittenBody {
 mod tests {
     use super::*;
 
-    const BOT: &str = "/t/5a137883-49df-4063-b52e-00c1eea1f535";
+    const BOT: &str = "/t/00000000-0000-4000-8000-000000000001";
 
     fn rewriter(path_mode: PathMode) -> Rewriter {
         Rewriter::new("https://neboai.com", BOT, 28790, path_mode)
@@ -775,19 +775,19 @@ mod tests {
         for (from, to) in [
             (
                 r#"{"canvas":"https://neboai.com:443/__openclaw__/cap/tok"}"#,
-                r#"{"canvas":"https://neboai.com:443/t/5a137883-49df-4063-b52e-00c1eea1f535/__openclaw__/cap/tok"}"#,
+                r#"{"canvas":"https://neboai.com:443/t/00000000-0000-4000-8000-000000000001/__openclaw__/cap/tok"}"#,
             ),
             (
                 "<a href=\"https://neboai.com/chat?x=1\">",
-                "<a href=\"https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/chat?x=1\">",
+                "<a href=\"https://neboai.com/t/00000000-0000-4000-8000-000000000001/chat?x=1\">",
             ),
             (
                 "wss://NeboAI.com/ws",
-                "wss://NeboAI.com/t/5a137883-49df-4063-b52e-00c1eea1f535/ws",
+                "wss://NeboAI.com/t/00000000-0000-4000-8000-000000000001/ws",
             ),
             (
                 "https://neboai.com/",
-                "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/",
+                "https://neboai.com/t/00000000-0000-4000-8000-000000000001/",
             ),
         ] {
             assert_eq!(out(from), to);
@@ -797,9 +797,9 @@ mod tests {
     #[test]
     fn prefixed_bare_and_foreign_urls_are_untouched() {
         for text in [
-            "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/chat",
-            "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535",
-            "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535?x",
+            "https://neboai.com/t/00000000-0000-4000-8000-000000000001/chat",
+            "https://neboai.com/t/00000000-0000-4000-8000-000000000001",
+            "https://neboai.com/t/00000000-0000-4000-8000-000000000001?x",
             r#"{"allowedOrigins":["https://neboai.com"]}"#,
             "https://api.neboai.com/v1/x",
             "https://neboai.com.evil.example/x",
@@ -816,8 +816,8 @@ mod tests {
         }
         // Another path under /t/ that is not this bot's prefix.
         assert_eq!(
-            out("https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535x/y"),
-            "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/t/5a137883-49df-4063-b52e-00c1eea1f535x/y"
+            out("https://neboai.com/t/00000000-0000-4000-8000-000000000001x/y"),
+            "https://neboai.com/t/00000000-0000-4000-8000-000000000001/t/00000000-0000-4000-8000-000000000001x/y"
         );
     }
 
@@ -826,15 +826,15 @@ mod tests {
         for (from, to) in [
             (
                 "http://127.0.0.1:28790/__openclaw__/cap/tok",
-                "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/__openclaw__/cap/tok",
+                "https://neboai.com/t/00000000-0000-4000-8000-000000000001/__openclaw__/cap/tok",
             ),
             (
-                "ws://localhost:28790/t/5a137883-49df-4063-b52e-00c1eea1f535/",
-                "wss://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/",
+                "ws://localhost:28790/t/00000000-0000-4000-8000-000000000001/",
+                "wss://neboai.com/t/00000000-0000-4000-8000-000000000001/",
             ),
             (
                 "http://[::1]:28790/x",
-                "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/x",
+                "https://neboai.com/t/00000000-0000-4000-8000-000000000001/x",
             ),
             ("\"http://127.0.0.1:28790\"", "\"https://neboai.com\""),
         ] {
@@ -846,19 +846,19 @@ mod tests {
     fn json_escaped_slashes_are_matched_and_kept() {
         assert_eq!(
             out(r#"{"u":"https:\/\/neboai.com\/__openclaw__\/cap\/tok"}"#),
-            r#"{"u":"https:\/\/neboai.com\/t\/5a137883-49df-4063-b52e-00c1eea1f535\/__openclaw__\/cap\/tok"}"#
+            r#"{"u":"https:\/\/neboai.com\/t\/00000000-0000-4000-8000-000000000001\/__openclaw__\/cap\/tok"}"#
         );
         assert_eq!(
             out(r#""http:\/\/127.0.0.1:28790\/x""#),
-            r#""https:\/\/neboai.com\/t\/5a137883-49df-4063-b52e-00c1eea1f535\/x""#
+            r#""https:\/\/neboai.com\/t\/00000000-0000-4000-8000-000000000001\/x""#
         );
-        let prefixed = r#""https:\/\/neboai.com\/t\/5a137883-49df-4063-b52e-00c1eea1f535\/x""#;
+        let prefixed = r#""https:\/\/neboai.com\/t\/00000000-0000-4000-8000-000000000001\/x""#;
         assert_eq!(out(prefixed), prefixed);
     }
 
     #[test]
     fn inbound_follows_the_path_mode() {
-        let url = "go to https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/x?y and https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535";
+        let url = "go to https://neboai.com/t/00000000-0000-4000-8000-000000000001/x?y and https://neboai.com/t/00000000-0000-4000-8000-000000000001";
         let readd = rewriter(PathMode::ReaddPrefix);
         assert_eq!(readd.rewrite(Direction::Inbound, url), url);
         let strip = rewriter(PathMode::StripWithForwardedPrefix);
@@ -880,7 +880,7 @@ mod tests {
         let text = concat!(
             "data: {\"a\":\"https://neboai.com:443/__openclaw__/cap/tok\",",
             "\"b\":\"https:\\/\\/neboai.com\\/x\",\"c\":\"http://127.0.0.1:28790/y\",",
-            "\"d\":\"https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/z\",\"e\":\"https://neboai.com\"}\n\n"
+            "\"d\":\"https://neboai.com/t/00000000-0000-4000-8000-000000000001/z\",\"e\":\"https://neboai.com\"}\n\n"
         );
         let whole = rw.rewrite(Direction::Outbound, text).into_owned();
         for a in 0..text.len() {
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(stream.push(Bytes::from_static(b"data: https://nebo")), "data: ");
         assert_eq!(
             stream.push(Bytes::from_static(b"ai.com/x\n\n")),
-            "https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/x\n\n"
+            "https://neboai.com/t/00000000-0000-4000-8000-000000000001/x\n\n"
         );
         assert_eq!(
             stream.push(Bytes::from_static(b"https://example.com/")),
@@ -973,7 +973,7 @@ mod tests {
     }
 
     const PAGE: &str = "<a href=\"https://neboai.com/a\">a</a><img src=\"http://localhost:28790/b.png\">";
-    const PAGE_OUT: &str = "<a href=\"https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/a\">a</a><img src=\"https://neboai.com/t/5a137883-49df-4063-b52e-00c1eea1f535/b.png\">";
+    const PAGE_OUT: &str = "<a href=\"https://neboai.com/t/00000000-0000-4000-8000-000000000001/a\">a</a><img src=\"https://neboai.com/t/00000000-0000-4000-8000-000000000001/b.png\">";
 
     #[tokio::test]
     async fn compressed_bodies_are_decoded_rewritten_and_encoded_again() {

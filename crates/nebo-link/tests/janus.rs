@@ -161,15 +161,15 @@ async fn model_list_keeps_neboai_models_and_prefers_nebo_1() {
     let (url, _) = fake_janus(
         r#"{"data":[
             {"id":"other/x","owned_by":"someone"},
-            {"id":"nebo-1-pro","name":"Nebo 1 Pro","owned_by":"neboai"},
+            {"id":"model-b","name":"Model B","owned_by":"neboai"},
             {"id":"nebo-1","owned_by":"neboai"}
         ]}"#,
     )
     .await;
     let (_tx, rx) = watch::channel("jwt".to_string());
     let (models, default) = janus::models(&endpoint(url, rx)).await.unwrap();
-    assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["nebo-1-pro", "nebo-1"]);
-    assert_eq!(models[0].name, "Nebo 1 Pro");
+    assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["model-b", "nebo-1"]);
+    assert_eq!(models[0].name, "Model B");
     assert_eq!(models[1].name, "nebo-1");
     assert_eq!(default, "nebo-1");
 

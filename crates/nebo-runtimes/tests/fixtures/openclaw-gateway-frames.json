@@ -3,7 +3,7 @@
   "type": "event",
   "event": "connect.challenge",
   "payload": {
-   "nonce": "2ca7f32b-0a71-4fe8-8a67-e41874721f55",
+   "nonce": "00000000-0000-4000-8000-000000000101",
    "ts": 1790397272202,
    "capabilities": [
     "model-catalog-snapshot"
@@ -19,10 +19,10 @@
    "protocol": 4,
    "server": {
     "version": "2026.9.6",
-    "buildId": "2026.9.6-release-eb377ac59e6c-2026-09-23T16-33-12.144Z",
-    "bootId": "ce212a07-bdca-405a-b515-68aa2b3dfb3a",
+    "buildId": "2026.9.6-release-0000000",
+    "bootId": "00000000-0000-4000-8000-000000000102",
     "controlUiBuildSource": "bundled",
-    "connId": "b4bf7f4b-8cc1-425d-8efb-dce91f2ad45d"
+    "connId": "00000000-0000-4000-8000-000000000103"
    },
    "features": {
     "methods": [
@@ -131,7 +131,7 @@
     }
    ],
    "pluginSurfaceUrls": {
-    "canvas": "https://neboai.com/__openclaw__/cap/Wi_9JdHGQ-2VAb8o5ida4Bv5"
+    "canvas": "https://gateway.example.com/__openclaw__/cap/example-capability"
    },
    "auth": {
     "method": "trusted-proxy",
@@ -143,7 +143,7 @@
      "operator.write",
      "operator.admin"
     ],
-    "recoveryScope": "Kk3O_vje79kkdu2l-QSGMgHLR1S1fwXcRW-4VxXpMOc"
+    "recoveryScope": "example-recovery-scope"
    },
    "policy": {
     "maxPayload": 26214400,
@@ -176,7 +176,7 @@
    "agents": [
     {
      "id": "main",
-     "workspace": "/private/tmp/claude-501/-Users-almatuck-workspaces-nebo-nebo/f0b21ce3-ee60-431b-9a17-848864d5dc17/scratchpad/e2e/oc/.openclaw/workspace",
+     "workspace": "/home/user/.openclaw/workspace",
      "workspaceGit": false,
      "agentRuntime": {
       "id": "auto",
@@ -195,7 +195,7 @@
      ],
      "thinkingDefault": "off",
      "model": {
-      "primary": "neboai/nebo-1"
+      "primary": "provider-a/model-a"
      },
      "defaultPermissionMode": "full"
     }
@@ -210,7 +210,7 @@
    "subscribed": true,
    "list": {
     "ts": 1790397284668,
-    "path": "/private/tmp/claude-501/-Users-almatuck-workspaces-nebo-nebo/f0b21ce3-ee60-431b-9a17-848864d5dc17/scratchpad/e2e/oc/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+    "path": "/home/user/.openclaw/agents/main/agent/openclaw-agent.sqlite",
     "count": 0,
     "totalCount": 0,
     "limitApplied": 5,
@@ -218,8 +218,8 @@
     "hasMore": false,
     "owners": [],
     "defaults": {
-     "modelProvider": "neboai",
-     "model": "nebo-1",
+     "modelProvider": "provider-a",
+     "model": "model-a",
      "contextTokens": 200000,
      "agentRuntime": {
       "id": "auto",
@@ -255,7 +255,7 @@
   "ok": true,
   "payload": {
    "sessionKey": "agent:main:nebo-link-spike",
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "messages": [
     {
      "role": "user",
@@ -264,11 +264,11 @@
      "idempotencyKey": "probe-chat-1790397284646:user",
      "__openclaw": {
       "senderIsOwner": true,
-      "senderId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
-      "senderName": "5a137883-49df-4063-b52e-00c1eea1f535",
+      "senderId": "00000000-0000-4000-8000-000000000002",
+      "senderName": "00000000-0000-4000-8000-000000000001",
       "senderIdentity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
       "transport": {
        "clients": [
@@ -279,15 +279,15 @@
         }
        ]
       },
-      "id": "59cc4a08-5027-4c61-bb9f-1aab71e212b9",
+      "id": "00000000-0000-4000-8000-000000000105",
       "idempotencyKey": "probe-chat-1790397284646:user",
       "recordTimestampMs": 1790397291899,
       "transcriptPosition": {
-       "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+       "source": "transcript-1",
        "rawSeq": 1
       },
       "seq": 1,
-      "senderProfileAvatarUrl": "/api/users/ae2b7db3-1f30-472e-8082-e00f59cb6db8/avatar?v=1790394232206"
+      "senderProfileAvatarUrl": "/api/users/00000000-0000-4000-8000-000000000002/avatar?v=1790394232206"
      }
     },
     {
@@ -299,14 +299,14 @@
       }
      ],
      "api": "openai-completions",
-     "provider": "neboai",
-     "model": "nebo-1",
+     "provider": "provider-a",
+     "model": "model-a",
      "usage": {
-      "input": 388,
+      "input": 40,
       "output": 1,
-      "totalTokens": 17321,
+      "totalTokens": 41,
       "cacheRead": 0,
-      "cacheWrite": 16932,
+      "cacheWrite": 0,
       "cost": {
        "input": 0,
        "output": 0,
@@ -317,14 +317,14 @@
      },
      "stopReason": "stop",
      "timestamp": 1790397297952,
-     "responseId": "chatcmpl-7ca314d7-70de-49d4-9a55-53c1c6393261",
-     "responseModel": "nebo-1-flash",
+     "responseId": "chatcmpl-00000000-0000-4000-8000-000000000106",
+     "responseModel": "model-a",
      "__openclaw": {
       "runId": "probe-chat-1790397284646",
-      "id": "aac0785c-db73-4c34-ab8a-ed08fcc5b4ab",
+      "id": "00000000-0000-4000-8000-000000000107",
       "recordTimestampMs": 1790397301670,
       "transcriptPosition": {
-       "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+       "source": "transcript-1",
        "rawSeq": 4
       },
       "seq": 2
@@ -335,12 +335,12 @@
     "items": [],
     "total": 0
    },
-   "deltaCursor": "eyJhZ2VudElkIjoibWFpbiIsImdlbmVyYXRpb24iOiJlODQ5MGQwOTBkMzQ0NzVmYWM0YmVhM2JmZWYwNmVhMyIsImxhc3RTZXEiOjUsInNlc3Npb25JZCI6ImU5ZGYyYTcxLWNmYmMtNDBkNS04ZGQ5LTQ1YTU3OTVjNmU0OSIsInZlcnNpb24iOjF9",
+   "deltaCursor": "eyJhZ2VudElkIjoibWFpbiIsImdlbmVyYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImxhc3RTZXEiOjUsInNlc3Npb25JZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInZlcnNpb24iOjF9",
    "hasMore": false,
    "totalMessages": 2,
    "defaults": {
-    "modelProvider": "neboai",
-    "model": "nebo-1",
+    "modelProvider": "provider-a",
+    "model": "model-a",
     "contextTokens": 200000,
     "agentRuntime": {
      "id": "auto",
@@ -357,22 +357,22 @@
     "createdVia": "operator",
     "createdActor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     },
     "owner": {
      "actor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      }
     },
     "createdAt": 1790397284971,
@@ -387,15 +387,15 @@
     "pinned": false,
     "unread": false,
     "lastInteractionAt": 1790397284924,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+    "sessionId": "00000000-0000-4000-8000-000000000003",
     "systemSent": true,
     "abortedLastRun": false,
     "effectiveFastMode": false,
     "effectiveFastModeSource": "default",
     "fastAutoOnSeconds": 60,
-    "inputTokens": 388,
+    "inputTokens": 40,
     "outputTokens": 1,
-    "totalTokens": 17320,
+    "totalTokens": 41,
     "totalTokensFresh": true,
     "status": "done",
     "startedAt": 1790397297939,
@@ -404,8 +404,8 @@
     "lastRunId": "probe-chat-1790397284646",
     "effectiveResponseUsage": "off",
     "effectiveQueueMode": "steer",
-    "modelProvider": "neboai",
-    "model": "nebo-1",
+    "modelProvider": "provider-a",
+    "model": "model-a",
     "modelOverrideSource": null,
     "runtimeSelectionLocked": false,
     "agentRuntime": {
@@ -424,21 +424,21 @@
      "schemaVersion": 1,
      "source": "pre-prompt-estimate",
      "updatedAt": 1790397297933,
-     "provider": "neboai",
-     "model": "nebo-1",
+     "provider": "provider-a",
+     "model": "model-a",
      "route": "fits",
      "shouldCompact": false,
-     "estimatedPromptTokens": 20770,
+     "estimatedPromptTokens": 1000,
      "contextTokenBudget": 200000,
      "promptBudgetBeforeReserve": 180000,
      "reserveTokens": 20000,
      "effectiveReserveTokens": 20000,
-     "remainingPromptBudgetTokens": 159230,
+     "remainingPromptBudgetTokens": 179000,
      "overflowTokens": 0,
      "toolResultReducibleChars": 0,
      "messageCount": 0,
      "unwindowedMessageCount": 0,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+     "sessionId": "00000000-0000-4000-8000-000000000003"
     },
     "snapshotAt": 1790397330801,
     "placement": {
@@ -456,7 +456,7 @@
     "sharingRole": "admin",
     "hasActiveRun": false,
     "activeRunIds": [],
-    "activeLeafEntryId": "b2668a93-6376-439d-bbc4-8e7366bef98a"
+    "activeLeafEntryId": "00000000-0000-4000-8000-000000000108"
    }
   }
  },
@@ -486,11 +486,11 @@
       "idempotencyKey": "probe-approval-1790397330775:user",
       "__openclaw": {
        "senderIsOwner": true,
-       "senderId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
-       "senderName": "5a137883-49df-4063-b52e-00c1eea1f535",
+       "senderId": "00000000-0000-4000-8000-000000000002",
+       "senderName": "00000000-0000-4000-8000-000000000001",
        "senderIdentity": {
         "type": "profile",
-        "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+        "id": "00000000-0000-4000-8000-000000000002"
        },
        "transport": {
         "clients": [
@@ -501,39 +501,39 @@
          }
         ]
        },
-       "id": "91a8d0b2-3cd3-416c-99b1-be95ff3284fb",
+       "id": "00000000-0000-4000-8000-000000000109",
        "idempotencyKey": "probe-approval-1790397330775:user",
        "recordTimestampMs": 1790397330820,
        "transcriptPosition": {
-        "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+        "source": "transcript-1",
         "rawSeq": 6
        },
        "seq": 3,
-       "senderProfileAvatarUrl": "/api/users/ae2b7db3-1f30-472e-8082-e00f59cb6db8/avatar?v=1790394232206"
+       "senderProfileAvatarUrl": "/api/users/00000000-0000-4000-8000-000000000002/avatar?v=1790394232206"
       }
      },
-     "messageId": "91a8d0b2-3cd3-416c-99b1-be95ff3284fb",
+     "messageId": "00000000-0000-4000-8000-000000000109",
      "messageSeq": 3,
      "updatedAt": 1790397337092,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+     "sessionId": "00000000-0000-4000-8000-000000000003",
      "createdActor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      },
      "owner": {
       "actor": {
        "type": "human",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+       "id": "00000000-0000-4000-8000-000000000002",
        "identity": {
         "type": "profile",
-        "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+        "id": "00000000-0000-4000-8000-000000000002"
        },
-       "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+       "label": "00000000-0000-4000-8000-000000000001"
       }
      },
      "participants": [],
@@ -577,9 +577,9 @@
      "systemSent": true,
      "abortedLastRun": false,
      "restartRecoveryStatus": null,
-     "inputTokens": 1189,
+     "inputTokens": 190,
      "outputTokens": 108,
-     "totalTokens": 17586,
+     "totalTokens": 298,
      "totalTokensFresh": true,
      "goal": null,
      "contextTokens": 200000,
@@ -587,25 +587,25 @@
       "schemaVersion": 1,
       "source": "pre-prompt-estimate",
       "updatedAt": 1790397331017,
-      "provider": "neboai",
-      "model": "nebo-1",
+      "provider": "provider-a",
+      "model": "model-a",
       "route": "fits",
       "shouldCompact": false,
-      "estimatedPromptTokens": 20888,
+      "estimatedPromptTokens": 1100,
       "contextTokenBudget": 200000,
       "promptBudgetBeforeReserve": 180000,
       "reserveTokens": 20000,
       "effectiveReserveTokens": 20000,
-      "remainingPromptBudgetTokens": 159112,
+      "remainingPromptBudgetTokens": 178900,
       "overflowTokens": 0,
       "toolResultReducibleChars": 0,
       "messageCount": 2,
       "unwindowedMessageCount": 2,
-      "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+      "sessionId": "00000000-0000-4000-8000-000000000003"
      },
      "effectiveResponseUsage": "off",
-     "modelProvider": "neboai",
-     "model": "nebo-1",
+     "modelProvider": "provider-a",
+     "model": "model-a",
      "activeModelProvider": null,
      "activeModel": null,
      "modelOverrideSource": null,
@@ -640,7 +640,7 @@
       "content": [
        {
         "type": "toolCall",
-        "id": "call_9ec1cef66f2a4b8e85c5e9c1",
+        "id": "call_0001",
         "name": "exec",
         "arguments": {
          "command": "uname -a"
@@ -648,13 +648,13 @@
        }
       ],
       "api": "openai-completions",
-      "provider": "neboai",
-      "model": "nebo-1",
+      "provider": "provider-a",
+      "model": "model-a",
       "usage": {
-       "input": 535,
+       "input": 60,
        "output": 27,
-       "totalTokens": 17494,
-       "cacheRead": 16932,
+       "totalTokens": 87,
+       "cacheRead": 0,
        "cacheWrite": 0,
        "cost": {
         "input": 0,
@@ -666,41 +666,41 @@
       },
       "stopReason": "toolUse",
       "timestamp": 1790397331078,
-      "responseId": "chatcmpl-614b3b26-0242-486f-a766-7d2b9c4944f4",
-      "responseModel": "nebo-1-flash",
+      "responseId": "chatcmpl-00000000-0000-4000-8000-000000000110",
+      "responseModel": "model-a",
       "__openclaw": {
        "runId": "probe-approval-1790397330775",
-       "id": "3bd6b020-39db-45c0-bf86-0e887dbae77a",
+       "id": "00000000-0000-4000-8000-000000000111",
        "recordTimestampMs": 1790397333165,
        "transcriptPosition": {
-        "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+        "source": "transcript-1",
         "rawSeq": 7
        },
        "seq": 4
       }
      },
-     "messageId": "3bd6b020-39db-45c0-bf86-0e887dbae77a",
+     "messageId": "00000000-0000-4000-8000-000000000111",
      "messageSeq": 4,
      "updatedAt": 1790397337092,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+     "sessionId": "00000000-0000-4000-8000-000000000003",
      "createdActor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      },
      "owner": {
       "actor": {
        "type": "human",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+       "id": "00000000-0000-4000-8000-000000000002",
        "identity": {
         "type": "profile",
-        "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+        "id": "00000000-0000-4000-8000-000000000002"
        },
-       "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+       "label": "00000000-0000-4000-8000-000000000001"
       }
      },
      "participants": [],
@@ -744,9 +744,9 @@
      "systemSent": true,
      "abortedLastRun": false,
      "restartRecoveryStatus": null,
-     "inputTokens": 1189,
+     "inputTokens": 190,
      "outputTokens": 108,
-     "totalTokens": 17586,
+     "totalTokens": 298,
      "totalTokensFresh": true,
      "goal": null,
      "contextTokens": 200000,
@@ -754,25 +754,25 @@
       "schemaVersion": 1,
       "source": "pre-prompt-estimate",
       "updatedAt": 1790397331017,
-      "provider": "neboai",
-      "model": "nebo-1",
+      "provider": "provider-a",
+      "model": "model-a",
       "route": "fits",
       "shouldCompact": false,
-      "estimatedPromptTokens": 20888,
+      "estimatedPromptTokens": 1100,
       "contextTokenBudget": 200000,
       "promptBudgetBeforeReserve": 180000,
       "reserveTokens": 20000,
       "effectiveReserveTokens": 20000,
-      "remainingPromptBudgetTokens": 159112,
+      "remainingPromptBudgetTokens": 178900,
       "overflowTokens": 0,
       "toolResultReducibleChars": 0,
       "messageCount": 2,
       "unwindowedMessageCount": 2,
-      "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+      "sessionId": "00000000-0000-4000-8000-000000000003"
      },
      "effectiveResponseUsage": "off",
-     "modelProvider": "neboai",
-     "model": "nebo-1",
+     "modelProvider": "provider-a",
+     "model": "model-a",
      "activeModelProvider": null,
      "activeModel": null,
      "modelOverrideSource": null,
@@ -804,49 +804,49 @@
      "agentId": "main",
      "message": {
       "role": "toolResult",
-      "toolCallId": "call_9ec1cef66f2a4b8e85c5e9c1",
+      "toolCallId": "call_0001",
       "toolName": "exec",
       "content": [
        {
         "type": "text",
-        "text": "Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64"
+        "text": "Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64"
        }
       ],
       "isError": false,
       "timestamp": 1790397334467,
       "__openclaw": {
        "runId": "probe-approval-1790397330775",
-       "id": "fa558f87-ba10-4e37-a371-c0ff0c979702",
+       "id": "00000000-0000-4000-8000-000000000112",
        "recordTimestampMs": 1790397334468,
        "transcriptPosition": {
-        "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+        "source": "transcript-1",
         "rawSeq": 8
        },
        "seq": 5
       }
      },
-     "messageId": "fa558f87-ba10-4e37-a371-c0ff0c979702",
+     "messageId": "00000000-0000-4000-8000-000000000112",
      "messageSeq": 5,
      "updatedAt": 1790397337092,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+     "sessionId": "00000000-0000-4000-8000-000000000003",
      "createdActor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      },
      "owner": {
       "actor": {
        "type": "human",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+       "id": "00000000-0000-4000-8000-000000000002",
        "identity": {
         "type": "profile",
-        "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+        "id": "00000000-0000-4000-8000-000000000002"
        },
-       "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+       "label": "00000000-0000-4000-8000-000000000001"
       }
      },
      "participants": [],
@@ -890,9 +890,9 @@
      "systemSent": true,
      "abortedLastRun": false,
      "restartRecoveryStatus": null,
-     "inputTokens": 1189,
+     "inputTokens": 190,
      "outputTokens": 108,
-     "totalTokens": 17586,
+     "totalTokens": 298,
      "totalTokensFresh": true,
      "goal": null,
      "contextTokens": 200000,
@@ -900,25 +900,25 @@
       "schemaVersion": 1,
       "source": "pre-prompt-estimate",
       "updatedAt": 1790397331017,
-      "provider": "neboai",
-      "model": "nebo-1",
+      "provider": "provider-a",
+      "model": "model-a",
       "route": "fits",
       "shouldCompact": false,
-      "estimatedPromptTokens": 20888,
+      "estimatedPromptTokens": 1100,
       "contextTokenBudget": 200000,
       "promptBudgetBeforeReserve": 180000,
       "reserveTokens": 20000,
       "effectiveReserveTokens": 20000,
-      "remainingPromptBudgetTokens": 159112,
+      "remainingPromptBudgetTokens": 178900,
       "overflowTokens": 0,
       "toolResultReducibleChars": 0,
       "messageCount": 2,
       "unwindowedMessageCount": 2,
-      "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+      "sessionId": "00000000-0000-4000-8000-000000000003"
      },
      "effectiveResponseUsage": "off",
-     "modelProvider": "neboai",
-     "model": "nebo-1",
+     "modelProvider": "provider-a",
+     "model": "model-a",
      "activeModelProvider": null,
      "activeModel": null,
      "modelOverrideSource": null,
@@ -953,17 +953,17 @@
       "content": [
        {
         "type": "text",
-        "text": "The output is:\n\n`Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64`"
+        "text": "The output is:\n\n`Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64`"
        }
       ],
       "api": "openai-completions",
-      "provider": "neboai",
-      "model": "nebo-1",
+      "provider": "provider-a",
+      "model": "model-a",
       "usage": {
-       "input": 654,
+       "input": 90,
        "output": 81,
-       "totalTokens": 17667,
-       "cacheRead": 16932,
+       "totalTokens": 171,
+       "cacheRead": 0,
        "cacheWrite": 0,
        "cost": {
         "input": 0,
@@ -975,41 +975,41 @@
       },
       "stopReason": "stop",
       "timestamp": 1790397334475,
-      "responseId": "chatcmpl-962f3c31-2ffd-4f9f-94d0-c6e1b0d41676",
-      "responseModel": "nebo-1-flash",
+      "responseId": "chatcmpl-00000000-0000-4000-8000-000000000113",
+      "responseModel": "model-a",
       "__openclaw": {
        "runId": "probe-approval-1790397330775",
-       "id": "d64607ca-3838-404f-8f2d-ca19b9f77e5b",
+       "id": "00000000-0000-4000-8000-000000000114",
        "recordTimestampMs": 1790397337058,
        "transcriptPosition": {
-        "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+        "source": "transcript-1",
         "rawSeq": 10
        },
        "seq": 6
       }
      },
-     "messageId": "d64607ca-3838-404f-8f2d-ca19b9f77e5b",
+     "messageId": "00000000-0000-4000-8000-000000000114",
      "messageSeq": 6,
      "updatedAt": 1790397337092,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+     "sessionId": "00000000-0000-4000-8000-000000000003",
      "createdActor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      },
      "owner": {
       "actor": {
        "type": "human",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+       "id": "00000000-0000-4000-8000-000000000002",
        "identity": {
         "type": "profile",
-        "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+        "id": "00000000-0000-4000-8000-000000000002"
        },
-       "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+       "label": "00000000-0000-4000-8000-000000000001"
       }
      },
      "participants": [],
@@ -1053,9 +1053,9 @@
      "systemSent": true,
      "abortedLastRun": false,
      "restartRecoveryStatus": null,
-     "inputTokens": 1189,
+     "inputTokens": 190,
      "outputTokens": 108,
-     "totalTokens": 17586,
+     "totalTokens": 298,
      "totalTokensFresh": true,
      "goal": null,
      "contextTokens": 200000,
@@ -1063,25 +1063,25 @@
       "schemaVersion": 1,
       "source": "pre-prompt-estimate",
       "updatedAt": 1790397331017,
-      "provider": "neboai",
-      "model": "nebo-1",
+      "provider": "provider-a",
+      "model": "model-a",
       "route": "fits",
       "shouldCompact": false,
-      "estimatedPromptTokens": 20888,
+      "estimatedPromptTokens": 1100,
       "contextTokenBudget": 200000,
       "promptBudgetBeforeReserve": 180000,
       "reserveTokens": 20000,
       "effectiveReserveTokens": 20000,
-      "remainingPromptBudgetTokens": 159112,
+      "remainingPromptBudgetTokens": 178900,
       "overflowTokens": 0,
       "toolResultReducibleChars": 0,
       "messageCount": 2,
       "unwindowedMessageCount": 2,
-      "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+      "sessionId": "00000000-0000-4000-8000-000000000003"
      },
      "effectiveResponseUsage": "off",
-     "modelProvider": "neboai",
-     "model": "nebo-1",
+     "modelProvider": "provider-a",
+     "model": "model-a",
      "activeModelProvider": null,
      "activeModel": null,
      "modelOverrideSource": null,
@@ -1111,11 +1111,11 @@
    ],
    "activity": [
     {
-     "messageId": "3bd6b020-39db-45c0-bf86-0e887dbae77a",
+     "messageId": "00000000-0000-4000-8000-000000000111",
      "items": [
       {
-       "itemId": "tool:call_9ec1cef66f2a4b8e85c5e9c1",
-       "toolCallId": "call_9ec1cef66f2a4b8e85c5e9c1",
+       "itemId": "tool:call_0001",
+       "toolCallId": "call_0001",
        "name": "exec",
        "kind": "tool",
        "phase": "end",
@@ -1126,11 +1126,11 @@
      ]
     },
     {
-     "messageId": "fa558f87-ba10-4e37-a371-c0ff0c979702",
+     "messageId": "00000000-0000-4000-8000-000000000112",
      "items": [
       {
-       "itemId": "tool:call_9ec1cef66f2a4b8e85c5e9c1",
-       "toolCallId": "call_9ec1cef66f2a4b8e85c5e9c1",
+       "itemId": "tool:call_0001",
+       "toolCallId": "call_0001",
        "name": "exec",
        "kind": "tool",
        "phase": "end",
@@ -1141,7 +1141,7 @@
      ]
     }
    ],
-   "deltaCursor": "eyJhZ2VudElkIjoibWFpbiIsImdlbmVyYXRpb24iOiJlODQ5MGQwOTBkMzQ0NzVmYWM0YmVhM2JmZWYwNmVhMyIsImxhc3RTZXEiOjExLCJzZXNzaW9uSWQiOiJlOWRmMmE3MS1jZmJjLTQwZDUtOGRkOS00NWE1Nzk1YzZlNDkiLCJ2ZXJzaW9uIjoxfQ",
+   "deltaCursor": "eyJhZ2VudElkIjoibWFpbiIsImdlbmVyYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImxhc3RTZXEiOjExLCJzZXNzaW9uSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDMiLCJ2ZXJzaW9uIjoxfQ",
    "pendingInputs": {
     "items": [],
     "total": 0
@@ -1153,22 +1153,22 @@
     "createdVia": "operator",
     "createdActor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     },
     "owner": {
      "actor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      }
     },
     "createdAt": 1790397284971,
@@ -1183,15 +1183,15 @@
     "pinned": false,
     "unread": true,
     "lastInteractionAt": 1790397330858,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+    "sessionId": "00000000-0000-4000-8000-000000000003",
     "systemSent": true,
     "abortedLastRun": false,
     "effectiveFastMode": false,
     "effectiveFastModeSource": "default",
     "fastAutoOnSeconds": 60,
-    "inputTokens": 1189,
+    "inputTokens": 190,
     "outputTokens": 108,
-    "totalTokens": 17586,
+    "totalTokens": 298,
     "totalTokensFresh": true,
     "status": "done",
     "startedAt": 1790397331027,
@@ -1200,8 +1200,8 @@
     "lastRunId": "probe-approval-1790397330775",
     "effectiveResponseUsage": "off",
     "effectiveQueueMode": "steer",
-    "modelProvider": "neboai",
-    "model": "nebo-1",
+    "modelProvider": "provider-a",
+    "model": "model-a",
     "modelOverrideSource": null,
     "runtimeSelectionLocked": false,
     "agentRuntime": {
@@ -1220,21 +1220,21 @@
      "schemaVersion": 1,
      "source": "pre-prompt-estimate",
      "updatedAt": 1790397331017,
-     "provider": "neboai",
-     "model": "nebo-1",
+     "provider": "provider-a",
+     "model": "model-a",
      "route": "fits",
      "shouldCompact": false,
-     "estimatedPromptTokens": 20888,
+     "estimatedPromptTokens": 1100,
      "contextTokenBudget": 200000,
      "promptBudgetBeforeReserve": 180000,
      "reserveTokens": 20000,
      "effectiveReserveTokens": 20000,
-     "remainingPromptBudgetTokens": 159112,
+     "remainingPromptBudgetTokens": 178900,
      "overflowTokens": 0,
      "toolResultReducibleChars": 0,
      "messageCount": 2,
      "unwindowedMessageCount": 2,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+     "sessionId": "00000000-0000-4000-8000-000000000003"
     },
     "snapshotAt": 1790397337102,
     "placement": {
@@ -1252,7 +1252,7 @@
     "sharingRole": "admin",
     "hasActiveRun": false,
     "activeRunIds": [],
-    "activeLeafEntryId": "aff8f7d6-582d-4ed7-aae2-7e81189bc905"
+    "activeLeafEntryId": "00000000-0000-4000-8000-000000000115"
    }
   }
  },
@@ -1282,7 +1282,7 @@
    "phase": "preparing_workspace"
   },
   "seq": 7,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "chat_delta": {
   "type": "event",
@@ -1306,7 +1306,7 @@
    }
   },
   "seq": 34,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "chat_final": {
   "type": "event",
@@ -1323,14 +1323,14 @@
     "content": [
      {
       "type": "text",
-      "text": "The output is:\n\n`Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64`"
+      "text": "The output is:\n\n`Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64`"
      }
     ],
     "timestamp": 1790397337078
    }
   },
   "seq": 44,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "agent_lifecycle_start": {
   "type": "event",
@@ -1338,7 +1338,7 @@
   "payload": {
    "runId": "probe-approval-1790397330775",
    "sessionKey": "agent:main:nebo-link-spike",
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "agentId": "main",
    "stream": "lifecycle",
    "data": {
@@ -1350,7 +1350,7 @@
    "isHeartbeat": false
   },
   "seq": 13,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "agent_usage": {
   "type": "event",
@@ -1368,7 +1368,7 @@
    "isHeartbeat": false
   },
   "seq": 19,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "agent_tool_start": {
   "type": "event",
@@ -1379,7 +1379,7 @@
    "data": {
     "phase": "start",
     "name": "exec",
-    "toolCallId": "call_9ec1cef66f2a4b8e85c5e9c1",
+    "toolCallId": "call_0001",
     "args": {
      "command": "uname -a"
     }
@@ -1390,25 +1390,25 @@
    "ts": 1790397333173,
    "isHeartbeat": false,
    "updatedAt": 1790397331031,
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "createdActor": {
     "type": "human",
-    "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+    "id": "00000000-0000-4000-8000-000000000002",
     "identity": {
      "type": "profile",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+     "id": "00000000-0000-4000-8000-000000000002"
     },
-    "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+    "label": "00000000-0000-4000-8000-000000000001"
    },
    "owner": {
     "actor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     }
    },
    "participants": [],
@@ -1451,9 +1451,9 @@
    "systemSent": true,
    "abortedLastRun": false,
    "restartRecoveryStatus": null,
-   "inputTokens": 388,
+   "inputTokens": 40,
    "outputTokens": 1,
-   "totalTokens": 17320,
+   "totalTokens": 41,
    "totalTokensFresh": true,
    "goal": null,
    "contextTokens": 200000,
@@ -1461,27 +1461,27 @@
     "schemaVersion": 1,
     "source": "pre-prompt-estimate",
     "updatedAt": 1790397297933,
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "route": "fits",
     "shouldCompact": false,
-    "estimatedPromptTokens": 20770,
+    "estimatedPromptTokens": 1000,
     "contextTokenBudget": 200000,
     "promptBudgetBeforeReserve": 180000,
     "reserveTokens": 20000,
     "effectiveReserveTokens": 20000,
-    "remainingPromptBudgetTokens": 159230,
+    "remainingPromptBudgetTokens": 179000,
     "overflowTokens": 0,
     "toolResultReducibleChars": 0,
     "messageCount": 0,
     "unwindowedMessageCount": 0,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+    "sessionId": "00000000-0000-4000-8000-000000000003"
    },
    "effectiveResponseUsage": "off",
-   "modelProvider": "neboai",
-   "model": "nebo-1",
-   "activeModelProvider": "neboai",
-   "activeModel": "nebo-1-flash",
+   "modelProvider": "provider-a",
+   "model": "model-a",
+   "activeModelProvider": "provider-a",
+   "activeModel": "model-a",
    "modelOverrideSource": null,
    "agentRuntime": {
     "id": "openclaw",
@@ -1505,7 +1505,7 @@
    "runtimeMs": null
   },
   "seq": 22,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "agent_tool_update": {
   "type": "event",
@@ -1516,21 +1516,21 @@
    "data": {
     "phase": "update",
     "name": "exec",
-    "toolCallId": "call_9ec1cef66f2a4b8e85c5e9c1",
+    "toolCallId": "call_0001",
     "partialResult": {
      "content": [
       {
        "type": "text",
-       "text": "Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64\n"
+       "text": "Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64\n"
       }
      ],
      "details": {
       "status": "running",
       "sessionId": "wild-ember",
-      "pid": 28377,
+      "pid": 4242,
       "startedAt": 1790397333252,
-      "cwd": "/private/tmp/claude-501/-Users-almatuck-workspaces-nebo-nebo/f0b21ce3-ee60-431b-9a17-848864d5dc17/scratchpad/e2e/oc/.openclaw/workspace",
-      "tail": "Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64\n"
+      "cwd": "/home/user/.openclaw/workspace",
+      "tail": "Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64\n"
      }
     }
    },
@@ -1540,25 +1540,25 @@
    "ts": 1790397334454,
    "isHeartbeat": false,
    "updatedAt": 1790397331031,
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "createdActor": {
     "type": "human",
-    "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+    "id": "00000000-0000-4000-8000-000000000002",
     "identity": {
      "type": "profile",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+     "id": "00000000-0000-4000-8000-000000000002"
     },
-    "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+    "label": "00000000-0000-4000-8000-000000000001"
    },
    "owner": {
     "actor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     }
    },
    "participants": [],
@@ -1601,9 +1601,9 @@
    "systemSent": true,
    "abortedLastRun": false,
    "restartRecoveryStatus": null,
-   "inputTokens": 388,
+   "inputTokens": 40,
    "outputTokens": 1,
-   "totalTokens": 17320,
+   "totalTokens": 41,
    "totalTokensFresh": true,
    "goal": null,
    "contextTokens": 200000,
@@ -1611,27 +1611,27 @@
     "schemaVersion": 1,
     "source": "pre-prompt-estimate",
     "updatedAt": 1790397297933,
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "route": "fits",
     "shouldCompact": false,
-    "estimatedPromptTokens": 20770,
+    "estimatedPromptTokens": 1000,
     "contextTokenBudget": 200000,
     "promptBudgetBeforeReserve": 180000,
     "reserveTokens": 20000,
     "effectiveReserveTokens": 20000,
-    "remainingPromptBudgetTokens": 159230,
+    "remainingPromptBudgetTokens": 179000,
     "overflowTokens": 0,
     "toolResultReducibleChars": 0,
     "messageCount": 0,
     "unwindowedMessageCount": 0,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+    "sessionId": "00000000-0000-4000-8000-000000000003"
    },
    "effectiveResponseUsage": "off",
-   "modelProvider": "neboai",
-   "model": "nebo-1",
-   "activeModelProvider": "neboai",
-   "activeModel": "nebo-1-flash",
+   "modelProvider": "provider-a",
+   "model": "model-a",
+   "activeModelProvider": "provider-a",
+   "activeModel": "model-a",
    "modelOverrideSource": null,
    "agentRuntime": {
     "id": "openclaw",
@@ -1655,7 +1655,7 @@
    "runtimeMs": null
   },
   "seq": 24,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "agent_tool_result": {
   "type": "event",
@@ -1666,7 +1666,7 @@
    "data": {
     "phase": "result",
     "name": "exec",
-    "toolCallId": "call_9ec1cef66f2a4b8e85c5e9c1",
+    "toolCallId": "call_0001",
     "meta": "uname -a",
     "isError": false,
     "commandBearing": true,
@@ -1674,7 +1674,7 @@
      "content": [
       {
        "type": "text",
-       "text": "Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64"
+       "text": "Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64"
       }
      ],
      "details": {
@@ -1683,9 +1683,9 @@
       "exitSignal": null,
       "exitReason": "exit",
       "durationMs": 1204,
-      "aggregated": "Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64",
+      "aggregated": "Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64",
       "noOutputTimedOut": false,
-      "cwd": "/private/tmp/claude-501/-Users-almatuck-workspaces-nebo-nebo/f0b21ce3-ee60-431b-9a17-848864d5dc17/scratchpad/e2e/oc/.openclaw/workspace"
+      "cwd": "/home/user/.openclaw/workspace"
      }
     }
    },
@@ -1695,25 +1695,25 @@
    "ts": 1790397334465,
    "isHeartbeat": false,
    "updatedAt": 1790397331031,
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "createdActor": {
     "type": "human",
-    "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+    "id": "00000000-0000-4000-8000-000000000002",
     "identity": {
      "type": "profile",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+     "id": "00000000-0000-4000-8000-000000000002"
     },
-    "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+    "label": "00000000-0000-4000-8000-000000000001"
    },
    "owner": {
     "actor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     }
    },
    "participants": [],
@@ -1756,9 +1756,9 @@
    "systemSent": true,
    "abortedLastRun": false,
    "restartRecoveryStatus": null,
-   "inputTokens": 388,
+   "inputTokens": 40,
    "outputTokens": 1,
-   "totalTokens": 17320,
+   "totalTokens": 41,
    "totalTokensFresh": true,
    "goal": null,
    "contextTokens": 200000,
@@ -1766,27 +1766,27 @@
     "schemaVersion": 1,
     "source": "pre-prompt-estimate",
     "updatedAt": 1790397297933,
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "route": "fits",
     "shouldCompact": false,
-    "estimatedPromptTokens": 20770,
+    "estimatedPromptTokens": 1000,
     "contextTokenBudget": 200000,
     "promptBudgetBeforeReserve": 180000,
     "reserveTokens": 20000,
     "effectiveReserveTokens": 20000,
-    "remainingPromptBudgetTokens": 159230,
+    "remainingPromptBudgetTokens": 179000,
     "overflowTokens": 0,
     "toolResultReducibleChars": 0,
     "messageCount": 0,
     "unwindowedMessageCount": 0,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+    "sessionId": "00000000-0000-4000-8000-000000000003"
    },
    "effectiveResponseUsage": "off",
-   "modelProvider": "neboai",
-   "model": "nebo-1",
-   "activeModelProvider": "neboai",
-   "activeModel": "nebo-1-flash",
+   "modelProvider": "provider-a",
+   "model": "model-a",
+   "activeModelProvider": "provider-a",
+   "activeModel": "model-a",
    "modelOverrideSource": null,
    "agentRuntime": {
     "id": "openclaw",
@@ -1810,7 +1810,7 @@
    "runtimeMs": null
   },
   "seq": 27,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "agent_assistant": {
   "type": "event",
@@ -1821,7 +1821,7 @@
    "data": {
     "text": "The",
     "delta": "The",
-    "itemId": "eef3ec1b-e658-4664-b80c-64018283149b:2"
+    "itemId": "00000000-0000-4000-8000-000000000116:2"
    },
    "sessionKey": "agent:main:nebo-link-spike",
    "agentId": "main",
@@ -1830,7 +1830,7 @@
    "isHeartbeat": false
   },
   "seq": 32,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "session_message_user": {
   "type": "event",
@@ -1846,11 +1846,11 @@
     "idempotencyKey": "probe-approval-1790397330775:user",
     "__openclaw": {
      "senderIsOwner": true,
-     "senderId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
-     "senderName": "5a137883-49df-4063-b52e-00c1eea1f535",
+     "senderId": "00000000-0000-4000-8000-000000000002",
+     "senderName": "00000000-0000-4000-8000-000000000001",
      "senderIdentity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
      "transport": {
       "clients": [
@@ -1861,39 +1861,39 @@
        }
       ]
      },
-     "id": "91a8d0b2-3cd3-416c-99b1-be95ff3284fb",
+     "id": "00000000-0000-4000-8000-000000000109",
      "idempotencyKey": "probe-approval-1790397330775:user",
      "recordTimestampMs": 1790397330820,
      "transcriptPosition": {
-      "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+      "source": "transcript-1",
       "rawSeq": 6
      },
      "seq": 3,
-     "senderProfileAvatarUrl": "/api/users/ae2b7db3-1f30-472e-8082-e00f59cb6db8/avatar?v=1790394232206"
+     "senderProfileAvatarUrl": "/api/users/00000000-0000-4000-8000-000000000002/avatar?v=1790394232206"
     }
    },
-   "messageId": "91a8d0b2-3cd3-416c-99b1-be95ff3284fb",
+   "messageId": "00000000-0000-4000-8000-000000000109",
    "messageSeq": 3,
    "updatedAt": 1790397330821,
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "createdActor": {
     "type": "human",
-    "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+    "id": "00000000-0000-4000-8000-000000000002",
     "identity": {
      "type": "profile",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+     "id": "00000000-0000-4000-8000-000000000002"
     },
-    "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+    "label": "00000000-0000-4000-8000-000000000001"
    },
    "owner": {
     "actor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     }
    },
    "participants": [],
@@ -1937,9 +1937,9 @@
    "systemSent": true,
    "abortedLastRun": false,
    "restartRecoveryStatus": null,
-   "inputTokens": 388,
+   "inputTokens": 40,
    "outputTokens": 1,
-   "totalTokens": 17320,
+   "totalTokens": 41,
    "totalTokensFresh": true,
    "goal": null,
    "contextTokens": 200000,
@@ -1947,25 +1947,25 @@
     "schemaVersion": 1,
     "source": "pre-prompt-estimate",
     "updatedAt": 1790397297933,
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "route": "fits",
     "shouldCompact": false,
-    "estimatedPromptTokens": 20770,
+    "estimatedPromptTokens": 1000,
     "contextTokenBudget": 200000,
     "promptBudgetBeforeReserve": 180000,
     "reserveTokens": 20000,
     "effectiveReserveTokens": 20000,
-    "remainingPromptBudgetTokens": 159230,
+    "remainingPromptBudgetTokens": 179000,
     "overflowTokens": 0,
     "toolResultReducibleChars": 0,
     "messageCount": 0,
     "unwindowedMessageCount": 0,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+    "sessionId": "00000000-0000-4000-8000-000000000003"
    },
    "effectiveResponseUsage": "off",
-   "modelProvider": "neboai",
-   "model": "nebo-1",
+   "modelProvider": "provider-a",
+   "model": "model-a",
    "activeModelProvider": null,
    "activeModel": null,
    "modelOverrideSource": null,
@@ -1996,7 +1996,7 @@
    "sharingRole": "admin"
   },
   "seq": 4,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "session_message_assistant": {
   "type": "event",
@@ -2009,17 +2009,17 @@
     "content": [
      {
       "type": "text",
-      "text": "The output is:\n\n`Darwin Mac.lan 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64`"
+      "text": "The output is:\n\n`Darwin example.local 24.0.0 Darwin Kernel Version 24.0.0 arm64`"
      }
     ],
     "api": "openai-completions",
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "usage": {
-     "input": 654,
+     "input": 90,
      "output": 81,
-     "totalTokens": 17667,
-     "cacheRead": 16932,
+     "totalTokens": 171,
+     "cacheRead": 0,
      "cacheWrite": 0,
      "cost": {
       "input": 0,
@@ -2031,41 +2031,41 @@
     },
     "stopReason": "stop",
     "timestamp": 1790397334475,
-    "responseId": "chatcmpl-962f3c31-2ffd-4f9f-94d0-c6e1b0d41676",
-    "responseModel": "nebo-1-flash",
+    "responseId": "chatcmpl-00000000-0000-4000-8000-000000000113",
+    "responseModel": "model-a",
     "__openclaw": {
      "runId": "probe-approval-1790397330775",
-     "id": "d64607ca-3838-404f-8f2d-ca19b9f77e5b",
+     "id": "00000000-0000-4000-8000-000000000114",
      "recordTimestampMs": 1790397337058,
      "transcriptPosition": {
-      "source": "wdc-VVOupHpof8zXHY6iRb-1DOHDYJIHnpTuepiMrio",
+      "source": "transcript-1",
       "rawSeq": 10
      },
      "seq": 6
     }
    },
-   "messageId": "d64607ca-3838-404f-8f2d-ca19b9f77e5b",
+   "messageId": "00000000-0000-4000-8000-000000000114",
    "messageSeq": 6,
    "updatedAt": 1790397331031,
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "createdActor": {
     "type": "human",
-    "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+    "id": "00000000-0000-4000-8000-000000000002",
     "identity": {
      "type": "profile",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+     "id": "00000000-0000-4000-8000-000000000002"
     },
-    "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+    "label": "00000000-0000-4000-8000-000000000001"
    },
    "owner": {
     "actor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     }
    },
    "participants": [],
@@ -2109,9 +2109,9 @@
    "systemSent": true,
    "abortedLastRun": false,
    "restartRecoveryStatus": null,
-   "inputTokens": 388,
+   "inputTokens": 40,
    "outputTokens": 1,
-   "totalTokens": 17320,
+   "totalTokens": 41,
    "totalTokensFresh": true,
    "goal": null,
    "contextTokens": 200000,
@@ -2119,27 +2119,27 @@
     "schemaVersion": 1,
     "source": "pre-prompt-estimate",
     "updatedAt": 1790397297933,
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "route": "fits",
     "shouldCompact": false,
-    "estimatedPromptTokens": 20770,
+    "estimatedPromptTokens": 1000,
     "contextTokenBudget": 200000,
     "promptBudgetBeforeReserve": 180000,
     "reserveTokens": 20000,
     "effectiveReserveTokens": 20000,
-    "remainingPromptBudgetTokens": 159230,
+    "remainingPromptBudgetTokens": 179000,
     "overflowTokens": 0,
     "toolResultReducibleChars": 0,
     "messageCount": 0,
     "unwindowedMessageCount": 0,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+    "sessionId": "00000000-0000-4000-8000-000000000003"
    },
    "effectiveResponseUsage": "off",
-   "modelProvider": "neboai",
-   "model": "nebo-1",
-   "activeModelProvider": "neboai",
-   "activeModel": "nebo-1-flash",
+   "modelProvider": "provider-a",
+   "model": "model-a",
+   "activeModelProvider": "provider-a",
+   "activeModel": "model-a",
    "modelOverrideSource": null,
    "agentRuntime": {
     "id": "openclaw",
@@ -2167,7 +2167,7 @@
    "sharingRole": "admin"
   },
   "seq": 39,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "sessions_changed": {
   "type": "event",
@@ -2184,22 +2184,22 @@
     "createdVia": "operator",
     "createdActor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     },
     "owner": {
      "actor": {
       "type": "human",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+      "id": "00000000-0000-4000-8000-000000000002",
       "identity": {
        "type": "profile",
-       "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+       "id": "00000000-0000-4000-8000-000000000002"
       },
-      "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+      "label": "00000000-0000-4000-8000-000000000001"
      }
     },
     "createdAt": 1790397284971,
@@ -2215,7 +2215,7 @@
     "pinned": false,
     "unread": true,
     "lastInteractionAt": 1790397330858,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+    "sessionId": "00000000-0000-4000-8000-000000000003",
     "systemSent": true,
     "abortedLastRun": false,
     "thinkingLevels": [
@@ -2231,16 +2231,16 @@
     "effectiveFastMode": false,
     "effectiveFastModeSource": "default",
     "fastAutoOnSeconds": 60,
-    "inputTokens": 388,
+    "inputTokens": 40,
     "outputTokens": 1,
-    "totalTokens": 17320,
+    "totalTokens": 41,
     "totalTokensFresh": true,
     "status": "running",
     "startedAt": 1790397331027,
     "effectiveResponseUsage": "off",
     "effectiveQueueMode": "steer",
-    "modelProvider": "neboai",
-    "model": "nebo-1",
+    "modelProvider": "provider-a",
+    "model": "model-a",
     "modelOverrideSource": null,
     "runtimeSelectionLocked": false,
     "agentRuntime": {
@@ -2259,21 +2259,21 @@
      "schemaVersion": 1,
      "source": "pre-prompt-estimate",
      "updatedAt": 1790397297933,
-     "provider": "neboai",
-     "model": "nebo-1",
+     "provider": "provider-a",
+     "model": "model-a",
      "route": "fits",
      "shouldCompact": false,
-     "estimatedPromptTokens": 20770,
+     "estimatedPromptTokens": 1000,
      "contextTokenBudget": 200000,
      "promptBudgetBeforeReserve": 180000,
      "reserveTokens": 20000,
      "effectiveReserveTokens": 20000,
-     "remainingPromptBudgetTokens": 159230,
+     "remainingPromptBudgetTokens": 179000,
      "overflowTokens": 0,
      "toolResultReducibleChars": 0,
      "messageCount": 0,
      "unwindowedMessageCount": 0,
-     "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+     "sessionId": "00000000-0000-4000-8000-000000000003"
     },
     "snapshotAt": 1790397331086,
     "placement": {
@@ -2288,25 +2288,25 @@
     "sharingRole": "admin"
    },
    "updatedAt": 1790397331031,
-   "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49",
+   "sessionId": "00000000-0000-4000-8000-000000000003",
    "createdActor": {
     "type": "human",
-    "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+    "id": "00000000-0000-4000-8000-000000000002",
     "identity": {
      "type": "profile",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+     "id": "00000000-0000-4000-8000-000000000002"
     },
-    "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+    "label": "00000000-0000-4000-8000-000000000001"
    },
    "owner": {
     "actor": {
      "type": "human",
-     "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8",
+     "id": "00000000-0000-4000-8000-000000000002",
      "identity": {
       "type": "profile",
-      "id": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+      "id": "00000000-0000-4000-8000-000000000002"
      },
-     "label": "5a137883-49df-4063-b52e-00c1eea1f535"
+     "label": "00000000-0000-4000-8000-000000000001"
     }
    },
    "participantCount": 0,
@@ -2343,9 +2343,9 @@
    "systemSent": true,
    "abortedLastRun": false,
    "restartRecoveryStatus": null,
-   "inputTokens": 388,
+   "inputTokens": 40,
    "outputTokens": 1,
-   "totalTokens": 17320,
+   "totalTokens": 41,
    "totalTokensFresh": true,
    "goal": null,
    "contextTokens": 200000,
@@ -2353,25 +2353,25 @@
     "schemaVersion": 1,
     "source": "pre-prompt-estimate",
     "updatedAt": 1790397297933,
-    "provider": "neboai",
-    "model": "nebo-1",
+    "provider": "provider-a",
+    "model": "model-a",
     "route": "fits",
     "shouldCompact": false,
-    "estimatedPromptTokens": 20770,
+    "estimatedPromptTokens": 1000,
     "contextTokenBudget": 200000,
     "promptBudgetBeforeReserve": 180000,
     "reserveTokens": 20000,
     "effectiveReserveTokens": 20000,
-    "remainingPromptBudgetTokens": 159230,
+    "remainingPromptBudgetTokens": 179000,
     "overflowTokens": 0,
     "toolResultReducibleChars": 0,
     "messageCount": 0,
     "unwindowedMessageCount": 0,
-    "sessionId": "e9df2a71-cfbc-40d5-8dd9-45a5795c6e49"
+    "sessionId": "00000000-0000-4000-8000-000000000003"
    },
    "effectiveResponseUsage": "off",
-   "modelProvider": "neboai",
-   "model": "nebo-1",
+   "modelProvider": "provider-a",
+   "model": "model-a",
    "activeModelProvider": null,
    "activeModel": null,
    "modelOverrideSource": null,
@@ -2407,14 +2407,14 @@
    "sharingRole": "admin"
   },
   "seq": 16,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "exec_approval_requested": {
   "type": "event",
   "event": "exec.approval.requested",
   "payload": {
    "approvalKind": "exec",
-   "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+   "id": "00000000-0000-4000-8000-000000000004",
    "request": {
     "command": "uname -a",
     "systemRunBinding": null,
@@ -2454,7 +2454,7 @@
    "expiresAtMs": 1790397568868
   },
   "seq": 5,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "exec_approval_list_pending": {
   "type": "res",
@@ -2462,7 +2462,7 @@
   "ok": true,
   "payload": [
    {
-    "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+    "id": "00000000-0000-4000-8000-000000000004",
     "request": {
      "command": "uname -a",
      "systemRunBinding": null,
@@ -2511,7 +2511,7 @@
   "payload": {
    "applied": true,
    "approval": {
-    "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+    "id": "00000000-0000-4000-8000-000000000004",
     "status": "allowed",
     "presentation": {
      "kind": "exec",
@@ -2527,7 +2527,7 @@
       "deny"
      ]
     },
-    "urlPath": "/t/5a137883-49df-4063-b52e-00c1eea1f535/approve/1759b5f3-9141-4537-8c78-9afc7fa627c2",
+    "urlPath": "/t/00000000-0000-4000-8000-000000000001/approve/00000000-0000-4000-8000-000000000004",
     "createdAtMs": 1790397523868,
     "expiresAtMs": 1790397568868,
     "resolvedAtMs": 1790397523883,
@@ -2539,7 +2539,7 @@
     },
     "resolver": {
      "kind": "device",
-     "id": "ed9edbe2e969a582e1e14a56cc2d2bf65d0966c7e59e3d8e8586da0746c4c49e"
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
    }
   }
@@ -2548,7 +2548,7 @@
   "type": "event",
   "event": "exec.approval.resolved",
   "payload": {
-   "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+   "id": "00000000-0000-4000-8000-000000000004",
    "decision": "allow-once",
    "resolvedBy": "Nebo Link probe",
    "ts": 1790397523883,
@@ -2589,14 +2589,14 @@
    }
   },
   "seq": 6,
-  "recipientProfileId": "ae2b7db3-1f30-472e-8082-e00f59cb6db8"
+  "recipientProfileId": "00000000-0000-4000-8000-000000000002"
  },
  "exec_approval_request_result": {
   "type": "res",
   "id": "p2",
   "ok": true,
   "payload": {
-   "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+   "id": "00000000-0000-4000-8000-000000000004",
    "decision": "allow-once",
    "createdAtMs": 1790397523868,
    "expiresAtMs": 1790397568868

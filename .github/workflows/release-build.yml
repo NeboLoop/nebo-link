@@ -2,13 +2,13 @@
 #
 # Builds run on NeboAI's own machines, never on GitHub-hosted runners (the
 # same rule as Nebo's releases; scripts/check-release-runners.py enforces it):
-#   - macOS arm64 + amd64: the house Mac mini ([self-hosted, macOS, stadium-mac])
-#   - Linux arm64: the Mac mini's Lima VM ([self-hosted, Linux, ARM64, neboloop])
+#   - macOS arm64 + amd64: a self-hosted Mac ([self-hosted, macOS, stadium-mac])
+#   - Linux arm64: a self-hosted Linux runner ([self-hosted, Linux, ARM64, neboloop])
 #   - Linux amd64: a DigitalOcean droplet that exists only for this run
-#   - Windows amd64: the house Windows box ([self-hosted, Windows, X64, stadium-win])
+#   - Windows amd64: a self-hosted Windows runner ([self-hosted, Windows, X64, stadium-win])
 # Nothing runs on GitHub-hosted runners (the org's Actions budget is capped).
-# Key checks, checksums and uploads run on the Lima VM; the droplet lifecycle
-# runs on the VM's orchestration runners (neboloop-orch).
+# Key checks, checksums and uploads run on the Linux runner; the droplet lifecycle
+# runs on the orchestration runners (neboloop-orch).
 #
 # Windows is switched by the repo variable WINDOWS_BUILD_ENABLED (the same
 # switch Nebo's release uses). Unless it is "true", build-windows and
@@ -59,7 +59,7 @@ env:
 jobs:
   # ─── Release mode, version check, release key ────────────────────────
   prepare:
-    runs-on: [self-hosted, Linux, ARM64, neboloop] # the Mac mini's Lima VM; no build happens here
+    runs-on: [self-hosted, Linux, ARM64, neboloop] # a self-hosted Linux runner; no build happens here
     outputs:
       dry_run: ${{ steps.mode.outputs.dry_run }}
       release_key: ${{ steps.key.outputs.release_key }}
@@ -150,7 +150,7 @@ jobs:
             arch: arm64
           - target: x86_64-apple-darwin
             arch: amd64
-    runs-on: [self-hosted, macOS, stadium-mac] # the house Mac mini — see nebo CLAUDE.md "Release builds"
+    runs-on: [self-hosted, macOS, stadium-mac] # a self-hosted Mac
     environment: nebo-read
     env:
       RUSTC_WRAPPER: ""
@@ -206,7 +206,7 @@ jobs:
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           rm "$RUNNER_TEMP/cert.p12"
           # Apple's Developer ID intermediates. A hosted Mac ships them; the
-          # house Mac mini does not, and without them codesign cannot chain the
+          # self-hosted Mac does not, and without them codesign cannot chain the
           # leaf to Apple's root ("unable to build chain to self-signed root",
           # errSecInternalComponent — Nebo v0.14.0's Intel build).
           for ca in DeveloperIDG2CA DeveloperIDCA; do
@@ -260,7 +260,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [arm64, amd64]
-    runs-on: [self-hosted, macOS, stadium-mac] # the house Mac mini — see nebo CLAUDE.md "Release builds"
+    runs-on: [self-hosted, macOS, stadium-mac] # a self-hosted Mac
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -308,7 +308,7 @@ jobs:
           echo "Notarization accepted."
 
   # ─── Linux amd64 runner: a droplet that exists only for this run ───────
-  # Copied from Nebo's release: no house x86 machine, and Rosetta on the
+  # Copied from Nebo's release: no self-hosted x86 machine, and Rosetta on the
   # arm64 VM killed amd64 processes at random. This boots a droplet from the
   # golden snapshot, hands it a just-in-time org runner registration good for
   # ONE job, and linux-amd64-runner-down deletes it whatever happens.
@@ -318,7 +318,7 @@ jobs:
     outputs:
       droplet_id: ${{ steps.droplet.outputs.id }}
     steps:
-      # Install only. Up to four jobs share the VM's HOME, and `doctl auth
+      # Install only. Up to four jobs share the runner's HOME, and `doctl auth
       # init` in each rewrote one shared config file under the others. Every
       # doctl call takes the token from the environment and a config dir of
       # its own job.
@@ -359,7 +359,7 @@ jobs:
           sed -i "s|__JIT__|${{ steps.jit.outputs.config }}|" "$ud"
           # --ssh-keys: with no key DigitalOcean emails the owner a root
           # password for every build droplet. Any account key suppresses that.
-          # nyc3 capacity comes and goes per size; every candidate is the same
+          # Region capacity comes and goes per size; every candidate is the same
           # 16 GB / 320 GB-disk shape the snapshot needs. Any other error is fatal.
           id=""
           for size in s-8vcpu-16gb s-8vcpu-16gb-amd s-8vcpu-16gb-intel s-4vcpu-16gb-320gb-intel; do
@@ -392,7 +392,7 @@ jobs:
   # which run on servers as often as desktops (Debian 12, Ubuntu 22.04, RHEL 9,
   # Amazon Linux 2023 all ship glibc below Nebo's 2.39 floor). A static binary
   # runs on any 64-bit Linux, and its reach never moves with the build host's
-  # OS (the arm64 VM is Ubuntu 26.04, glibc 2.43). nebo-link needs no system
+  # OS (the arm64 runner is Ubuntu 26.04, glibc 2.43). nebo-link needs no system
   # library: TLS is rustls with bundled roots, and its only C (ring, zstd)
   # builds with musl-gcc.
   build-linux:
@@ -401,7 +401,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # arm64 builds natively on the house Mac mini's Lima VM (label
+          # arm64 builds natively on a self-hosted Linux runner (label
           # neboloop); amd64 on the droplet the job above just created.
           # Never a GitHub-hosted runner.
           - runner: [self-hosted, Linux, ARM64, neboloop]
@@ -414,7 +414,7 @@ jobs:
     environment: nebo-read
     env:
       RUSTC_WRAPPER: ""
-      # Persistent build cache beside the checkout. On the VM it survives
+      # Persistent build cache beside the checkout. On a persistent runner it survives
       # between runs; on the droplet it is simply the build dir.
       CARGO_TARGET_DIR: ${{ github.workspace }}/../nebo-link-target-${{ matrix.arch }}
     steps:
@@ -512,21 +512,21 @@ jobs:
           id=$(gh api "orgs/${{ github.repository_owner }}/actions/runners?name=do-link-amd64-${{ github.run_id }}" -q '.runners[0].id // empty')
           [ -n "$id" ] && gh api -X DELETE "orgs/${{ github.repository_owner }}/actions/runners/$id" || true
 
-  # ─── Windows build (house Windows box) ───────────────────────────────
+  # ─── Windows build (self-hosted Windows runner) ───────────────────────────────
   # Only when WINDOWS_BUILD_ENABLED is "true"; sign-windows follows it.
   build-windows:
     needs: prepare
     if: ${{ needs.prepare.outputs.windows == 'true' }}
-    runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box — see nebo CLAUDE.md "Release builds"
+    runs-on: [self-hosted, Windows, X64, stadium-win] # a self-hosted Windows runner
     env:
       RUSTC_WRAPPER: ""
-      # Beside the checkout, as on the other house runners, so the cache
+      # Beside the checkout, as on the other self-hosted runners, so the cache
       # survives checkout's wipe of the workspace.
       CARGO_TARGET_DIR: ${{ github.workspace }}\..\nebo-link-target-windows
     steps:
       - uses: actions/checkout@v4
 
-      # The house box's machine execution policy is Restricted and the
+      # The Windows runner's machine execution policy is Restricted and the
       # runner service runs as NETWORK SERVICE, which cannot change that but
       # can set its own (CurrentUser outranks LocalMachine); Git's bin is not
       # on that account's PATH either. This cmd step, which neither affects,
@@ -572,7 +572,7 @@ jobs:
   # ─── Sign the Windows binary (Azure Trusted Signing) ─────────────────
   sign-windows:
     needs: build-windows
-    runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box — see nebo CLAUDE.md "Release builds"
+    runs-on: [self-hosted, Windows, X64, stadium-win] # a self-hosted Windows runner
     steps:
       # Same prep as build-windows (see the comment there).
       - name: Runner prep (no admin needed)
@@ -610,7 +610,7 @@ jobs:
 
       - name: .NET SDK for the signing tool (no admin needed)
         # azure/trusted-signing-action installs its `sign` CLI as a .NET tool,
-        # which needs an SDK; the house Windows box has only the runtime
+        # which needs an SDK; a self-hosted Windows runner has only the runtime
         # ("No .NET SDKs were found", Nebo v0.15.0). A portable SDK beside the
         # runner, like pwsh7 above, installed once and reused.
         shell: cmd
@@ -666,7 +666,7 @@ jobs:
         && needs.build-linux.result == 'success'
         && (needs.prepare.outputs.windows == 'true' && needs.sign-windows.result == 'success'
             || needs.prepare.outputs.windows != 'true' && needs.sign-windows.result == 'skipped') }}
-    runs-on: [self-hosted, Linux, ARM64, neboloop] # the Mac mini's Lima VM; no build happens here (OpenSSL 3 for ed25519)
+    runs-on: [self-hosted, Linux, ARM64, neboloop] # a self-hosted Linux runner; no build happens here (OpenSSL 3 for ed25519)
     permissions:
       contents: write
     env:
@@ -744,7 +744,7 @@ jobs:
           path: artifacts/
           retention-days: 7
 
-      # The VM has no AWS CLI of its own: install it once into the runner
+      # The runner has no AWS CLI of its own: install it once into the runner
       # user's home (kept between runs), arm64.
       - name: AWS CLI
         if: ${{ env.DRY_RUN != 'true' }}

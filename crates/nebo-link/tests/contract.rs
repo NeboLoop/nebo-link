@@ -326,7 +326,7 @@ fn capabilities(version: &str) -> Value {
 
 fn session(id: &str, messages: u64) -> Value {
     json!({
-        "id": id, "source": "api_server", "model": "nebo-1", "title": if messages > 0 { "First chat" } else { "" },
+        "id": id, "source": "api_server", "model": "model-a", "title": if messages > 0 { "First chat" } else { "" },
         "started_at": 1790000000.5, "message_count": messages, "last_active": 1790000010.0,
         "preview": if messages > 0 { "Reply with exactly: pong" } else { "" }, "pinned": false, "archived": false, "hidden": false,
     })
@@ -640,7 +640,7 @@ async fn the_phone_flow_against_hermes_0_19_0() {
     assert_eq!(refused["error"], "The model is chosen in Hermes.");
     assert_eq!(
         get(link, "/api/v1/chats/api_new_1").await["model"],
-        "nebo-1"
+        "model-a"
     );
     assert_eq!(
         get(link, "/api/v1/models").await["models"]["hermes"][0]["id"],
@@ -1227,12 +1227,12 @@ async fn serve_gateway() -> FakeGateway {
                     "agents.list" => reply(json!({
                         "defaultId": "main", "mainKey": "main", "scope": "per-sender",
                         "agents": [
-                            { "id": "main", "identity": { "name": "Claw" }, "model": { "primary": "neboai/nebo-1" } },
-                            { "id": "writer", "name": "Writer", "model": { "primary": "neboai/nebo-1" } }
+                            { "id": "main", "identity": { "name": "Claw" }, "model": { "primary": "provider-a/model-a" } },
+                            { "id": "writer", "name": "Writer", "model": { "primary": "provider-a/model-a" } }
                         ]
                     })),
                     "sessions.list" => reply(json!({
-                        "sessions": [{ "key": SESSION_KEY, "kind": "direct", "derivedTitle": "Reply with exactly the word: pong", "lastMessagePreview": "pong", "agentId": "main", "updatedAt": 1790000010000.0, "model": "nebo-1" }],
+                        "sessions": [{ "key": SESSION_KEY, "kind": "direct", "derivedTitle": "Reply with exactly the word: pong", "lastMessagePreview": "pong", "agentId": "main", "updatedAt": 1790000010000.0, "model": "model-a" }],
                         "hasMore": false
                     })),
                     "chat.history" => reply(json!({
@@ -1284,7 +1284,7 @@ async fn serve_gateway() -> FakeGateway {
                             }
                             2 => {
                                 events.push(oc_event("exec.approval.requested", json!({
-                                    "approvalKind": "exec", "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2",
+                                    "approvalKind": "exec", "id": "00000000-0000-4000-8000-000000000004",
                                     "request": { "command": "uname -a", "allowedDecisions": ["allow-once", "allow-always", "deny"], "agentId": "main", "sessionKey": session },
                                     "createdAtMs": 1790397523868u64, "expiresAtMs": 1790397568868u64
                                 })));
@@ -1401,7 +1401,10 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     let (_, created) = call(link, "POST", "/api/v1/agents/assistant/chats", "{}").await;
     let new_key = created["chat"]["id"].as_str().unwrap().to_owned();
     assert!(new_key.starts_with("agent:main:nebo-"), "{new_key}");
-    assert_eq!(get(link, "/api/v1/chats/x").await["model"], "neboai/nebo-1");
+    assert_eq!(
+        get(link, "/api/v1/chats/x").await["model"],
+        "provider-a/model-a"
+    );
 
     // A turn on the spike's session: tool events, deltas, usage summed from
     // the run's assistant rows (the closing one after the final event),
@@ -1472,7 +1475,7 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     let ask = phone.until("ask_request").await.pop().unwrap();
     assert_eq!(
         ask["data"]["request_id"],
-        "1759b5f3-9141-4537-8c78-9afc7fa627c2"
+        "00000000-0000-4000-8000-000000000004"
     );
     assert_eq!(
         ask["data"]["widgets"][0]["options"],
@@ -1482,14 +1485,14 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     let items = eventually(&inbox, 1).await;
     assert_eq!(
         items[0]["id"],
-        "approval:1759b5f3-9141-4537-8c78-9afc7fa627c2"
+        "approval:00000000-0000-4000-8000-000000000004"
     );
     assert_eq!(items[0]["title"], "Claw asks to run uname -a");
     assert_eq!(items[0]["chatId"], "agent:main:nebo-approval");
     phone
         .send(
             "ask_response",
-            json!({ "request_id": "1759b5f3-9141-4537-8c78-9afc7fa627c2", "value": "Allow once" }),
+            json!({ "request_id": "00000000-0000-4000-8000-000000000004", "value": "Allow once" }),
         )
         .await;
     let events = phone.until("chat_complete").await;
@@ -1497,7 +1500,7 @@ async fn the_phone_flow_against_an_openclaw_gateway() {
     let resolve = &gateway.seen("approval.resolve")[0].params;
     assert_eq!(
         resolve,
-        &json!({ "id": "1759b5f3-9141-4537-8c78-9afc7fa627c2", "kind": "exec", "decision": "allow-once" })
+        &json!({ "id": "00000000-0000-4000-8000-000000000004", "kind": "exec", "decision": "allow-once" })
     );
     assert!(
         get(link, "/api/v1/notifications").await["notifications"]

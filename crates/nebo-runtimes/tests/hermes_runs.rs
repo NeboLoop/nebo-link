@@ -169,13 +169,13 @@ fn frame(seq: u64, json: &str) -> String {
 
 const CAPABILITIES: &str = r#"{"object": "hermes.api_server.capabilities", "platform": "hermes-agent", "model": "hermes-agent", "auth": {"type": "bearer", "required": true}, "runtime": {"mode": "server_agent", "tool_execution": "server", "split_runtime": false, "description": "..."}, "features": {"chat_completions": true, "chat_completions_streaming": true, "responses_api": true, "responses_streaming": true, "run_submission": true, "runs_idempotency": {"supported": true, "durable": true, "retention_seconds": 86400}, "run_status": true, "run_events_sse": true, "run_stop": true, "run_steer": true, "run_approval_response": true, "tool_progress_events": true, "approval_events": true, "session_resources": true, "model_options": true, "session_chat": true, "session_chat_streaming": true, "session_fork": true, "session_model_lock": true, "reasoning_streaming": true, "admin_config_rw": false, "jobs_admin": false, "memory_write_api": false, "skills_api": true, "audio_api": false, "realtime_voice": false, "session_continuity_header": "X-Hermes-Session-Id", "session_key_header": "X-Hermes-Session-Key", "cors": false}, "endpoints": {"runs": {"method": "POST", "path": "/v1/runs"}, "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"}}}"#;
 
-const SESSION: &str = r#"{"id": "api_1790400000_ab12cd34", "source": "api_server", "user_id": null, "model": "nebo-1", "title": "First chat", "started_at": 1790400000.5, "ended_at": null, "end_reason": null, "message_count": 2, "tool_call_count": 0, "input_tokens": 120, "output_tokens": 8, "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0, "estimated_cost_usd": 0.0, "actual_cost_usd": null, "api_call_count": 1, "parent_session_id": null, "last_active": 1790400010.0, "preview": "Reply with exactly: pong", "pinned": false, "archived": false, "hidden": false, "has_system_prompt": false, "has_model_config": false}"#;
+const SESSION: &str = r#"{"id": "api_1790400000_ab12cd34", "source": "api_server", "user_id": null, "model": "model-a", "title": "First chat", "started_at": 1790400000.5, "ended_at": null, "end_reason": null, "message_count": 2, "tool_call_count": 0, "input_tokens": 120, "output_tokens": 8, "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0, "estimated_cost_usd": 0.0, "actual_cost_usd": null, "api_call_count": 1, "parent_session_id": null, "last_active": 1790400010.0, "preview": "Reply with exactly: pong", "pinned": false, "archived": false, "hidden": false, "has_system_prompt": false, "has_model_config": false}"#;
 
 const MESSAGES: &str = r#"{"object": "list", "session_id": "api_1790400000_ab12cd34_c2", "data": [{"id": 11, "session_id": "api_1790400000_ab12cd34_c2", "role": "user", "content": "Reply with exactly: pong", "tool_call_id": null, "tool_calls": null, "tool_name": null, "timestamp": 1790400001.0, "token_count": null, "finish_reason": null, "reasoning": null, "reasoning_content": null, "display_kind": null}, {"id": 12, "session_id": "api_1790400000_ab12cd34_c2", "role": "assistant", "content": [{"type": "text", "text": "pong"}], "tool_call_id": null, "tool_calls": null, "tool_name": null, "timestamp": 1790400003.0, "token_count": 1, "finish_reason": "stop", "reasoning": null, "reasoning_content": null, "display_kind": null}], "pagination": {"limit": 500, "offset": 0, "order": "latest", "returned": 2}}"#;
 
 const RUN_STATUS_WAITING: &str = r#"{"object": "hermes.run", "run_id": "run_9f1", "status": "waiting_for_approval", "updated_at": 1790400012.0, "created_at": 1790400010.0, "session_id": "api_1790400000_ab12cd34_c2", "model": "hermes-agent", "last_event": "approval.request", "approval": {"command": "rm -rf ./scratch", "pattern_key": "rm -rf", "pattern_keys": ["rm -rf"], "description": "Recursive delete", "allow_permanent": true, "allow_session": true, "request_id": "8c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f", "event": "approval.request", "run_id": "run_9f1", "timestamp": 1790400012.0, "choices": ["once", "session", "always", "deny"]}}"#;
 
-const RUN_STATUS_DONE: &str = r#"{"object": "hermes.run", "run_id": "run_9f1", "status": "completed", "updated_at": 1790400020.0, "created_at": 1790400010.0, "session_id": "api_1790400000_ab12cd34_c2", "model": "hermes-agent", "last_event": "run.completed", "completed": true, "partial": false, "interrupted": false, "output": "pong", "usage": {"input_tokens": 1520, "output_tokens": 4, "total_tokens": 1524, "cache_read_tokens": 0, "cache_write_tokens": 0}, "runtime": {"provider": "neboai", "model": "nebo-1", "route_source": "global"}}"#;
+const RUN_STATUS_DONE: &str = r#"{"object": "hermes.run", "run_id": "run_9f1", "status": "completed", "updated_at": 1790400020.0, "created_at": 1790400010.0, "session_id": "api_1790400000_ab12cd34_c2", "model": "hermes-agent", "last_event": "run.completed", "completed": true, "partial": false, "interrupted": false, "output": "pong", "usage": {"input_tokens": 1520, "output_tokens": 4, "total_tokens": 1524, "cache_read_tokens": 0, "cache_write_tokens": 0}, "runtime": {"provider": "provider-a", "model": "model-a", "route_source": "global"}}"#;
 
 // -- Tests ------------------------------------------------------------------
 
@@ -383,7 +383,7 @@ async fn every_event_kind_is_typed() {
         frame(8, r#"{"event": "subagent.complete", "run_id": "run_9f1", "timestamp": 1790400015.0, "status": "completed", "summary": "done", "duration_seconds": 0.5, "seq": 8}"#),
         frame(9, r#"{"event": "message.delta", "run_id": "run_9f1", "timestamp": 1790400015.5, "delta": "po", "seq": 9}"#),
         frame(10, r#"{"event": "message.delta", "run_id": "run_9f1", "timestamp": 1790400015.6, "delta": "ng", "seq": 10}"#),
-        frame(11, r#"{"event": "run.completed", "run_id": "run_9f1", "timestamp": 1790400016.0, "completed": true, "partial": false, "interrupted": false, "output": "pong", "usage": {"input_tokens": 1520, "output_tokens": 4, "total_tokens": 1524, "cache_read_tokens": 0, "cache_write_tokens": 0}, "runtime": {"provider": "neboai", "model": "nebo-1", "route_source": "global"}, "seq": 11}"#),
+        frame(11, r#"{"event": "run.completed", "run_id": "run_9f1", "timestamp": 1790400016.0, "completed": true, "partial": false, "interrupted": false, "output": "pong", "usage": {"input_tokens": 1520, "output_tokens": 4, "total_tokens": 1524, "cache_read_tokens": 0, "cache_write_tokens": 0}, "runtime": {"provider": "provider-a", "model": "model-a", "route_source": "global"}, "seq": 11}"#),
         ": stream closed\n\n".to_owned(),
     ];
     let (addr, seen) = serve(handler(move |req| {
@@ -471,7 +471,7 @@ async fn every_event_kind_is_typed() {
     assert!(outcome.completed && !outcome.partial && !outcome.interrupted);
     let usage = outcome.usage.unwrap();
     assert_eq!((usage.input_tokens, usage.output_tokens, usage.total_tokens), (1520, 4, 1524));
-    assert_eq!(outcome.runtime.as_ref().unwrap().model, "nebo-1");
+    assert_eq!(outcome.runtime.as_ref().unwrap().model, "model-a");
 }
 
 #[tokio::test]
@@ -524,7 +524,7 @@ async fn a_cut_stream_resumes_from_the_last_event_id() {
         // The server keeps 1000 events; here it pretends 2 fell off.
         "data: {\"event\": \"replay.truncated\", \"run_id\": \"run_9f1\", \"timestamp\": 1.5, \"oldest_retained_seq\": 3, \"requested_seq\": 1}\n\n".to_owned(),
         frame(3, r#"{"event": "message.delta", "run_id": "run_9f1", "timestamp": 1.2, "delta": "g", "seq": 3}"#),
-        frame(4, r#"{"event": "run.completed", "run_id": "run_9f1", "timestamp": 2.0, "completed": true, "partial": false, "interrupted": false, "output": "pong", "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "cache_read_tokens": 0, "cache_write_tokens": 0}, "runtime": {"provider": "neboai", "model": "nebo-1", "route_source": "global"}, "seq": 4}"#),
+        frame(4, r#"{"event": "run.completed", "run_id": "run_9f1", "timestamp": 2.0, "completed": true, "partial": false, "interrupted": false, "output": "pong", "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "cache_read_tokens": 0, "cache_write_tokens": 0}, "runtime": {"provider": "provider-a", "model": "model-a", "route_source": "global"}, "seq": 4}"#),
         ": stream closed\n\n".to_owned(),
     ];
     let (addr, seen) = serve(handler(move |req| match req.header("last-event-id") {
@@ -620,7 +620,7 @@ async fn approval_steer_and_stop() {
     assert_eq!(status.status, RunState::Completed);
     assert_eq!(status.output.as_deref(), Some("pong"));
     assert_eq!(status.usage.unwrap().total_tokens, 1524);
-    assert_eq!(status.runtime.unwrap().provider, "neboai");
+    assert_eq!(status.runtime.unwrap().provider, "provider-a");
     assert_eq!(seen.lock().unwrap().len(), 4);
 }
 
@@ -863,7 +863,7 @@ async fn health_and_one_session() {
     assert_eq!(health.version, "0.19.0");
     assert_eq!(health.platform, "hermes-agent");
     let session = client.session("api_1790400000_ab12cd34").await.unwrap();
-    assert_eq!(session.model.as_deref(), Some("nebo-1"));
+    assert_eq!(session.model.as_deref(), Some("model-a"));
     assert_eq!("once".parse::<Choice>(), Ok(Choice::Once));
     assert_eq!("approve".parse::<Choice>(), Err(()));
 }
