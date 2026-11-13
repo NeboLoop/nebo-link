@@ -37,12 +37,34 @@ pub struct Janus {
 
 impl Janus {
     fn request(&self, method: reqwest::Method, path_and_query: &str) -> reqwest::RequestBuilder {
-        self.client
+        let token = self.token.borrow().clone();
+        let req = self
+            .client
             .request(method, format!("{}{}", self.url, path_and_query))
-            .bearer_auth(self.token.borrow().as_str())
+            .bearer_auth(&token)
             .header("X-Bot-ID", &self.bot_id)
-            .header("X-Purpose", PURPOSE)
+            .header("X-Purpose", PURPOSE);
+        match account(&token) {
+            Some(account) => req.header(ACCOUNT_HEADER, account),
+            None => req,
+        }
     }
+}
+
+/// The header Janus's balancer hashes on to send one account's requests to
+/// one Janus copy (account-sticky routing). A routing hint only: Janus
+/// charges the account the token names, whatever this header says.
+const ACCOUNT_HEADER: &str = "X-Nebo-Account";
+
+/// The account a bot token spends from: its `sub` claim. The signature is
+/// not checked here (Janus checks it); this only reads which account to name.
+fn account(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let sub = claims.get("sub")?.as_str()?.trim();
+    (!sub.is_empty() && sub.bytes().all(|b| b.is_ascii_graphic())).then(|| sub.to_string())
 }
 
 pub fn client() -> reqwest::Client {
@@ -170,4 +192,35 @@ pub async fn models(janus: &Janus) -> Result<(Vec<nebo_runtimes::Model>, String)
 
 fn error(status: StatusCode, message: &str) -> Response<Body> {
     json(status, &serde_json::json!({ "error": { "message": message } }))
+}
+
+#[cfg(test)]
+mod account_tests {
+    use base64::Engine;
+
+    fn token(claims: &str) -> String {
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!("{}.{}.sig", enc.encode(r#"{"alg":"HS256"}"#), enc.encode(claims))
+    }
+
+    #[test]
+    fn a_request_names_the_account_its_token_spends_from() {
+        let (_tx, rx) = tokio::sync::watch::channel(token(r#"{"sub":"acct-1","botId":"bot-1"}"#));
+        let janus = super::Janus {
+            url: "http://127.0.0.1:9".into(),
+            bot_id: "bot-1".into(),
+            token: rx,
+            key: "k".into(),
+            client: super::client(),
+        };
+        let req = janus.request(reqwest::Method::GET, "/v1/models").build().unwrap();
+        assert_eq!(req.headers().get("x-nebo-account").and_then(|v| v.to_str().ok()), Some("acct-1"));
+    }
+
+    #[test]
+    fn no_account_header_without_a_token_that_names_one() {
+        assert_eq!(super::account(""), None);
+        assert_eq!(super::account("opaque"), None);
+        assert_eq!(super::account(&token(r#"{"botId":"bot-1"}"#)), None);
+    }
 }
