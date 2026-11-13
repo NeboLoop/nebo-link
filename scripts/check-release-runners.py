@@ -15,7 +15,9 @@ import re
 import sys
 import yaml
 
-WF = ".github/workflows/release.yml"
+WF = ".github/workflows/release-build.yml"
+CALLER = ".github/workflows/release.yml"
+PINNED = "NeboLoop/nebo-link/.github/workflows/release-build.yml@main"
 MAC_JOBS = ("build-macos", "notarize-macos")
 WINDOWS_JOBS = ("build-windows", "sign-windows")
 
@@ -30,6 +32,13 @@ def main():
     with open(WF) as f:
         jobs = yaml.safe_load(f)["jobs"]
     errors = []
+    # The release runners serve only release-build.yml at refs/heads/main, so
+    # release.yml must call it pinned at main and run nothing itself.
+    with open(CALLER) as f:
+        caller = yaml.safe_load(f)["jobs"]
+    for name, job in caller.items():
+        if job.get("uses") != PINNED:
+            errors.append(f"release.yml {name}: must only call {PINNED} (got uses={job.get('uses')!r}, runs-on={job.get('runs-on')!r})")
     for name in MAC_JOBS:
         runs_on = labels(jobs[name].get("runs-on"))
         if "stadium-mac" not in runs_on:

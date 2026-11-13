@@ -1,15 +1,17 @@
 # Test CI for pull requests and main: build, test and lint on Linux and macOS,
-# and a compile check on Windows. This is not the release build (release.yml).
+# and a compile check on Windows. This is not the release build (release-build.yml).
 #
 # Every job runs on NeboAI's own machines, never on GitHub-hosted runners (the
 # org's Actions budget is capped; no-hosted-runners.yml enforces it):
 #   - Linux tests: a DigitalOcean x86 droplet that exists only for this run
-#   - macOS tests: the house Mac mini ([self-hosted, macOS, stadium-mac])
-#   - Windows: the house Windows box ([self-hosted, Windows, X64, stadium-win])
+#   - macOS tests: the house Mac mini ([self-hosted, macOS, stadium-mac]), main only
+#   - Windows: the house Windows box ([self-hosted, Windows, X64, stadium-win]), main only
 #   - SDKs and the OAL proof: the Mac mini's Lima VM ([self-hosted, Linux, ARM64, neboloop])
 #   - release-runners: the VM's orchestration runners (neboloop-orch)
 # A pull request from a fork runs nothing here: fork PRs get no secrets and
-# never run on our machines (the jobs below check the head repo).
+# never run on our machines (the jobs below check the head repo). The Mac and
+# Windows boxes also sign releases, so no pull request runs on them, not even
+# one from this repository: macOS and Windows run on pushes to main.
 name: CI
 
 on:
@@ -159,7 +161,7 @@ jobs:
 
   macos:
     name: macos
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'push' }} # never a pull request: this box signs releases
     runs-on: [self-hosted, macOS, stadium-mac] # the house Mac mini
     steps:
       - uses: actions/checkout@v4
@@ -176,19 +178,19 @@ jobs:
   # service under its windowless console host.
   windows:
     name: windows (cargo check, Windows tests)
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name == 'push' }} # never a pull request: this box signs releases
     runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box
     env:
       RUSTC_WRAPPER: ""
       # Beside the checkout, so the build survives checkout's wipe of the
-      # workspace on this persistent box (release.yml does the same).
+      # workspace on this persistent box (release-build.yml does the same).
       CARGO_TARGET_DIR: ${{ github.workspace }}\..\nebo-link-ci-target-windows
     steps:
       - uses: actions/checkout@v4
 
       # The house box's runner service (NETWORK SERVICE) has a Restricted
       # execution policy and no Git bash or PowerShell 7 on its PATH; the
-      # same prep as release.yml's build-windows (see that step's comment).
+      # same prep as release-build.yml's build-windows (see that step's comment).
       - name: Runner prep (no admin needed)
         shell: cmd
         run: |
