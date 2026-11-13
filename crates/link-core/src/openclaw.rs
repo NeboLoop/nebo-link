@@ -860,7 +860,7 @@ mod tests {
     fn roster_names_are_human_and_never_the_model() {
         let row = |value: Value| roster_entry(serde_json::from_value(value).unwrap(), "main");
 
-        let main = row(json!({ "id": "main", "model": { "primary": "neboai/nebo-1" } }));
+        let main = row(json!({ "id": "main", "model": { "primary": "provider-a/model-a" } }));
         assert!(main.is_default);
         assert_eq!(main.name, "Assistant");
         assert_eq!(main.description, "");
@@ -871,19 +871,19 @@ mod tests {
         let named = row(json!({
             "id": "main", "name": "main",
             "identity": { "name": "Claw", "theme": "space lobster" },
-            "model": { "primary": "neboai/nebo-1" }
+            "model": { "primary": "provider-a/model-a" }
         }));
         assert_eq!(named.name, "Claw");
         assert_eq!(named.description, "space lobster");
 
         let writer = row(
-            json!({ "id": "writer", "name": "Writer", "model": { "primary": "neboai/nebo-1" } }),
+            json!({ "id": "writer", "name": "Writer", "model": { "primary": "provider-a/model-a" } }),
         );
         assert!(!writer.is_default);
         assert_eq!(writer.name, "Writer");
         assert_eq!(writer.description, "");
 
-        let ops = row(json!({ "id": "ops", "model": { "primary": "neboai/nebo-1" } }));
+        let ops = row(json!({ "id": "ops", "model": { "primary": "provider-a/model-a" } }));
         assert_eq!(ops.name, "ops");
         assert_eq!(ops.description, "");
     }

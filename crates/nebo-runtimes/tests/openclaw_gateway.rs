@@ -1,9 +1,9 @@
 //! The OpenClaw gateway client against recorded frames, and (ignored) against
 //! a live gateway.
 //!
-//! `fixtures/openclaw-gateway-frames.json` holds frames recorded from an
-//! OpenClaw 2026.9.6 gateway (protocol 4) on 2026-09-25, trimmed of the
-//! session snapshots the gateway spreads into events. The fake gateway here
+//! `fixtures/openclaw-gateway-frames.json` holds synthetic frames in the
+//! shape an OpenClaw 2026.9.6 gateway (protocol 4) sends; every id, path,
+//! model and count in it is made up. The fake gateway here
 //! replays them and admits the client the way the real one does: it checks
 //! the proxy headers and verifies the Ed25519 device proof over the v3
 //! payload (`packages/gateway-client/src/device-auth.ts:44-64`).
@@ -29,7 +29,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
 const FRAMES: &str = include_str!("fixtures/openclaw-gateway-frames.json");
-const IDENTITY: &str = "5a137883-49df-4063-b52e-00c1eea1f535";
+const IDENTITY: &str = "00000000-0000-4000-8000-000000000001";
 const ORIGIN: &str = "https://neboai.com";
 const FORWARDED_FOR: &str = "203.0.113.10";
 const SPIKE_SESSION: &str = "agent:main:nebo-link-spike";
@@ -420,7 +420,7 @@ async fn agents_and_sessions_are_typed_from_recorded_frames() {
             .model
             .as_ref()
             .and_then(|m| m.primary.as_deref()),
-        Some("neboai/nebo-1")
+        Some("provider-a/model-a")
     );
     assert_eq!(seen.recv().await.unwrap().params, json!({}));
 
@@ -547,7 +547,7 @@ async fn chat_send_streams_the_turn_and_steers_while_a_run_is_active() {
     else {
         panic!("tool start, got {:?}", tool_start.stream)
     };
-    assert_eq!(tool_call_id, "call_9ec1cef66f2a4b8e85c5e9c1");
+    assert_eq!(tool_call_id, "call_0001");
     assert_eq!(name, "exec");
     assert_eq!(args["command"], "uname -a");
     assert!(parent_tool_call_id.is_none());
@@ -578,7 +578,7 @@ async fn chat_send_streams_the_turn_and_steers_while_a_run_is_active() {
     else {
         panic!("tool result, got {:?}", result.stream)
     };
-    assert_eq!(tool_call_id, "call_9ec1cef66f2a4b8e85c5e9c1");
+    assert_eq!(tool_call_id, "call_0001");
     assert!(!is_error);
     assert_eq!(meta.as_deref(), Some("uname -a"));
     assert_eq!(result["details"]["exitCode"], 0);
@@ -741,7 +741,7 @@ async fn approvals_round_trip() {
         handler(|method, params| match method {
             "exec.approval.list" => (Ok(payload("exec_approval_list_pending")), vec![]),
             "approval.resolve" => {
-                assert_eq!(params["id"], "1759b5f3-9141-4537-8c78-9afc7fa627c2");
+                assert_eq!(params["id"], "00000000-0000-4000-8000-000000000004");
                 assert_eq!(params["kind"], "exec");
                 assert_eq!(params["decision"], "allow-once");
                 (
@@ -762,7 +762,7 @@ async fn approvals_round_trip() {
         panic!("requested")
     };
     assert_eq!(requested.kind(), ApprovalKind::Exec);
-    assert_eq!(requested.id, "1759b5f3-9141-4537-8c78-9afc7fa627c2");
+    assert_eq!(requested.id, "00000000-0000-4000-8000-000000000004");
     assert_eq!(requested.session_key(), Some(SPIKE_SESSION));
     assert_eq!(requested.agent_id(), Some("main"));
     assert_eq!(requested.expires_at_ms - requested.created_at_ms, 45_000);
@@ -819,7 +819,7 @@ async fn sessions_changed_and_unknown_events_are_delivered() {
     let row = changed.session.expect("a keyed change carries the row");
     assert_eq!(row.key, SPIKE_SESSION);
     assert_eq!(row.kind, "direct");
-    assert_eq!(row.model.as_deref(), Some("nebo-1"));
+    assert_eq!(row.model.as_deref(), Some("model-a"));
     assert_eq!(row.rest["hasActiveRun"], true);
 
     fake.push

@@ -33,7 +33,7 @@ Each agent is its own employee in the NeboAI app (**Hire from another app**), na
 | Command | What it does |
 |---|---|
 | `nebo-link` or `nebo-link status` | Shows what is linked, the agents it hosts (with their ids), and whether it is online. |
-| `nebo-link add <agent> [--dir <folder>] [--label <name>]` | Adds an agent to this computer's bot: `openclaw`, `hermes`, `claude-code`, `codex`, `gemini`, `opencode`, or any ACP agent with `--acp-command`. |
+| `nebo-link add <agent> [--dir <folder>] [--label <name>]` | Adds an agent to this computer's Nebo: `openclaw`, `hermes`, `claude-code`, `codex`, `gemini`, `opencode`, or any ACP agent with `--acp-command`. |
 | `nebo-link remove <agent id>` | Removes an agent from the bot. OpenClaw and Hermes get their config back. |
 | `nebo-link models on\|off [--bot <id>]` | Points your agent's models at NeboAI (no API keys to paste), or restores the provider it had. |
 | `nebo-link logs [--bot <id>] [--lines N]` | Prints the service's recent log. |

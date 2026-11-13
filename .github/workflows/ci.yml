@@ -4,10 +4,10 @@
 # Every job runs on NeboAI's own machines, never on GitHub-hosted runners (the
 # org's Actions budget is capped; no-hosted-runners.yml enforces it):
 #   - Linux tests: a DigitalOcean x86 droplet that exists only for this run
-#   - macOS tests: the house Mac mini ([self-hosted, macOS, stadium-mac]), main only
-#   - Windows: the house Windows box ([self-hosted, Windows, X64, stadium-win]), main only
-#   - SDKs and the OAL proof: the Mac mini's Lima VM ([self-hosted, Linux, ARM64, neboloop])
-#   - release-runners: the VM's orchestration runners (neboloop-orch)
+#   - macOS tests: a self-hosted Mac ([self-hosted, macOS, stadium-mac]), main only
+#   - Windows: a self-hosted Windows runner ([self-hosted, Windows, X64, stadium-win]), main only
+#   - SDKs and the OAL proof: a self-hosted Linux runner ([self-hosted, Linux, ARM64, neboloop])
+#   - release-runners: the orchestration runners (neboloop-orch)
 # A pull request from a fork runs nothing here: fork PRs get no secrets and
 # never run on our machines (the jobs below check the head repo). The Mac and
 # Windows boxes also sign releases, so no pull request runs on them, not even
@@ -29,8 +29,8 @@ env:
 jobs:
   # ─── x86 runner: a DigitalOcean droplet that exists only for this run ───
   # GitHub-hosted runners are never used (the org's Actions budget is spent).
-  # This job only calls doctl and gh, on the stadium orchestration runners;
-  # the droplet boots from the nebo-runner-amd64-base snapshot with a
+  # This job only calls doctl and gh, on the orchestration runners;
+  # the droplet boots from a prebuilt snapshot with a
   # just-in-time registration good for ONE job, and the -down job deletes it.
   linux-runner:
     # Main only: the workspace needs nebo-comm (private NeboLoop/nebo), and the
@@ -38,7 +38,7 @@ jobs:
     if: ${{ github.event_name == 'push' }}
     runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only
     steps:
-      # Install only. Up to four jobs share this VM's HOME, and `doctl auth
+      # Install only. Up to four jobs share this runner's HOME, and `doctl auth
       # init` in each rewrote one shared config file under the others. Every
       # doctl call takes the token from the environment and a config dir of
       # its own job.
@@ -84,7 +84,7 @@ jobs:
           sed -i "s|__JIT__|$JIT|" "$ud"
           # --ssh-keys: with no key DigitalOcean emails the owner a root
           # password for every droplet. Nobody logs in.
-          # nyc3 capacity comes and goes per size (a 422 "not available");
+          # Region capacity comes and goes per size (a 422 "not available");
           # any other error is fatal.
           id=""
           for size in s-8vcpu-16gb s-8vcpu-16gb-amd s-8vcpu-16gb-intel s-4vcpu-16gb-320gb-intel; do
@@ -185,7 +185,7 @@ jobs:
     name: macos
     if: ${{ github.event_name == 'push' }} # never a pull request: this box signs releases
     environment: nebo-read
-    runs-on: [self-hosted, macOS, stadium-mac] # the house Mac mini
+    runs-on: [self-hosted, macOS, stadium-mac] # a self-hosted Mac
     steps:
       - uses: actions/checkout@v4
       # nebo-comm is a git dependency on NeboLoop/nebo, which is private. A
@@ -221,7 +221,7 @@ jobs:
   windows:
     name: windows (cargo check, Windows tests)
     if: ${{ github.event_name == 'push' }} # never a pull request: this box signs releases
-    runs-on: [self-hosted, Windows, X64, stadium-win] # the house Windows box
+    runs-on: [self-hosted, Windows, X64, stadium-win] # a self-hosted Windows runner
     env:
       RUSTC_WRAPPER: ""
       # Beside the checkout, so the build survives checkout's wipe of the
@@ -230,7 +230,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The house box's runner service (NETWORK SERVICE) has a Restricted
+      # The Windows runner's service (NETWORK SERVICE) has a Restricted
       # execution policy and no Git bash or PowerShell 7 on its PATH; the
       # same prep as release-build.yml's build-windows (see that step's comment).
       - name: Runner prep (no admin needed)
@@ -353,7 +353,7 @@ jobs:
         working-directory: sdk/python
       - run: scripts/oal-proof.sh target/debug
 
-  # Guards the release workflow: its builds run on the house machines, never
+  # Guards the release workflow: its builds run on our own machines, never
   # on GitHub-hosted runners. See scripts/check-release-runners.py.
   release-runners:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
