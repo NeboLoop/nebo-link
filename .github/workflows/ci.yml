@@ -305,11 +305,36 @@ jobs:
   oal-proof:
     name: OAL proof (nebo-link, relay, LAN, SDKs)
     needs: [sdk]
+    # Main only: it builds nebo-link, which needs nebo-comm (private
+    # NeboLoop/nebo), read with the key kept from pull requests (nebo-read).
+    # A pull request passed here only while the VM's cargo cache still held
+    # nebo-comm.
+    if: ${{ github.event_name == 'push' }}
+    environment: nebo-read
     runs-on: [self-hosted, Linux, ARM64, neboloop]
     env:
       UV_PYTHON: "3.12"
     steps:
       - uses: actions/checkout@v4
+      # nebo-comm is a git dependency on NeboLoop/nebo, which is private. A
+      # read-only deploy key on nebo, kept only in the nebo-read environment
+      # (main and v* tags only, never a pull request), fetches it. The key
+      # lives in this job's temp dir; git uses it only for NeboLoop/nebo.
+      - name: Read access to NeboLoop/nebo (the nebo-comm git dependency)
+        shell: bash
+        env:
+          NEBO_READ_KEY: ${{ secrets.NEBO_READ_KEY }}
+        run: |
+          key="$RUNNER_TEMP/nebo-read-key"; hosts="$RUNNER_TEMP/nebo-read-known-hosts"
+          ( umask 077; printf '%s\n' "$NEBO_READ_KEY" > "$key" )
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$hosts"
+          {
+            echo "CARGO_NET_GIT_FETCH_WITH_CLI=true"
+            echo "GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts"
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=url.ssh://git@github.com/NeboLoop/nebo.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/NeboLoop/nebo"
+          } >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p nebo-link -p oal-relay -p oal-conformance --locked
