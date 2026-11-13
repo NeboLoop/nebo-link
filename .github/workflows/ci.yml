@@ -5,7 +5,8 @@
 # org's Actions budget is capped; no-hosted-runners.yml enforces it):
 #   - Linux tests: a DigitalOcean x86 droplet that exists only for this run
 #   - macOS tests: a self-hosted Mac ([self-hosted, macOS, stadium-mac]), main only
-#   - Windows: a self-hosted Windows runner ([self-hosted, Windows, X64, stadium-win]), main only
+#   - Windows: a self-hosted Windows runner ([self-hosted, Windows, X64, stadium-win]), main only,
+#     while the repo variable WINDOWS_BUILD_ENABLED is "true"
 #   - SDKs and the OAL proof: a self-hosted Linux runner ([self-hosted, Linux, ARM64, neboloop])
 #   - release-runners: the orchestration runners (neboloop-orch)
 # A pull request from a fork runs nothing here: fork PRs get no secrets and
@@ -220,7 +221,10 @@ jobs:
   # service under its windowless console host.
   windows:
     name: windows (cargo check, Windows tests)
-    if: ${{ github.event_name == 'push' }} # never a pull request: this box signs releases
+    # Never a pull request (this box signs releases), and only while Windows is
+    # on: the repo variable WINDOWS_BUILD_ENABLED, the same switch as the
+    # release (release-build.yml), so nothing waits on the box while it is off.
+    if: ${{ github.event_name == 'push' && vars.WINDOWS_BUILD_ENABLED == 'true' }}
     runs-on: [self-hosted, Windows, X64, stadium-win] # a self-hosted Windows runner
     env:
       RUSTC_WRAPPER: ""
