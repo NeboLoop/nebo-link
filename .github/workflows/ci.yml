@@ -33,7 +33,9 @@ jobs:
   # the droplet boots from the nebo-runner-amd64-base snapshot with a
   # just-in-time registration good for ONE job, and the -down job deletes it.
   linux-runner:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Main only: the workspace needs nebo-comm (private NeboLoop/nebo), and the
+    # key that reads it is kept from pull requests (nebo-read environment).
+    if: ${{ github.event_name == 'push' }}
     runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only
     steps:
       # Install only. Up to four jobs share this VM's HOME, and `doctl auth
@@ -114,9 +116,29 @@ jobs:
   linux:
     name: linux
     needs: [linux-runner]
+    environment: nebo-read
     runs-on: [self-hosted, Linux, X64, "nebo-link-ci-${{ github.run_id }}"]
     steps:
       - uses: actions/checkout@v4
+      # nebo-comm is a git dependency on NeboLoop/nebo, which is private. A
+      # read-only deploy key on nebo, kept only in the nebo-read environment
+      # (main and v* tags only, never a pull request), fetches it. The key
+      # lives in this job's temp dir; git uses it only for NeboLoop/nebo.
+      - name: Read access to NeboLoop/nebo (the nebo-comm git dependency)
+        shell: bash
+        env:
+          NEBO_READ_KEY: ${{ secrets.NEBO_READ_KEY }}
+        run: |
+          key="$RUNNER_TEMP/nebo-read-key"; hosts="$RUNNER_TEMP/nebo-read-known-hosts"
+          ( umask 077; printf '%s\n' "$NEBO_READ_KEY" > "$key" )
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$hosts"
+          {
+            echo "CARGO_NET_GIT_FETCH_WITH_CLI=true"
+            echo "GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts"
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=url.ssh://git@github.com/NeboLoop/nebo.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/NeboLoop/nebo"
+          } >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -130,7 +152,7 @@ jobs:
   # deletes by name, so it never kills the other job's droplet.
   linux-runner-down:
     needs: [linux-runner, linux]
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && github.event_name == 'push' }}
     runs-on: [self-hosted, Linux, ARM64, neboloop-orch] # orchestration only
     steps:
       - uses: digitalocean/action-doctl@v2
@@ -162,9 +184,29 @@ jobs:
   macos:
     name: macos
     if: ${{ github.event_name == 'push' }} # never a pull request: this box signs releases
+    environment: nebo-read
     runs-on: [self-hosted, macOS, stadium-mac] # the house Mac mini
     steps:
       - uses: actions/checkout@v4
+      # nebo-comm is a git dependency on NeboLoop/nebo, which is private. A
+      # read-only deploy key on nebo, kept only in the nebo-read environment
+      # (main and v* tags only, never a pull request), fetches it. The key
+      # lives in this job's temp dir; git uses it only for NeboLoop/nebo.
+      - name: Read access to NeboLoop/nebo (the nebo-comm git dependency)
+        shell: bash
+        env:
+          NEBO_READ_KEY: ${{ secrets.NEBO_READ_KEY }}
+        run: |
+          key="$RUNNER_TEMP/nebo-read-key"; hosts="$RUNNER_TEMP/nebo-read-known-hosts"
+          ( umask 077; printf '%s\n' "$NEBO_READ_KEY" > "$key" )
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$hosts"
+          {
+            echo "CARGO_NET_GIT_FETCH_WITH_CLI=true"
+            echo "GIT_SSH_COMMAND=ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts"
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=url.ssh://git@github.com/NeboLoop/nebo.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/NeboLoop/nebo"
+          } >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
